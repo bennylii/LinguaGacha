@@ -102,6 +102,26 @@ describe("AppSettingsCommandService", () => {
     expect(f.publish).not.toHaveBeenCalled();
   });
 
+  it("拒绝非法代理模式与地址并保留已保存的代理设置", async () => {
+    const f = await create_service();
+    await f.service.update({ network_proxy_mode: "proxy", network_proxy_address: "10.0.0.5:1080" });
+
+    await expect(f.service.update({ network_proxy_mode: "unknown" })).rejects.toMatchObject({
+      code: "request.validation_failed",
+      public_details: { field: "network_proxy_mode" },
+    });
+    await expect(
+      f.service.update({ network_proxy_address: "socks5://10.0.0.5:1080" }),
+    ).rejects.toMatchObject({
+      code: "request.validation_failed",
+      public_details: { field: "network_proxy_address" },
+    });
+    expect(f.settings.read_network_proxy_policy()).toEqual({
+      mode: "proxy",
+      address: "10.0.0.5:1080",
+    });
+  });
+
   it("没有工程时语言只保存为应用设置", async () => {
     const f = await create_service();
     f.session.clear();

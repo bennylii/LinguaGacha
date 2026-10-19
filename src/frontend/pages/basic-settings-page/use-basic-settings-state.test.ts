@@ -195,4 +195,27 @@ describe("useBasicSettingsState", () => {
     ]);
     expect(latest_state?.snapshot.request_timeout).toBe(600);
   });
+
+  it("代理模式与地址按各自字段提交，任务期间同样可保存", async () => {
+    runtime_fixture.current.runtime_snapshot = { revision: 1, owner: "agent" };
+    vi.mocked(api_fetch).mockResolvedValue({
+      settings: create_settings_snapshot({
+        network_proxy_mode: "proxy",
+        network_proxy_address: "10.0.0.5:1080",
+      }),
+    } as never);
+    await render_hook();
+    await act(async () => {
+      await latest_state?.update_network_proxy_mode("proxy");
+      await latest_state?.update_network_proxy_address("10.0.0.5:1080");
+    });
+    expect(vi.mocked(api_fetch).mock.calls).toEqual([
+      ["/api/settings/update", { network_proxy_mode: "proxy" }],
+      ["/api/settings/update", { network_proxy_address: "10.0.0.5:1080" }],
+    ]);
+    expect(latest_state?.snapshot).toMatchObject({
+      network_proxy_mode: "proxy",
+      network_proxy_address: "10.0.0.5:1080",
+    });
+  });
 });

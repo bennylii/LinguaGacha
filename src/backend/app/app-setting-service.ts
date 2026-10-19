@@ -1,9 +1,13 @@
 import type { SettingsSnapshotResponse } from "../../shared/settings";
-import type { SettingSnapshot } from "../../domain/setting";
+import type { NetworkProxyPolicy, SettingSnapshot } from "../../domain/setting";
 import type { JsonRecord, JsonValue } from "../../domain/json";
 import { AppPathService } from "./app-path-service";
 import { JsonTool } from "../../shared/utils/json-tool";
-import { Setting } from "../../domain/setting";
+import {
+  Setting,
+  normalize_network_proxy_address,
+  normalize_network_proxy_mode,
+} from "../../domain/setting";
 import { NativeFs, default_native_fs } from "../../native/native-fs";
 
 interface AppSettingsStreamPublisher {
@@ -139,6 +143,17 @@ export class AppSettingService {
    */
   public read_app_language(): JsonValue {
     return this.read_setting_entity().to_json()["app_language"] ?? "ZH";
+  }
+
+  /**
+   * 出站请求按此策略解析路由；每次请求重新读取，改设置后下一次请求即生效。
+   */
+  public read_network_proxy_policy(): NetworkProxyPolicy {
+    const setting = this.read_setting_entity().to_json();
+    return {
+      mode: normalize_network_proxy_mode(setting["network_proxy_mode"]),
+      address: normalize_network_proxy_address(setting["network_proxy_address"]),
+    };
   }
 
   /**

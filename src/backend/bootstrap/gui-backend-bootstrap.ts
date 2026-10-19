@@ -11,6 +11,7 @@ import { ApiGatewayServer } from "../api/api-gateway-server";
 import { ApiStreamHub } from "../api/api-stream-hub";
 import { t_main_log } from "../log/log-text";
 import type { SystemProxyResolver } from "../network/system-proxy-http-client";
+import type { NetworkProxyPolicy } from "../../domain/setting";
 import type { BackendWorkerExecution } from "../worker/worker-execution";
 import { AppError } from "../../shared/error";
 import type { LogTargets } from "../../shared/log";
@@ -37,6 +38,7 @@ export interface GuiBackendBootstrapStartResult {
   apiBaseUrl: string;
   backendServices: BackendServices;
   readAppLanguage: () => unknown;
+  networkProxy: NetworkProxyPolicy; // 宿主据此配置 Chromium 自身的代理
 }
 
 /** GUI Backend 的完整组合根。Agent、SSE 与 Gateway 在该入口恒定存在。 */
@@ -121,7 +123,7 @@ export class GuiBackendBootstrap {
       const runner = new AgentWorkspaceRunner({
         paths: resources.paths,
         runtimeDirectory: this.options.workspaceRuntimeDirectory,
-        systemProxyResolver: this.options.systemProxyResolver,
+        systemProxyResolver: resources.proxyResolver, // 子进程代理路由与后端同源
       });
       const workspace = new AgentWorkspaceService({
         images,
@@ -186,6 +188,7 @@ export class GuiBackendBootstrap {
         apiBaseUrl: gateway_result.baseUrl,
         backendServices: services,
         readAppLanguage: () => resources.settings.read_app_language(),
+        networkProxy: resources.settings.read_network_proxy_policy(),
       };
     } catch (error) {
       this.state = "failed";

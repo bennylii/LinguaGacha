@@ -158,6 +158,29 @@ describe("AppSettingService", () => {
     ]);
   });
 
+  it("代理策略读取归一存储值，缺省与非法值回默认", () => {
+    const { service, paths, config_path } = create_service();
+    expect(service.read_network_proxy_policy()).toEqual({
+      mode: "system",
+      address: "127.0.0.1:6789",
+    });
+
+    write_config(config_path, {
+      network_proxy_mode: "proxy",
+      network_proxy_address: " 10.0.0.5:1080 ",
+    });
+    expect(new AppSettingService(paths).read_network_proxy_policy()).toEqual({
+      mode: "proxy",
+      address: "10.0.0.5:1080",
+    });
+
+    write_config(config_path, { network_proxy_mode: "unknown", network_proxy_address: "bad" });
+    expect(new AppSettingService(paths).read_network_proxy_policy()).toEqual({
+      mode: "system",
+      address: "127.0.0.1:6789",
+    });
+  });
+
   it("完整设置读取使用实例级缓存且保存后刷新缓存", () => {
     const { service, config_path } = create_service();
     write_config(config_path, { app_language: "ZH" });

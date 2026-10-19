@@ -177,6 +177,7 @@ export async function run_backend_runtime(args: {
       appVersion: start_result.backendServices.app.metadata.read_version(),
       berserkerUpdateRootDir:
         start_result.backendServices.app.paths.get_berserker_update_root_dir(),
+      networkProxy: start_result.networkProxy,
     };
     args.port.postMessage({ type: "ready", data: ready });
   } catch (error) {

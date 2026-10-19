@@ -71,6 +71,8 @@ function create_basic_settings_state_fixture() {
       project_fixed_path: "",
       output_folder_open_on_finish: false,
       request_timeout: 300,
+      network_proxy_mode: "system",
+      network_proxy_address: "127.0.0.1:6789",
     },
     pending_state: {
       source_language: false,
@@ -78,6 +80,8 @@ function create_basic_settings_state_fixture() {
       project_save_mode: false,
       output_folder_open_on_finish: false,
       request_timeout: false,
+      network_proxy_mode: false,
+      network_proxy_address: false,
     },
     runtime_locked: false,
     update_source_language: vi.fn(async (_next_language: string) => {}),
@@ -85,6 +89,8 @@ function create_basic_settings_state_fixture() {
     update_project_save_mode: vi.fn(async (_next_mode: "MANUAL" | "FIXED" | "SOURCE") => {}),
     update_output_folder_open_on_finish: vi.fn(async (_next_checked: boolean) => {}),
     update_request_timeout: vi.fn(async (_next_value: number) => {}),
+    update_network_proxy_mode: vi.fn(async (_next_mode: "system" | "proxy" | "direct") => {}),
+    update_network_proxy_address: vi.fn(async (_next_address: string) => {}),
   };
 }
 
@@ -150,6 +156,16 @@ describe("BasicSettingsPage", () => {
     return input;
   }
 
+  function get_network_proxy_address_input(): HTMLInputElement {
+    const input = container?.querySelector('input[type="text"]');
+
+    if (!(input instanceof HTMLInputElement)) {
+      throw new Error("未找到代理地址输入框。");
+    }
+
+    return input;
+  }
+
   it("输入请求超时时间时只更新本地草稿，失焦后再提交", async () => {
     await mount_page();
     const input = get_request_timeout_input();
@@ -188,6 +204,56 @@ describe("BasicSettingsPage", () => {
     expect(push_toast_mock).toHaveBeenCalledWith(
       "app.feedback.save_failed",
       "basic_settings_page.feedback.request_timeout_invalid",
+    );
+  });
+
+  it("非自定义代理模式下地址输入禁用", async () => {
+    await mount_page();
+
+    expect(get_network_proxy_address_input().disabled).toBe(true);
+  });
+
+  it("自定义代理模式下失焦提交裁剪后的地址", async () => {
+    basic_settings_state_fixture.current!.snapshot.network_proxy_mode = "proxy";
+    await mount_page();
+    const input = get_network_proxy_address_input();
+    expect(input.disabled).toBe(false);
+
+    await act(async () => {
+      set_input_value(input, " 10.0.0.5:1080 ");
+    });
+    expect(get_current_basic_settings_state().update_network_proxy_address).not.toHaveBeenCalled();
+
+    await act(async () => {
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(
+      get_current_basic_settings_state().update_network_proxy_address,
+    ).toHaveBeenCalledExactlyOnceWith("10.0.0.5:1080");
+  });
+
+  it("提交非法代理地址时标记红框并弹 toast", async () => {
+    basic_settings_state_fixture.current!.snapshot.network_proxy_mode = "proxy";
+    await mount_page();
+    const input = get_network_proxy_address_input();
+
+    await act(async () => {
+      set_input_value(input, "socks5://127.0.0.1:1080");
+    });
+
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+
+    await act(async () => {
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(get_current_basic_settings_state().update_network_proxy_address).not.toHaveBeenCalled();
+    expect(push_toast_mock).toHaveBeenCalledWith(
+      "app.feedback.save_failed",
+      "basic_settings_page.feedback.network_proxy_address_invalid",
     );
   });
 });

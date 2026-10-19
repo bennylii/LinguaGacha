@@ -4,6 +4,8 @@ import {
   PROJECT_SETTING_KEYS,
   normalize_project_settings_snapshot,
   is_agent_approval_mode,
+  is_network_proxy_address,
+  is_network_proxy_mode,
 } from "../../domain/setting";
 import type { JsonRecord, MutableJsonRecord } from "../../domain/json";
 import { AppError } from "../../shared/error";
@@ -12,6 +14,16 @@ import type { RuntimeOperationGate } from "../runtime-operation-gate";
 import type { ProjectSessionState } from "../project/project-session-state";
 import type { ProjectContentService } from "../project/project-content-service";
 import type { AppSettingService } from "./app-setting-service";
+
+/** 需要写入前校验的字段：非法枚举与代理地址直接拒绝，避免页面草稿或外部调用落盘。 */
+const SETTING_WRITE_CHECKS: readonly (readonly [
+  key: string,
+  is_valid: (value: unknown) => boolean,
+])[] = [
+  ["agent_approval_mode", is_agent_approval_mode],
+  ["network_proxy_mode", is_network_proxy_mode],
+  ["network_proxy_address", is_network_proxy_address],
+];
 
 /** 设置命令拥有应用配置与当前工程同步的完整边界；持久化仍由各自服务负责。 */
 export class AppSettingsCommandService {
@@ -25,13 +37,10 @@ export class AppSettingsCommandService {
 
   /** 保存用户修改；涉及已加载工程时统一完成同步与失败补偿。 */
   public async update(request: JsonRecord): Promise<SettingsUpdateResponse> {
-    if (
-      Object.hasOwn(request, "agent_approval_mode") &&
-      !is_agent_approval_mode(request["agent_approval_mode"])
-    ) {
-      throw new AppError("request.validation_failed", {
-        public_details: { field: "agent_approval_mode" },
-      });
+    for (const [key, is_valid] of SETTING_WRITE_CHECKS) {
+      if (Object.hasOwn(request, key) && !is_valid(request[key])) {
+        throw new AppError("request.validation_failed", { public_details: { field: key } });
+      }
     }
     if (
       !this.session.snapshot().loaded ||

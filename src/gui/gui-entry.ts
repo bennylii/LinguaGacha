@@ -6,6 +6,7 @@ import * as AppErrors from "../shared/error";
 import { create_pdf_host } from "../native/pdf-host";
 import { prepare_agent_image } from "../native/agent-image-host";
 import type { BackendRuntimeReady } from "../shared/backend-runtime";
+import type { NetworkProxyPolicy } from "../domain/setting";
 import { register_desktop_ipc_handlers } from "./shell/desktop-ipc-host";
 import { pick_save_path } from "./shell/path-dialog";
 import {
@@ -28,6 +29,8 @@ export interface GuiEntryOptions {
   desktopBundleDir: string; // 产品入口解析出的桌面 bundle 根目录
   backendRuntimeWorkerEntryUrl: URL;
 }
+
+const PROXY_BYPASS_RULES = "localhost,127.0.0.1,[::1]"; // 本机回环固定直连，与后端路由保持一致
 
 /**
  * 启动 Electron GUI 入口；模块导入本身不注册 Electron 事件，便于顶层 index 分发 CLI。
@@ -108,6 +111,22 @@ export function run_gui_entry(options: GuiEntryOptions): void {
       }
     }
   };
+
+  /**
+   * 按设置里的代理模式配置 Chromium 自身的网络栈；后端出站请求另按同一设置逐次解析。
+   */
+  async function apply_network_proxy(policy: NetworkProxyPolicy): Promise<void> {
+    if (policy.mode === "proxy") {
+      // setProxy 使用 Chromium 代理规则格式（host:port），不是 resolveProxy 返回的 PAC 格式。
+      await session.defaultSession.setProxy({
+        mode: "fixed_servers",
+        proxyRules: policy.address,
+        proxyBypassRules: PROXY_BYPASS_RULES,
+      });
+      return;
+    }
+    await session.defaultSession.setProxy({ mode: policy.mode === "direct" ? "direct" : "system" });
+  }
 
   /**
    * 窗口在 Backend ready 后创建，API 地址与版本共用该启动快照。
@@ -233,6 +252,8 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     try {
       const backend_start_result = await backend_runtime.start();
       backend_ready = backend_start_result;
+      // 后端出站请求已按设置逐次解析；此处让 Chromium 自身（更新检查与下载）使用同一设置。
+      await apply_network_proxy(backend_start_result.networkProxy);
       desktop_update_service = new DesktopUpdateService({
         appRoot: app_root,
         updateRootDir: backend_start_result.berserkerUpdateRootDir,

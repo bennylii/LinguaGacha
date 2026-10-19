@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_NETWORK_PROXY_ADDRESS,
   DEFAULT_SETTING,
+  is_network_proxy_address,
+  is_network_proxy_mode,
+  normalize_network_proxy_address,
   normalize_project_settings_snapshot,
   normalize_setting_snapshot,
   SETTING_SNAPSHOT_SCHEMA,
@@ -57,6 +61,44 @@ describe("设置快照", () => {
       target_language: DEFAULT_SETTING["target_language"],
       request_timeout: DEFAULT_SETTING["request_timeout"],
     });
+  });
+
+  it("代理模式与地址按领域取值归一，非法值回到默认", () => {
+    expect(
+      normalize_setting_snapshot({
+        network_proxy_mode: "unknown",
+        network_proxy_address: "socks5://127.0.0.1:1080",
+      }),
+    ).toMatchObject({
+      network_proxy_mode: "system",
+      network_proxy_address: DEFAULT_NETWORK_PROXY_ADDRESS,
+    });
+    expect(
+      normalize_setting_snapshot({
+        network_proxy_mode: "proxy",
+        network_proxy_address: " 10.0.0.5:1080 ",
+      }),
+    ).toMatchObject({
+      network_proxy_mode: "proxy",
+      network_proxy_address: "10.0.0.5:1080",
+    });
+    expect(is_network_proxy_mode("direct")).toBe(true);
+    expect(is_network_proxy_mode("DIRECT")).toBe(false);
+  });
+
+  it("代理地址只接受主机:端口，端口范围与 IPv6 方括号按规则收窄", () => {
+    expect(is_network_proxy_address("127.0.0.1:6789")).toBe(true);
+    expect(is_network_proxy_address("proxy.example:65535")).toBe(true);
+    expect(is_network_proxy_address("[::1]:1080")).toBe(true);
+    expect(is_network_proxy_address("127.0.0.1:0")).toBe(false);
+    expect(is_network_proxy_address("127.0.0.1:65536")).toBe(false);
+    expect(is_network_proxy_address("127.0.0.1")).toBe(false);
+    expect(is_network_proxy_address("http://127.0.0.1:1080")).toBe(false);
+    expect(is_network_proxy_address("")).toBe(false);
+    expect(is_network_proxy_address(6789)).toBe(false);
+    expect(normalize_network_proxy_address(" socks5://127.0.0.1:1080 ")).toBe(
+      DEFAULT_NETWORK_PROXY_ADDRESS,
+    );
   });
 
   it("结果检查旧字段不会进入设置快照", () => {

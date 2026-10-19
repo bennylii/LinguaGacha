@@ -8,7 +8,7 @@
   gap: var(--ui-list-gap-dense);
 }
 
-.basic-settings-page__number-field {
+.basic-settings-page__input-field {
   display: flex;
   align-items: center;
 }

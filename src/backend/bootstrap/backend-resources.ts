@@ -8,7 +8,9 @@ import { run_startup_migrations } from "../migration/startup-migrations";
 import {
   SystemProxyHttpClient,
   type SystemProxyResolver,
+  type TransportFailure,
 } from "../network/system-proxy-http-client";
+import { create_proxy_policy_resolver } from "../network/proxy-policy-resolver";
 import type { LogTargets } from "../../shared/log";
 import { write_bootstrap_error, write_bootstrap_log } from "./bootstrap-log";
 
@@ -16,7 +18,7 @@ export interface BackendResourceOptions {
   appRoot: string; // 安装根与便携数据位置
   builtinRoot: string; // 当前版本只读内置资产根
   logTargets?: Partial<LogTargets>; // 入口按 GUI 或 CLI 选择日志出口
-  systemProxyResolver: SystemProxyResolver; // Electron session 提供的系统代理事实
+  systemProxyResolver: SystemProxyResolver; // 宿主提供的系统代理事实，只在跟随系统模式使用
 }
 
 /**
@@ -32,6 +34,7 @@ export class BackendResources {
     public readonly settings: AppSettingService,
     public readonly database: ProjectDatabase,
     public readonly logManager: LogManager,
+    public readonly proxyResolver: SystemProxyResolver, // 按设置解析路由，工作区子进程与后端共用同一策略
     private readonly system_proxy_http_client: SystemProxyHttpClient,
   ) {}
 
@@ -58,7 +61,16 @@ export class BackendResources {
       await run_startup_migrations({ paths, log_manager });
       const settings = new AppSettingService(paths);
       set_main_log_language_reader(() => settings.read_app_language());
-      system_proxy_http_client = new SystemProxyHttpClient(options.systemProxyResolver);
+      const proxy_resolver = create_proxy_policy_resolver(options.systemProxyResolver, () =>
+        settings.read_network_proxy_policy(),
+      );
+      system_proxy_http_client = new SystemProxyHttpClient(proxy_resolver, {
+        onTransportFailure: (failure) =>
+          log_manager.warning(t_main_log("app.diagnostic.network.transport_failure"), {
+            error: failure.error,
+            context: describe_transport_failure(failure),
+          }),
+      });
       system_proxy_http_client.install_as_global_fetch();
       return new BackendResources(
         paths,
@@ -66,6 +78,7 @@ export class BackendResources {
         settings,
         database,
         log_manager,
+        proxy_resolver,
         system_proxy_http_client,
       );
     } catch (error) {
@@ -103,6 +116,18 @@ export class BackendResources {
       throw new AggregateError(failures, "Failed to close Backend resources.");
     }
   }
+}
+
+/** 传输失败只记录目标来源与所选路由；URL 去掉查询串，避免把凭据写进日志。 */
+function describe_transport_failure(failure: TransportFailure): Record<string, string> {
+  const target = new URL(failure.url);
+  const route =
+    failure.route === null
+      ? "unresolved"
+      : failure.route.kind === "direct"
+        ? "direct"
+        : `${failure.route.kind} ${failure.route.uri}`;
+  return { url: `${target.origin}${target.pathname}`, route };
 }
 
 /** 生命周期清理收集全部失败，后续资源仍会继续释放。 */

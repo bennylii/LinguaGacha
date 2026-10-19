@@ -33,11 +33,24 @@ export type SystemProxyRoute =
   | { kind: "proxy"; uri: string }
   | { kind: "socks5"; uri: string };
 
+// 传输层失败在第三方 SDK 里只剩通用文案，此处保留路由与原始原因供调用方记录。
+export interface TransportFailure {
+  url: string;
+  route: SystemProxyRoute | null; // 路由解析本身失败时没有可用路由
+  error: unknown;
+}
+
+export interface SystemProxyHttpClientOptions {
+  redirects?: "error" | "request";
+  onTransportFailure?: (failure: TransportFailure) => void; // 只上报事实，抛出的错误不变
+}
+
 /**
  * 当前线程唯一的普通远端 HTTP Client；每次请求重新解析路由，只缓存可复用的代理连接池。
  */
 export class SystemProxyHttpClient {
   private readonly redirects: "error" | "request"; // 后端禁止重定向；工作区遵循 fetch 调用者选项
+  private readonly on_transport_failure: ((failure: TransportFailure) => void) | null;
   private readonly resolver: SystemProxyResolver; // 请求时读取 Electron 当前路由，不保存启动快照
   private readonly direct_dispatcher: Dispatcher; // loopback 与显式 DIRECT 共用的自有连接池
   private readonly proxy_dispatchers = new Map<string, Dispatcher>(); // 同一路由复用连接池
@@ -45,11 +58,9 @@ export class SystemProxyHttpClient {
   private disposed = false; // 释放后拒绝新请求，避免重建已关闭资源
 
   /** 创建自有直连池；代理池延迟到首次命中对应路由时创建。 */
-  public constructor(
-    resolver: SystemProxyResolver,
-    options: { redirects: "error" | "request" } = { redirects: "error" },
-  ) {
-    this.redirects = options.redirects;
+  public constructor(resolver: SystemProxyResolver, options: SystemProxyHttpClientOptions = {}) {
+    this.redirects = options.redirects ?? "error";
+    this.on_transport_failure = options.onTransportFailure ?? null;
     this.resolver = resolver;
     this.direct_dispatcher = new Agent();
   }
@@ -62,18 +73,35 @@ export class SystemProxyHttpClient {
     const url = read_request_url(input);
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
     signal?.throwIfAborted();
-    const dispatcher = this.resolve_dispatcher(
-      await resolve_system_proxy_route(this.resolver, url.href, signal),
-    );
-    signal?.throwIfAborted();
-    const response = (await undici_fetch(input as Parameters<typeof undici_fetch>[0], {
-      ...(init as Parameters<typeof undici_fetch>[1]),
-      dispatcher,
-      ...(this.redirects === "error" ? { redirect: "error" as const } : {}),
-    })) as unknown as Response;
+    let route: SystemProxyRoute | null = null;
+    let response: Response;
+    // 只有路由解析与派发属于传输层；响应事实的采集失败不应记成传输失败。
+    try {
+      route = await resolve_system_proxy_route(this.resolver, url.href, signal);
+      const dispatcher = this.resolve_dispatcher(route);
+      signal?.throwIfAborted();
+      response = (await undici_fetch(input as Parameters<typeof undici_fetch>[0], {
+        ...(init as Parameters<typeof undici_fetch>[1]),
+        dispatcher,
+        ...(this.redirects === "error" ? { redirect: "error" as const } : {}),
+      })) as unknown as Response;
+    } catch (error) {
+      this.report_transport_failure({ url: url.href, route, error }, signal);
+      throw error;
+    }
     record_http_response_info(response);
     return response;
   };
+
+  /** 主动取消是调用方的正常控制流，只有真正的传输失败才上报。 */
+  private report_transport_failure(
+    failure: TransportFailure,
+    signal: AbortSignal | undefined,
+  ): void {
+    if (this.on_transport_failure === null) return;
+    if (signal?.aborted === true || is_abort_error(failure.error)) return;
+    this.on_transport_failure(failure);
+  }
 
   /** Backend 线程只有一个普通 HTTP transport，第三方 SDK 也从同一全局入口取用。 */
   public install_as_global_fetch(): void {
@@ -172,6 +200,15 @@ function build_proxy_uri(protocol: "http" | "https" | "socks5", target: string):
   } catch {
     return null;
   }
+}
+
+/** Node 与 Undici 的取消错误都归入 AbortError 语义，避免把调用方取消记成传输失败。 */
+function is_abort_error(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  return (
+    (error as { name?: unknown }).name === "AbortError" ||
+    (error as { code?: unknown }).code === "UND_ERR_ABORTED"
+  );
 }
 
 /** 本机模型端点不经过外部代理，覆盖 localhost、IPv6 loopback 与完整 127/8。 */

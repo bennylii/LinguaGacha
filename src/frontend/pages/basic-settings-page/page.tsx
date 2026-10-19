@@ -1,5 +1,6 @@
 import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
 import { type JSX, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { is_network_proxy_address } from "@domain/setting";
 
 import { parse_bounded_setting_number_draft } from "@frontend/features/settings-editor/setting-number-draft";
 import { get_language_label_key } from "@frontend/app/locale/language-label";
@@ -7,12 +8,15 @@ import { useI18n } from "@frontend/app/locale/locale-context";
 import "@frontend/pages/basic-settings-page/basic-settings-page.css";
 import {
   ALL_LANGUAGE_VALUE,
+  NETWORK_PROXY_MODE_LABEL_KEYS,
+  NETWORK_PROXY_MODE_OPTIONS,
   PROJECT_SAVE_MODE_LABEL_KEYS,
   PROJECT_SAVE_MODE_OPTIONS,
   REQUEST_TIMEOUT_MAX,
   REQUEST_TIMEOUT_MIN,
   SOURCE_LANGUAGE_CODES,
   TARGET_LANGUAGE_CODES,
+  is_network_proxy_mode,
   is_project_save_mode,
 } from "@frontend/pages/basic-settings-page/types";
 import { useBasicSettingsState } from "@frontend/pages/basic-settings-page/use-basic-settings-state";
@@ -40,12 +44,17 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
     return String(basic_settings_state.snapshot.request_timeout);
   });
   const [is_request_timeout_editing, set_is_request_timeout_editing] = useState(false);
+  const [network_proxy_address_draft, set_network_proxy_address_draft] = useState<string>(() => {
+    return basic_settings_state.snapshot.network_proxy_address;
+  });
+  const [is_network_proxy_address_editing, set_is_network_proxy_address_editing] = useState(false);
   const parsed_request_timeout = parse_bounded_setting_number_draft(
     request_timeout_draft,
     REQUEST_TIMEOUT_MIN,
     REQUEST_TIMEOUT_MAX,
   );
   const request_timeout_invalid = parsed_request_timeout === null;
+  const network_proxy_address_invalid = !is_network_proxy_address(network_proxy_address_draft);
   const source_language_options = useMemo(() => {
     return [
       {
@@ -79,6 +88,15 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
     });
   }, [t]);
 
+  const network_proxy_mode_options = useMemo(() => {
+    return NETWORK_PROXY_MODE_OPTIONS.map((mode) => {
+      return {
+        value: mode,
+        label: t(NETWORK_PROXY_MODE_LABEL_KEYS[mode]),
+      };
+    });
+  }, [t]);
+
   const project_save_mode_description =
     basic_settings_state.snapshot.project_save_mode === "FIXED" &&
     basic_settings_state.snapshot.project_fixed_path !== ""
@@ -96,6 +114,14 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
 
     set_request_timeout_draft(String(basic_settings_state.snapshot.request_timeout));
   }, [basic_settings_state.snapshot.request_timeout, is_request_timeout_editing]);
+
+  useEffect(() => {
+    if (is_network_proxy_address_editing) {
+      return;
+    }
+
+    set_network_proxy_address_draft(basic_settings_state.snapshot.network_proxy_address);
+  }, [basic_settings_state.snapshot.network_proxy_address, is_network_proxy_address_editing]);
 
   /** 校验输入后提交超时设置，无效草稿留在当前编辑状态。 */
   async function commit_request_timeout_draft(): Promise<void> {
@@ -125,6 +151,37 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
 
     event.preventDefault();
     void commit_request_timeout_draft();
+  }
+
+  /** 校验输入后提交代理地址，无效草稿留在当前编辑状态。 */
+  async function commit_network_proxy_address_draft(): Promise<void> {
+    const address = network_proxy_address_draft.trim();
+    if (!is_network_proxy_address(address)) {
+      push_error_toast(
+        t("app.feedback.save_failed"),
+        t("basic_settings_page.feedback.network_proxy_address_invalid"),
+      );
+      set_is_network_proxy_address_editing(true);
+      return;
+    }
+
+    if (address === basic_settings_state.snapshot.network_proxy_address) {
+      set_network_proxy_address_draft(address);
+      set_is_network_proxy_address_editing(false);
+      return;
+    }
+
+    await basic_settings_state.update_network_proxy_address(address);
+    set_is_network_proxy_address_editing(false);
+  }
+  /** Enter 与失焦共用提交入口。 */
+  function handle_network_proxy_address_key_down(event: KeyboardEvent<HTMLInputElement>): void {
+    if (event.key !== "Enter") {
+      return;
+    }
+
+    event.preventDefault();
+    void commit_network_proxy_address_draft();
   }
 
   return (
@@ -241,7 +298,7 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
           title={t("basic_settings_page.fields.request_timeout.title")}
           description={t("basic_settings_page.fields.request_timeout.description")}
           action={
-            <div className="basic-settings-page__number-field">
+            <div className="basic-settings-page__input-field">
               <Input
                 type="number"
                 min={REQUEST_TIMEOUT_MIN}
@@ -259,6 +316,65 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
                 onKeyDown={handle_request_timeout_key_down}
                 onFocus={() => {
                   set_is_request_timeout_editing(true);
+                }}
+              />
+            </div>
+          }
+        />
+        <SettingCardRow
+          action_width="content"
+          title={t("basic_settings_page.fields.network_proxy_mode.title")}
+          description={t("basic_settings_page.fields.network_proxy_mode.description")}
+          action={
+            <Select
+              items={network_proxy_mode_options}
+              value={basic_settings_state.snapshot.network_proxy_mode}
+              disabled={basic_settings_state.pending_state.network_proxy_mode}
+              onValueChange={(next_value) => {
+                if (next_value !== null && is_network_proxy_mode(next_value)) {
+                  void basic_settings_state.update_network_proxy_mode(next_value);
+                }
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {network_proxy_mode_options.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          }
+        />
+
+        <SettingCardRow
+          title={t("basic_settings_page.fields.network_proxy_address.title")}
+          description={t("basic_settings_page.fields.network_proxy_address.description")}
+          action={
+            <div className="basic-settings-page__input-field">
+              <Input
+                type="text"
+                value={network_proxy_address_draft}
+                aria-invalid={network_proxy_address_invalid || undefined}
+                disabled={
+                  basic_settings_state.snapshot.network_proxy_mode !== "proxy" ||
+                  basic_settings_state.pending_state.network_proxy_address
+                }
+                onChange={(event) => {
+                  set_is_network_proxy_address_editing(true);
+                  set_network_proxy_address_draft(event.target.value);
+                }}
+                onBlur={() => {
+                  void commit_network_proxy_address_draft();
+                }}
+                onKeyDown={handle_network_proxy_address_key_down}
+                onFocus={() => {
+                  set_is_network_proxy_address_editing(true);
                 }}
               />
             </div>

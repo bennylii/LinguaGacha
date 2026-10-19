@@ -44,6 +44,37 @@ describe("BackendResources", () => {
     expect(database_close).toHaveBeenCalledOnce();
   });
 
+  it("交付按设置解析路由的代理端口，改设置后下一次请求即生效", async () => {
+    const resolve_proxy = vi.fn(async () => "PROXY 127.0.0.1:7890");
+    const resources = await BackendResources.start({
+      ...create_options(),
+      systemProxyResolver: { resolveProxy: resolve_proxy },
+    });
+
+    try {
+      await expect(resources.proxyResolver.resolveProxy("https://api.example/v1")).resolves.toBe(
+        "PROXY 127.0.0.1:7890",
+      );
+      expect(resolve_proxy).toHaveBeenCalledOnce();
+
+      resources.settings.update_app_settings({ network_proxy_mode: "direct" });
+      await expect(resources.proxyResolver.resolveProxy("https://api.example/v1")).resolves.toBe(
+        "DIRECT",
+      );
+
+      resources.settings.update_app_settings({
+        network_proxy_mode: "proxy",
+        network_proxy_address: "10.0.0.5:1080",
+      });
+      await expect(resources.proxyResolver.resolveProxy("https://api.example/v1")).resolves.toBe(
+        "PROXY 10.0.0.5:1080",
+      );
+      expect(resolve_proxy).toHaveBeenCalledOnce();
+    } finally {
+      await resources.dispose();
+    }
+  });
+
   it("启动迁移失败时阻止后续初始化并释放启动资源", async () => {
     const failure = new Error("startup migration failed");
     vi.spyOn(migrations, "run_startup_migrations").mockRejectedValueOnce(failure);

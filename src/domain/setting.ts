@@ -27,6 +27,15 @@ export type ProjectSaveMode = (typeof PROJECT_SAVE_MODES)[number];
 /** 应用级工程写入审批偏好，跨对话、工程和应用重启保留。 */
 export const AGENT_APPROVAL_MODES = ["manual", "auto"] as const;
 export type AgentApprovalMode = (typeof AGENT_APPROVAL_MODES)[number];
+/** 出站请求的代理模式：跟随系统代理、使用设置里的地址、或完全直连。 */
+export const NETWORK_PROXY_MODES = ["system", "proxy", "direct"] as const;
+export type NetworkProxyMode = (typeof NETWORK_PROXY_MODES)[number];
+export const DEFAULT_NETWORK_PROXY_ADDRESS = "127.0.0.1:6789"; // 自定义模式的初始地址，常见本地代理混合端口
+/** 出站请求解析路由所需的最小代理策略。 */
+export interface NetworkProxyPolicy {
+  mode: NetworkProxyMode;
+  address: string; // 只有自定义代理模式使用
+}
 export const RECENT_PROJECT_SETTING_SCHEMA = Type.Object({
   path: Type.String(), // 最近工程路径。
   name: Type.String(), // 最近工程展示名。
@@ -42,6 +51,8 @@ export const SETTING_SNAPSHOT_SCHEMA = Type.Object(
     project_save_mode: Type.Enum(PROJECT_SAVE_MODES), // 新建工程的保存位置策略。
     project_fixed_path: Type.String(), // 固定保存模式使用的工程目录。
     output_folder_open_on_finish: Type.Boolean(), // 译文生成成功后是否打开输出目录。
+    network_proxy_mode: Type.Enum(NETWORK_PROXY_MODES), // 出站请求的代理模式。
+    network_proxy_address: Type.String(), // 自定义代理模式使用的 `主机:端口`。
     request_timeout: Type.Number(), // 等待模型回复的超时时间，单位为秒。
     preceding_lines_threshold: Type.Number(), // 单个翻译任务最多携带的参考上文行数。
     clean_ruby: Type.Boolean(), // 翻译文本的注音清理开关。
@@ -85,6 +96,8 @@ export const DEFAULT_SETTING: SettingSnapshot & JsonRecord = {
   project_save_mode: "MANUAL",
   project_fixed_path: "",
   output_folder_open_on_finish: false,
+  network_proxy_mode: "system",
+  network_proxy_address: DEFAULT_NETWORK_PROXY_ADDRESS,
   request_timeout: 180,
   preceding_lines_threshold: 0,
   clean_ruby: false,
@@ -112,6 +125,8 @@ export const DEFAULT_SETTING: SettingSnapshot & JsonRecord = {
 };
 
 const PROJECT_SAVE_MODE_SET = new Set<ProjectSaveMode>(PROJECT_SAVE_MODES);
+/** 代理地址接受主机名、IPv4 与方括号 IPv6，端口由 `is_network_proxy_address` 再校验范围。 */
+const NETWORK_PROXY_ADDRESS_PATTERN = /^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})$/;
 
 /**
  * Setting 是 userdata/config.json 的业务实体；文件名保留 config.json，但领域语义统一为设置
@@ -214,6 +229,8 @@ export class Setting {
     if (key === "app_language") {
       return normalize_app_language(value);
     }
+    if (key === "network_proxy_mode") return normalize_network_proxy_mode(value);
+    if (key === "network_proxy_address") return normalize_network_proxy_address(value);
     if (key === "project_save_mode") {
       return Setting.normalize_project_save_mode(value);
     }
@@ -264,6 +281,30 @@ export function is_agent_approval_mode(value: unknown): value is AgentApprovalMo
 /** 旧配置缺失或存储值无效时使用手动审批。 */
 export function normalize_agent_approval_mode(value: unknown): AgentApprovalMode {
   return is_agent_approval_mode(value) ? value : "manual";
+}
+
+/** 写入命令据此拒绝非法模式；读取配置时由归一化入口补默认值。 */
+export function is_network_proxy_mode(value: unknown): value is NetworkProxyMode {
+  return Check(SETTING_SNAPSHOT_SCHEMA.properties.network_proxy_mode, value);
+}
+
+/** 旧配置缺失或存储值无效时跟随系统代理，与加入设置前的行为一致。 */
+export function normalize_network_proxy_mode(value: unknown): NetworkProxyMode {
+  return is_network_proxy_mode(value) ? value : "system";
+}
+
+/** 地址只接受 `主机:端口`；其余写法属于未支持的代理规则，留待写入命令拒绝。 */
+export function is_network_proxy_address(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const matched = NETWORK_PROXY_ADDRESS_PATTERN.exec(value.trim());
+  if (matched === null) return false;
+  const port = Number(matched[2]);
+  return port >= 1 && port <= 65535;
+}
+
+/** 空值或非法地址回到默认地址，避免把不可用目标交给传输层。 */
+export function normalize_network_proxy_address(value: unknown): string {
+  return is_network_proxy_address(value) ? value.trim() : DEFAULT_NETWORK_PROXY_ADDRESS;
 }
 
 /**

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => {
     apiBaseUrl: "http://127.0.0.1:4567",
     berserkerUpdateRootDir: "E:/userdata/berserker",
     appVersion: "1.2.3",
+    networkProxy: { mode: "proxy", address: "127.0.0.1:6789" },
   };
   const backend_start = vi.fn(async () => ready);
   const backend_stop = vi.fn(async () => undefined);
@@ -68,6 +69,7 @@ const mocks = vi.hoisted(() => {
     app_exit: vi.fn(),
     app_quit: vi.fn(),
     resolve_proxy: vi.fn(async () => "DIRECT"),
+    set_proxy: vi.fn(async () => undefined),
     session_fetch: vi.fn(async () => new Response()),
     open_path: vi.fn(async () => ""),
     show_save_dialog: vi.fn(),
@@ -95,7 +97,11 @@ vi.mock("electron", () => ({
   },
   BrowserWindow: { getAllWindows: vi.fn(() => []) },
   session: {
-    defaultSession: { fetch: mocks.session_fetch, resolveProxy: mocks.resolve_proxy },
+    defaultSession: {
+      fetch: mocks.session_fetch,
+      resolveProxy: mocks.resolve_proxy,
+      setProxy: mocks.set_proxy,
+    },
   },
   shell: { openPath: mocks.open_path },
   dialog: { showSaveDialog: mocks.show_save_dialog },
@@ -151,6 +157,17 @@ describe("run_gui_entry", () => {
     });
     await vi.waitFor(() => expect(mocks.create_main_window).toHaveBeenCalledOnce());
 
+    expect(mocks.set_proxy).toHaveBeenCalledWith({
+      mode: "fixed_servers",
+      proxyRules: "127.0.0.1:6789",
+      proxyBypassRules: "localhost,127.0.0.1,[::1]",
+    });
+    expect(mocks.set_proxy.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mocks.backend_start.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(mocks.set_proxy.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.create_main_window.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     expect(mocks.backend_instances[0]).toMatchObject({
       workerEntryUrl: worker_url,
       appRoot: process.cwd(),
@@ -181,6 +198,30 @@ describe("run_gui_entry", () => {
       readAppLanguage: () => Promise<unknown>;
     };
     await expect(ipc_options.readAppLanguage()).resolves.toBe("ZH");
+  });
+
+  it.each([
+    ["system", { mode: "system" as const, address: "127.0.0.1:6789" }, { mode: "system" }],
+    [
+      "proxy",
+      { mode: "proxy" as const, address: "10.0.0.5:1080" },
+      {
+        mode: "fixed_servers",
+        proxyRules: "10.0.0.5:1080",
+        proxyBypassRules: "localhost,127.0.0.1,[::1]",
+      },
+    ],
+    ["direct", { mode: "direct" as const, address: "127.0.0.1:6789" }, { mode: "direct" }],
+  ])("按 ready 的 %s 代理模式配置默认会话", async (_name, networkProxy, expected) => {
+    mocks.backend_start.mockResolvedValueOnce({ ...mocks.ready, networkProxy });
+
+    run_gui_entry({
+      desktopBundleDir: "E:/app/dist-electron",
+      backendRuntimeWorkerEntryUrl: new URL("file:///backend-runtime-worker-entry.js"),
+    });
+    await vi.waitFor(() => expect(mocks.create_main_window).toHaveBeenCalledOnce());
+
+    expect(mocks.set_proxy).toHaveBeenCalledExactlyOnceWith(expected);
   });
 
   it("宿主打开目录并用主窗口弹出保存对话框，回传选择和取消", async () => {

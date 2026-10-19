@@ -15,6 +15,7 @@ import {
   REQUEST_TIMEOUT_MIN,
   build_basic_settings_snapshot,
   type BasicSettingsSnapshot,
+  type NetworkProxyMode,
   type ProjectSaveMode,
 } from "@frontend/pages/basic-settings-page/types";
 
@@ -24,6 +25,8 @@ const BASIC_SETTINGS_PENDING_FIELDS = [
   "project_save_mode",
   "output_folder_open_on_finish",
   "request_timeout",
+  "network_proxy_mode",
+  "network_proxy_address",
 ] as const;
 
 type UseBasicSettingsStateResult = {
@@ -35,6 +38,8 @@ type UseBasicSettingsStateResult = {
   update_project_save_mode: (next_mode: ProjectSaveMode) => Promise<void>;
   update_output_folder_open_on_finish: (next_checked: boolean) => Promise<void>;
   update_request_timeout: (next_value: number) => Promise<void>;
+  update_network_proxy_mode: (next_mode: NetworkProxyMode) => Promise<void>;
+  update_network_proxy_address: (next_address: string) => Promise<void>;
 };
 
 /**
@@ -147,6 +152,28 @@ export function useBasicSettingsState(): UseBasicSettingsStateResult {
     [commit_update, snapshot.request_timeout],
   );
 
+  const update_network_proxy_mode = useCallback(
+    async (next_mode: NetworkProxyMode): Promise<void> => {
+      if (snapshot.network_proxy_mode === next_mode) {
+        return;
+      }
+
+      await commit_update("network_proxy_mode", { network_proxy_mode: next_mode });
+    },
+    [commit_update, snapshot.network_proxy_mode],
+  );
+
+  const update_network_proxy_address = useCallback(
+    async (next_address: string): Promise<void> => {
+      if (snapshot.network_proxy_address === next_address) {
+        return;
+      }
+
+      await commit_update("network_proxy_address", { network_proxy_address: next_address });
+    },
+    [commit_update, snapshot.network_proxy_address],
+  );
+
   return {
     snapshot,
     pending_state,
@@ -156,5 +183,7 @@ export function useBasicSettingsState(): UseBasicSettingsStateResult {
     update_project_save_mode,
     update_output_folder_open_on_finish,
     update_request_timeout,
+    update_network_proxy_mode,
+    update_network_proxy_address,
   };
 }

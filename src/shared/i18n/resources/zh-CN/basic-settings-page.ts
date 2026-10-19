@@ -25,9 +25,23 @@ export const zh_cn_basic_settings_page = {
       title: "请求超时时间",
       description: "发起请求时等待模型回复的最长时间（秒），超时仍未收到回复，则会判断为任务失败",
     },
+    network_proxy_mode: {
+      title: "网络代理",
+      description: "设置模型请求与联网搜索使用的代理方式，修改后对后续请求立即生效",
+      options: {
+        system: "跟随系统代理",
+        proxy: "自定义代理",
+        direct: "直连",
+      },
+    },
+    network_proxy_address: {
+      title: "代理地址",
+      description: "自定义代理使用的地址，格式为主机:端口，例如 127.0.0.1:6789",
+    },
   },
   feedback: {
     request_timeout_invalid: "请求超时时间必须填写为有效范围内的数字 …",
     pick_directory_failed: "目录选择失败 …",
+    network_proxy_address_invalid: "代理地址必须填写为主机:端口 格式 …",
   },
 } as const;
