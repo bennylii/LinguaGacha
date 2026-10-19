@@ -110,6 +110,10 @@ export const de_de_app = {
     launching: "Wird verarbeitet …",
   },
   drop: {
+    select_multiple_unavailable:
+      "Es kann nur eine Datei oder ein Ordner gleichzeitig abgelegt werden",
+    select_unavailable:
+      "Der lokale Pfad der abgelegten Datei ist derzeit nicht verfügbar. Bitte verwenden Sie stattdessen die Dateiauswahl …",
     multiple_unavailable: "Es kann nur eine Datei gleichzeitig abgelegt werden",
     unavailable:
       "Der lokale Pfad der abgelegten Datei ist derzeit nicht verfügbar. Bitte verwenden Sie stattdessen die Dateiauswahl …",
@@ -224,6 +228,8 @@ export const de_de_app = {
     json_files: "JSON-Dateien (*.json)",
     excel_files: "Excel-Dateien (*.xlsx)",
     supported_txt_files: "Unterstützte Dateien (*.txt)",
+    font_files: "Schriftdateien (*.ttf *.otf)",
+    executable_files: "Ausführbare Dateien (*.exe)",
   },
   diagnostic: {
     agent: {

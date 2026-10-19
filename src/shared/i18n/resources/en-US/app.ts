@@ -107,6 +107,9 @@ export const en_us_app = {
     launching: "Processing …",
   },
   drop: {
+    select_multiple_unavailable: "Only one file or folder can be dropped at a time",
+    select_unavailable:
+      "The local path of the dropped file is unavailable right now. Please use the picker instead …",
     multiple_unavailable: "Only one file can be dropped at a time",
     unavailable:
       "The local path of the dropped file is unavailable right now. Please use the import picker instead …",
@@ -216,6 +219,8 @@ export const en_us_app = {
     json_files: "JSON files (*.json)",
     excel_files: "Excel files (*.xlsx)",
     supported_txt_files: "Supported files (*.txt)",
+    font_files: "Font files (*.ttf *.otf)",
+    executable_files: "Executable files (*.exe)",
   },
   diagnostic: {
     agent: {

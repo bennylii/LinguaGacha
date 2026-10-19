@@ -1,4 +1,4 @@
-import type { RPGMakerMvMzPrepareExecution } from "../file/rpgmaker-mv-mz/prepare-worker";
+import type { GamePrepareExecution } from "../file/shared/game/prepare-worker";
 import type { SourceFileParseWarning } from "../file/file-format-types";
 import { normalize_batch_translation_progress } from "../../domain/batch-translation";
 import { coordinate_project_duplicate_statuses } from "../../shared/project/project-item-duplicates";
@@ -106,7 +106,7 @@ export class ProjectLifecycleService {
     write_store: ProjectWriteStore,
     private readonly pdf_execution: PDFExecution,
     native_fs: NativeFs = default_native_fs,
-    private readonly rpgmaker_mv_mz_prepare_execution?: RPGMakerMvMzPrepareExecution,
+    private readonly game_prepare_execution?: GamePrepareExecution,
   ) {
     this.database = database;
     this.runtime_gate = runtime_gate;
@@ -302,7 +302,11 @@ export class ProjectLifecycleService {
           translation_prompt_legacy_migrated: true,
           "migration.asset_file_type_complete": true,
         });
-        snapshot = new ProjectDataReader(writer).read_snapshot(project_path);
+        // 预过滤条目已分配身份并通过校验，写库只转换持久字段，提交后缓存可复用同一事实。
+        snapshot = new ProjectDataReader(writer).read_snapshot(
+          project_path,
+          Object.values(prefilter_output.items).sort((left, right) => left.item_id - right.item_id),
+        );
       },
     );
 
@@ -464,7 +468,7 @@ export class ProjectLifecycleService {
       },
       this.pdf_execution,
       this.native_fs,
-      this.rpgmaker_mv_mz_prepare_execution,
+      this.game_prepare_execution,
     );
   }
 

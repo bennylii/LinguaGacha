@@ -105,6 +105,8 @@ export const zh_cn_app = {
     launching: "处理中 …",
   },
   drop: {
+    select_multiple_unavailable: "一次只能拖拽一个文件或文件夹",
+    select_unavailable: "当前无法读取拖拽文件的本地路径，请换用点击选择 …",
     multiple_unavailable: "一次只能拖拽一个文件",
     unavailable: "当前无法读取拖拽文件的本地路径，请换用点击导入 …",
     import_here: "松手即可导入规则文件",
@@ -212,6 +214,8 @@ export const zh_cn_app = {
     json_files: "JSON 文件 (*.json)",
     excel_files: "Excel 文件 (*.xlsx)",
     supported_txt_files: "支持的文件 (*.txt)",
+    font_files: "字体文件 (*.ttf *.otf)",
+    executable_files: "可执行文件 (*.exe)",
   },
   diagnostic: {
     agent: {

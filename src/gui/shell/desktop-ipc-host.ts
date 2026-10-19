@@ -199,6 +199,7 @@ async function pick_path(
         properties: ["openFile", "multiSelections"],
       });
     case "project-source-directory":
+    case "game-directory":
       return pick_open_path(main_window, request.default_directory, {
         properties: ["openDirectory"],
       });
@@ -250,6 +251,28 @@ async function pick_path(
         "",
         build_prompt_file_filters(await create_dialog_text_resolver(options)),
       );
+    case "game-font-file":
+      return pick_open_path(main_window, request.default_directory, {
+        properties: ["openFile"],
+        filters: [
+          {
+            name: (await create_dialog_text_resolver(options))("app.native_file_filter.font_files"),
+            extensions: ["ttf", "otf"],
+          },
+        ],
+      });
+    case "game-executable":
+      return pick_open_path(main_window, request.default_directory, {
+        properties: ["openFile"],
+        filters: [
+          {
+            name: (await create_dialog_text_resolver(options))(
+              "app.native_file_filter.executable_files",
+            ),
+            extensions: ["exe"],
+          },
+        ],
+      });
     default:
       throw new TypeError("Unsupported desktop path picker kind.");
   }

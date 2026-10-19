@@ -9,28 +9,16 @@ import type { ProjectPreview, ProjectPreviewResponse } from "@shared/project-pre
 import { format_local_timestamp } from "@shared/utils/format-local-timestamp";
 import { TranslationProgressBadge } from "@frontend/features/translation-progress/translation-progress-badge";
 import { Badge } from "@frontend/shadcn/badge";
-import { badgeVariants } from "@frontend/shadcn/badge-variants";
 import {
   BadgeAlert,
   File,
   FileInput,
   FilePlus,
   FolderOpen,
-  SquareMousePointer,
   X,
   type LucideIcon,
 } from "lucide-react";
-import {
-  type JSX,
-  forwardRef,
-  type ComponentProps,
-  type DragEvent,
-  type MouseEvent,
-  type MouseEventHandler,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type JSX, type MouseEvent, useEffect, useRef, useState } from "react";
 
 import type { SettingsSnapshot } from "@frontend/app/state/desktop-state-context";
 
@@ -53,14 +41,13 @@ import {
 import { Spinner } from "@frontend/shadcn/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@frontend/shadcn/tooltip";
 import { type LocaleKey, useI18n } from "@frontend/app/locale/locale-context";
-import { has_path_drop_payload, resolve_dropped_path } from "@frontend/app/desktop/file-drop-paths";
 import { normalize_source_paths } from "@frontend/app/desktop/source-paths";
 import {
   format_source_file_parse_failure_error_toast,
   format_source_file_parse_failure_toast,
 } from "@frontend/app/feedback/source-file-parse-failure-feedback";
-import { cn } from "@frontend/shadcn/classnames";
 import "@frontend/pages/project-page/project-page.css";
+import { ProjectSourceFormats } from "@frontend/pages/project-page/components/project-source-formats";
 import { DesktopApiError, api_fetch } from "@frontend/app/desktop/desktop-api";
 import type { ProjectStage } from "@frontend/app/state/desktop-project-change-types";
 import {
@@ -69,6 +56,9 @@ import {
   type ProjectSettingsAlignmentSettings,
 } from "@frontend/app/feedback/project-settings-alignment-feedback";
 import { AppConfirmDialog } from "@frontend/widgets/app-alert-dialog";
+import { open_context_menu_at_click_position } from "@frontend/widgets/app-menu";
+import type { PathDropIssue } from "@frontend/widgets/file-drop-zone/use-path-drop";
+import { PathSelectionCard } from "@frontend/widgets/path-selection-card/path-selection-card";
 import {
   PROJECT_SOURCE_FORMATS,
   type ProjectSourceFormatHitCounts,
@@ -91,11 +81,10 @@ type SelectedProject = {
 };
 
 /**
- * 已选择的源路径集合，保留首个路径用于推导默认工程名。
+ * 已选择的源路径与后端摘要，首个路径用于推导默认工程名。
  */
 type SelectedSource = ProjectSourceFileSummary & {
   source_paths: string[]; // 创建工程时原样提交的归一化用户选择
-  output_name_seed_path: string; // 仅取首个选择推导默认工程文件名
 };
 
 /**
@@ -159,24 +148,6 @@ type SettingsPayload = {
 };
 
 /**
- * 源文件和工程文件拖放区的统一按钮 props。
- */
-type DropZoneCardProps = Omit<
-  ComponentProps<"button">,
-  "title" | "onClick" | "onDragOver" | "onDrop"
-> & {
-  icon: "source" | "project";
-  title: string;
-  tone: "source" | "project";
-  is_active?: boolean;
-  disabled?: boolean;
-  on_click?: MouseEventHandler<HTMLButtonElement>;
-  on_drag_over?: (event: DragEvent<HTMLButtonElement>) => void;
-  on_drag_leave?: (event: DragEvent<HTMLButtonElement>) => void;
-  on_drop?: (event: DragEvent<HTMLButtonElement>) => void;
-};
-
-/**
  * 最近工程列表行的展示文本和操作回调。
  */
 type RecentProjectRowProps = {
@@ -205,11 +176,6 @@ type ProjectActionButtonProps = {
   disabled: boolean;
   on_click: () => void;
 };
-
-/**
- * 当前正在接收拖拽反馈的区域。
- */
-type ActiveDropzone = "source" | "project" | null;
 
 /**
  * 新建成功后需要提示的默认预设字段集合。
@@ -342,73 +308,6 @@ function collect_loaded_default_preset_names(
     return [t(spec.name_key)];
   });
 }
-
-/**
- * 右键菜单入口复用普通点击，保持拖放卡片仍是单个可聚焦按钮。
- */
-function open_context_menu_at_click_position(event: MouseEvent<HTMLButtonElement>): void {
-  event.preventDefault();
-  event.currentTarget.dispatchEvent(
-    new MouseEvent("contextmenu", {
-      bubbles: true,
-      cancelable: true,
-      clientX: event.clientX,
-      clientY: event.clientY,
-      button: 2,
-      buttons: 2,
-      view: window,
-    }),
-  );
-}
-
-/**
- * 统一源文件和工程文件拖放入口，forwardRef 供 context menu trigger 挂载。
- */
-const DropZoneCard = forwardRef<HTMLButtonElement, DropZoneCardProps>(
-  /**
-   * 渲染可点击可拖放的主入口按钮。
-   */
-  function DropZoneCard(props, ref): JSX.Element {
-    const {
-      icon,
-      title,
-      tone,
-      is_active,
-      disabled,
-      on_click,
-      on_drag_over,
-      on_drag_leave,
-      on_drop,
-      className,
-      ...button_props
-    } = props;
-    const Icon = icon === "source" ? FilePlus : FileInput; // 创建与打开入口保留不同图标语义。
-
-    return (
-      <button
-        ref={ref}
-        {...button_props}
-        className={cn(
-          "project-home__dropzone flex w-full flex-col items-center justify-center text-center",
-          tone === "source" ? "project-home__dropzone--source" : "project-home__dropzone--project",
-          className,
-        )}
-        type="button"
-        disabled={disabled}
-        data-drag-active={is_active ? "true" : undefined}
-        onClick={on_click}
-        onDragOver={on_drag_over}
-        onDragLeave={on_drag_leave}
-        onDrop={on_drop}
-      >
-        <span className="project-home__dropzone-icon">
-          <Icon className="size-11 stroke-[1.8]" />
-        </span>
-        <p className="project-home__dropzone-title">{title}</p>
-      </button>
-    );
-  },
-);
 
 /**
  * 最近工程行同时承载选择和移除操作，移除按钮阻止冒泡。
@@ -609,12 +508,12 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
   const [is_preview_loading, set_is_preview_loading] = useState(false);
   const [is_creating_project, set_is_creating_project] = useState(false);
   const [is_opening_project, set_is_opening_project] = useState(false);
-  const [active_dropzone, set_active_dropzone] = useState<ActiveDropzone>(null);
   const [missing_recent_project, set_missing_recent_project] =
     useState<MissingRecentProjectState>(null);
   const project_loading_toast_id_ref = useRef<string | number | null>(null);
   const recent_projects = settings_snapshot.recent_projects.slice(0, 5);
   const has_recent_projects = recent_projects.length > 0;
+  const source_selection_disabled = is_source_checking || is_creating_project; // 摘要与创建共用来源快照，期间冻结所有编辑入口。
 
   /**
    * 清空打开工程选择，保留源文件选择。
@@ -628,13 +527,6 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
    */
   function clear_selected_source(): void {
     set_selected_source(null);
-  }
-
-  /**
-   * 刷新最近工程列表，数据来源仍是 settings 快照。
-   */
-  async function refresh_recent_projects(): Promise<void> {
-    await refresh_settings();
   }
 
   useEffect(() => {
@@ -740,12 +632,10 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
           push_error_toast(t("project_page.create.unavailable"), failure_toast);
         else push_toast("warning", t("project_page.create.unavailable"));
       } else {
-        const output_name_seed_path = normalized_source_paths[0] ?? "";
         set_selected_source({
           source_paths: normalized_source_paths,
           source_file_count,
           format_hit_counts: normalize_project_source_format_hit_counts(payload.format_hit_counts),
-          output_name_seed_path,
         });
       }
     } catch {
@@ -754,13 +644,6 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
     } finally {
       set_is_source_checking(false);
     }
-  }
-
-  /**
-   * 单路径入口复用多路径选择流程。
-   */
-  async function handle_select_source_path(source_path: string): Promise<void> {
-    await handle_select_source_paths([source_path]);
   }
 
   /**
@@ -786,7 +669,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       return;
     }
 
-    await handle_select_source_path(selected_path);
+    await handle_select_source_paths([selected_path]);
   }
 
   /**
@@ -800,80 +683,6 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
     }
 
     await select_project_path(selected_path);
-  }
-
-  /**
-   * 拖拽悬停时只接受可解析路径，避免浏览器默认 drop 行为污染页面。
-   */
-  function handle_drop_over(
-    dropzone: Exclude<ActiveDropzone, null>,
-    event: DragEvent<HTMLButtonElement>,
-  ): void {
-    event.preventDefault();
-
-    if (has_path_drop_payload(event.dataTransfer)) {
-      set_active_dropzone(dropzone);
-      event.dataTransfer.dropEffect = "copy";
-    } else {
-      set_active_dropzone((current_dropzone) => {
-        if (current_dropzone === dropzone) {
-          return null;
-        } else {
-          return current_dropzone;
-        }
-      });
-      event.dataTransfer.dropEffect = "none";
-    }
-  }
-
-  /**
-   * 拖拽离开当前区域时清理激活态。
-   */
-  function handle_drop_leave(dropzone: Exclude<ActiveDropzone, null>): void {
-    set_active_dropzone((current_dropzone) => {
-      if (current_dropzone === dropzone) {
-        return null;
-      } else {
-        return current_dropzone;
-      }
-    });
-  }
-
-  /**
-   * 解析 drop 事件中的宿主路径，并把多路径与空路径转成可见提示。
-   */
-  async function handle_path_drop(
-    event: DragEvent<HTMLButtonElement>,
-    on_resolved_path: (path: string) => Promise<void>,
-  ): Promise<void> {
-    event.preventDefault();
-    set_active_dropzone(null);
-
-    const dropped_path = resolve_dropped_path(event.dataTransfer);
-    if (dropped_path.has_multiple_paths) {
-      push_toast("warning", t("project_page.drop_multiple_unavailable"));
-      return;
-    }
-    if (dropped_path.path === null || dropped_path.path === "") {
-      push_toast("warning", t("project_page.drop_unavailable"));
-      return;
-    }
-
-    await on_resolved_path(dropped_path.path);
-  }
-
-  /**
-   * 源文件拖放进入新建工程选择流程。
-   */
-  async function handle_source_drop(event: DragEvent<HTMLButtonElement>): Promise<void> {
-    await handle_path_drop(event, handle_select_source_path);
-  }
-
-  /**
-   * 工程文件拖放进入打开工程预览流程。
-   */
-  async function handle_project_drop(event: DragEvent<HTMLButtonElement>): Promise<void> {
-    await handle_path_drop(event, select_project_path);
   }
 
   /**
@@ -905,7 +714,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       await api_fetch<SettingsPayload>("/api/settings/update", {
         project_fixed_path: fixed_directory,
       });
-      await refresh_recent_projects();
+      await refresh_settings();
     }
 
     return join_path(fixed_directory, default_file_name);
@@ -915,7 +724,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
    * 提交新建工程请求，成功后刷新会话、任务和最近工程。
    */
   async function handle_create_project(): Promise<void> {
-    if (selected_source === null || is_creating_project) {
+    if (selected_source === null || source_selection_disabled) {
       return;
     }
 
@@ -923,7 +732,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
 
     try {
       const loaded_default_preset_names = collect_loaded_default_preset_names(settings_snapshot, t);
-      const source_path = selected_source.output_name_seed_path;
+      const source_path = selected_source.source_paths[0]!; // 选择阶段保证非空，首项决定默认名称和目录。
       const source_paths = selected_source.source_paths;
       const output_path = await resolve_project_output_path(source_path);
       if (output_path === null || output_path === "") {
@@ -958,7 +767,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
             path: created_project_path,
             name: extract_stem(extract_file_name(created_project_path)),
           });
-          await Promise.all([refresh_recent_projects(), refresh_batch_translation()]);
+          await Promise.all([refresh_settings(), refresh_batch_translation()]);
         },
       });
       if (loaded_default_preset_names.length > 0) {
@@ -1045,7 +854,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
             path: project_to_open.path,
             name: extract_stem(extract_file_name(project_to_open.path)),
           });
-          await Promise.all([refresh_recent_projects(), refresh_batch_translation()]);
+          await Promise.all([refresh_settings(), refresh_batch_translation()]);
         },
       });
       if (did_align_project_settings) {
@@ -1074,186 +883,98 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       await api_fetch<SettingsPayload>("/api/settings/recent-projects/remove", {
         path: project_path,
       });
-      await refresh_recent_projects();
+      await refresh_settings();
     } catch (error) {
       push_error_toast(t("project_page.open.remove_unavailable"), error);
     }
   }
 
-  const source_dropzone =
-    selected_source === null ? (
-      <AppContextMenu>
-        <AppContextMenuTrigger
-          render={
-            <DropZoneCard
-              icon="source"
-              tone="source"
-              title={t("project_page.create.drop_title")}
-              is_active={active_dropzone === "source"}
-              disabled={is_source_checking || is_creating_project}
-              on_click={open_context_menu_at_click_position}
-              on_drag_over={(event) => {
-                handle_drop_over("source", event);
-              }}
-              on_drag_leave={() => {
-                handle_drop_leave("source");
-              }}
-              on_drop={(event) => {
-                void handle_source_drop(event);
-              }}
-            />
-          }
-        />
-        <AppContextMenuContent>
-          <AppContextMenuItem
-            onClick={() => {
-              void handle_select_source_file();
-            }}
-          >
-            <File className="size-4" />
-            {t("app.action.select_file")}
-          </AppContextMenuItem>
-          <AppContextMenuItem
-            onClick={() => {
-              void handle_select_source_folder();
-            }}
-          >
-            <FolderOpen className="size-4" />
-            {t("app.action.select_folder")}
-          </AppContextMenuItem>
-        </AppContextMenuContent>
-      </AppContextMenu>
-    ) : (
-      <div
-        className="project-home__selected-card project-home__selected-card--source relative"
-        data-drag-active={active_dropzone === "source" ? "true" : undefined}
-      >
-        <AppButton
-          variant="ghost"
-          size="icon-sm"
-          className="project-home__selected-close h-[30px] w-[30px] p-0"
-          onClick={clear_selected_source}
-          aria-label={t("app.action.reset")}
-        >
-          <X className="size-4" />
-        </AppButton>
+  /**
+   * 拖入问题保留当前选择，只提示改用点击选择。
+   */
+  function handle_drop_issue(issue: PathDropIssue): void {
+    push_toast(
+      "warning",
+      t(
+        issue === "multiple"
+          ? "app.drop.select_multiple_unavailable"
+          : "app.drop.select_unavailable",
+      ),
+    );
+  }
 
-        <AppContextMenu>
-          <AppContextMenuTrigger
-            render={
-              <button
-                className="project-home__selected-content w-full"
-                type="button"
-                onClick={open_context_menu_at_click_position}
-                onDragOver={(event) => {
-                  handle_drop_over("source", event);
-                }}
-                onDragLeave={() => {
-                  handle_drop_leave("source");
-                }}
-                onDrop={(event) => {
-                  void handle_source_drop(event);
-                }}
-              >
-                <span className="project-home__dropzone-icon">
-                  <SquareMousePointer className="size-11 stroke-[1.85]" />
-                </span>
-                <div className="project-home__selected-summary">
-                  <p className="project-home__selected-name">
-                    {t("project_page.create.ready_status", {
+  const source_selection = (
+    <AppContextMenu disabled={source_selection_disabled}>
+      <AppContextMenuTrigger
+        render={
+          <PathSelectionCard
+            className="project-home__selection--source"
+            icon={FilePlus}
+            title={t("project_page.create.drop_title")}
+            summary={
+              selected_source === null
+                ? null
+                : {
+                    name: t("project_page.create.ready_status", {
                       COUNT: selected_source.source_file_count.toString(),
-                    })}
-                  </p>
-                </div>
-              </button>
+                    }),
+                  }
             }
+            clear_label={t("app.action.reset")}
+            on_clear={clear_selected_source}
+            disabled={source_selection_disabled}
+            onClick={open_context_menu_at_click_position}
+            on_paths_drop={handle_select_source_paths}
+            on_drop_issue={handle_drop_issue}
           />
-          <AppContextMenuContent>
-            <AppContextMenuItem
-              onClick={() => {
-                void handle_select_source_file();
-              }}
-            >
-              <File className="size-4" />
-              {t("app.action.select_file")}
-            </AppContextMenuItem>
-            <AppContextMenuItem
-              onClick={() => {
-                void handle_select_source_folder();
-              }}
-            >
-              <FolderOpen className="size-4" />
-              {t("app.action.select_folder")}
-            </AppContextMenuItem>
-          </AppContextMenuContent>
-        </AppContextMenu>
-      </div>
-    );
-
-  const open_dropzone =
-    selected_project === null ? (
-      <DropZoneCard
-        icon="project"
-        tone="project"
-        title={t("project_page.open.drop_title")}
-        is_active={active_dropzone === "project"}
-        disabled={is_preview_loading || is_opening_project}
-        on_click={() => {
-          void handle_select_project_file();
-        }}
-        on_drag_over={(event) => {
-          handle_drop_over("project", event);
-        }}
-        on_drag_leave={() => {
-          handle_drop_leave("project");
-        }}
-        on_drop={(event) => {
-          void handle_project_drop(event);
-        }}
+        }
       />
-    ) : (
-      <div
-        className="project-home__selected-card project-home__selected-card--project relative"
-        data-drag-active={active_dropzone === "project" ? "true" : undefined}
-      >
-        <AppButton
-          variant="ghost"
-          size="icon-sm"
-          className="project-home__selected-close h-[30px] w-[30px] p-0"
-          onClick={clear_selected_project}
-          aria-label={t("app.action.reset")}
-        >
-          <X className="size-4" />
-        </AppButton>
-
-        <button
-          className="project-home__selected-content w-full"
-          type="button"
+      <AppContextMenuContent>
+        <AppContextMenuItem
+          disabled={source_selection_disabled}
           onClick={() => {
-            void handle_select_project_file();
-          }}
-          onDragOver={(event) => {
-            handle_drop_over("project", event);
-          }}
-          onDragLeave={() => {
-            handle_drop_leave("project");
-          }}
-          onDrop={(event) => {
-            void handle_project_drop(event);
+            void handle_select_source_file();
           }}
         >
-          <span className="project-home__dropzone-icon">
-            <SquareMousePointer className="size-11 stroke-[1.85]" />
-          </span>
-          <div className="project-home__selected-summary">
-            <p className="project-home__selected-name">
-              {extract_file_name(selected_project.path)}
-            </p>
-            <p className="project-home__selected-status">{t("project_page.open.ready_status")}</p>
-          </div>
-        </button>
-      </div>
-    );
+          <File className="size-4" />
+          {t("app.action.select_file")}
+        </AppContextMenuItem>
+        <AppContextMenuItem
+          disabled={source_selection_disabled}
+          onClick={() => {
+            void handle_select_source_folder();
+          }}
+        >
+          <FolderOpen className="size-4" />
+          {t("app.action.select_folder")}
+        </AppContextMenuItem>
+      </AppContextMenuContent>
+    </AppContextMenu>
+  );
+
+  const project_selection = (
+    <PathSelectionCard
+      className="project-home__selection--project"
+      icon={FileInput}
+      title={t("project_page.open.drop_title")}
+      summary={
+        selected_project === null
+          ? null
+          : {
+              name: extract_file_name(selected_project.path),
+              detail: t("project_page.open.ready_status"),
+            }
+      }
+      clear_label={t("app.action.reset")}
+      on_clear={clear_selected_project}
+      disabled={is_preview_loading || is_opening_project}
+      onClick={() => {
+        void handle_select_project_file();
+      }}
+      on_path_drop={(path) => select_project_path(path)}
+      on_drop_issue={handle_drop_issue}
+    />
+  );
 
   const recent_project_content =
     selected_project === null ? (
@@ -1298,7 +1019,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
             await api_fetch<SettingsPayload>("/api/settings/recent-projects/remove", {
               path: target_path,
             });
-            await refresh_recent_projects();
+            await refresh_settings();
             set_missing_recent_project(null);
           })();
         }}
@@ -1320,43 +1041,9 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
             </CardHeader>
 
             <CardContent className="project-home__panel-content">
-              {source_dropzone}
+              {source_selection}
 
-              <section className="project-home__panel-section">
-                <h3 className="project-home__section-title">{t("project_page.formats.title")}</h3>
-                <ul className="project-home__format-tags">
-                  {PROJECT_SOURCE_FORMATS.map((format) => {
-                    const hit_count = selected_source?.format_hit_counts[format.id] ?? 0;
-                    return (
-                      <Tooltip key={format.id}>
-                        <TooltipTrigger
-                          render={
-                            <li
-                              className={badgeVariants({ className: "project-home__format-tag" })}
-                            >
-                              <span className="project-home__format-title">
-                                {t(format.title_key)}
-                              </span>
-                              <span className="project-home__format-extension">
-                                {format.source_kind === "game" ? "Game.exe" : format.extension}
-                              </span>
-                              {hit_count > 0 ? <Badge tone="brand">{hit_count}</Badge> : null}
-                            </li>
-                          }
-                        />
-                        <TooltipContent className="flex-col items-start gap-1">
-                          {(format.description_keys.length > 0
-                            ? format.description_keys
-                            : [format.title_key]
-                          ).map((description_key) => (
-                            <span key={description_key}>{t(description_key)}</span>
-                          ))}
-                        </TooltipContent>
-                      </Tooltip>
-                    );
-                  })}
-                </ul>
-              </section>
+              <ProjectSourceFormats format_hit_counts={selected_source?.format_hit_counts} />
             </CardContent>
 
             <CardFooter className="project-home__footer">
@@ -1365,7 +1052,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
                 label={t("project_page.create.action")}
                 loading_label={t("app.action.loading")}
                 is_loading={is_creating_project}
-                disabled={selected_source === null || is_source_checking || is_creating_project}
+                disabled={selected_source === null || source_selection_disabled}
                 on_click={() => {
                   void handle_create_project();
                 }}
@@ -1384,7 +1071,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
             </CardHeader>
 
             <CardContent className="project-home__panel-content">
-              {open_dropzone}
+              {project_selection}
 
               <section className="project-home__panel-section project-home__recent-section">
                 <h3 className="project-home__section-title">

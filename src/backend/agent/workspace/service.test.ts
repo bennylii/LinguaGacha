@@ -35,7 +35,7 @@ import {
 import { NativeFs } from "../../../native/native-fs";
 import type { CacheReadPort } from "../../cache/cache-types";
 import type { ProjectWriteStore } from "../../project/project-write-store";
-import type { AgentImageService } from "../agent-image-service";
+import { AGENT_IMAGE_INPUT_MAX_BYTES, type AgentImageService } from "../agent-image-service";
 import {
   create_empty_agent_workspace_intent_batch,
   has_agent_workspace_applied_changes,
@@ -89,7 +89,6 @@ describe("AgentWorkspaceService", () => {
       fs.writeFileSync(file, "second");
       await request.emitImage!("work/页面 # %23.webp", signal, { maxEdge: 3840 });
       fs.unlinkSync(file);
-      await expect(request.emitImage!("../outside.webp", signal)).rejects.toBeDefined();
       return workspace_execution();
     });
     const result = await fixture.service.run(VALID_WORKSPACE_SCRIPT, new AbortController().signal);
@@ -98,6 +97,24 @@ describe("AgentWorkspaceService", () => {
       "second",
     ]);
     expect(result.images.map(({ image }) => image.width)).toEqual([1, 3840]);
+  });
+
+  it("脚本图片可读取工作区外的本机文件，超限文件仍被拒绝", async () => {
+    const fixture = await create_fixture(temp_dir);
+    const outside = path.join(temp_dir, "outside.webp");
+    const oversized = path.join(temp_dir, "oversized.webp");
+    fs.writeFileSync(outside, "outside");
+    fs.writeFileSync(oversized, "");
+    fs.truncateSync(oversized, AGENT_IMAGE_INPUT_MAX_BYTES + 1);
+    fixture.run.mockImplementationOnce(async (request, signal) => {
+      await request.emitImage!(outside, signal);
+      await expect(request.emitImage!(oversized, signal)).rejects.toThrow();
+      return workspace_execution();
+    });
+    const result = await run_workspace(fixture);
+    expect(
+      result.images.map(({ path, image }) => [path, Buffer.from(image.data, "base64").toString()]),
+    ).toEqual([[outside, "outside"]]);
   });
 
   it("图片数量超限提供恢复信息，后续程序可继续输出现有文件", async () => {
@@ -460,6 +477,24 @@ describe("AgentWorkspaceService", () => {
     }
     await run_workspace(fixture);
     expect(fixture.active_path()).toBe(active_path);
+  });
+
+  it("item_extra 按条目原样输出扩展数据，零条目时生成空文件", async () => {
+    const fixture = await create_fixture(temp_dir);
+    const extra = { format: { location: [1, "a", true, null], unknown: { nested: {} } } };
+    fixture.items[0]!.extra_field = extra;
+    fixture.items[1]!.extra_field = null;
+    await run_workspace(fixture);
+    const extra_path = path.join(fixture.active_path(), AGENT_WORKSPACE_PATHS.itemExtra);
+    expect(read_jsonl(extra_path)).toEqual([
+      { item_id: 1, extra_field: extra },
+      { item_id: 2, extra_field: null },
+    ]);
+
+    fixture.items.splice(0);
+    fixture.snapshot.sectionRevisions.items = 2;
+    await run_workspace(fixture);
+    expect(fs.readFileSync(extra_path, "utf-8")).toBe("");
   });
 
   it("补齐缺失变更子目录时保留提交意图、工作材料和快照", async () => {

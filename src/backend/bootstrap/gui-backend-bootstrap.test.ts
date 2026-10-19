@@ -1,6 +1,5 @@
-import { png_fixture } from "../../test/media-fixture";
+import { png_fixture, encrypted_media, MEDIA_KEY } from "../../test/media-fixture";
 import { NativeFs } from "../../native/native-fs";
-import { encrypted_media, MEDIA_KEY } from "../../test/evb-fixture";
 import { Model } from "../../domain/model";
 import http from "node:http";
 import { create_workspace_runtime_fixture } from "../../test/agent-workspace-fixture";
@@ -45,15 +44,14 @@ describe("GuiBackendBootstrap 集成", () => {
       remove = NativeFs.prototype.remove_async;
     vi.spyOn(NativeFs.prototype, "rename").mockImplementation(function (this: NativeFs, from, to) {
       rename.call(this, from, to);
-      if (from.includes(path.join("backup_lg", ".tmp", "stage")) && to.endsWith("a.png"))
-        committed.resolve();
+      if (from.includes(path.join(".tmp", "stage")) && to.endsWith("a.png")) committed.resolve();
     });
     vi.spyOn(NativeFs.prototype, "remove_async").mockImplementation(async function (
       this: NativeFs,
       target,
       options,
     ) {
-      if (target === path.join(game, "backup_lg/.tmp")) {
+      if (target === path.join(game, ".tmp")) {
         cleanup.resolve();
         await release.promise;
       }
@@ -82,7 +80,7 @@ describe("GuiBackendBootstrap 集成", () => {
       await settled;
       expect(bootstrap.isStopped()).toBe(true);
       expect(fs.existsSync(path.join(temp.path, "cancelled.lg"))).toBe(false);
-      expect(fs.existsSync(path.join(game, "backup_lg/.tmp"))).toBe(false);
+      expect(fs.existsSync(path.join(game, ".tmp"))).toBe(false);
     } finally {
       release.resolve();
       await bootstrap.stop();

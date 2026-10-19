@@ -17,6 +17,7 @@ import {
   AGENT_WORKSPACE_PAGE_SCHEMA,
   AGENT_WORKSPACE_PAGE_UPDATE_SCHEMA,
   AGENT_WORKSPACE_ITEM_SCHEMA,
+  AGENT_WORKSPACE_ITEM_EXTRA_SCHEMA,
   AGENT_WORKSPACE_ITEM_UPDATE_SCHEMA,
   AGENT_WORKSPACE_PROMPTS_SCHEMA,
   AGENT_WORKSPACE_PROMPT_UPDATE_SCHEMA,
@@ -56,7 +57,6 @@ export const AGENT_WORKSPACE_CONTRACT_SCHEMA = Type.Object(
         ),
       ),
     ),
-    apply: Type.Object({}, { additionalProperties: true }),
   },
   { additionalProperties: false },
 );
@@ -71,10 +71,9 @@ const AGENT_WORKSPACE_PREFERRED_ITEM_UPDATE_ROWS = 100;
 
 /** 参考资料按业务主题聚合，读取与修改共享同一份语义。 */
 const reference_path = (topic: string): string => `${AGENT_WORKSPACE_PATHS.reference}/${topic}.md`;
-/** 四类质量规则共享排序、冲突与批次语义。 */
+/** 四类质量规则共享排序与批次语义，拒绝原因统一由 `workspace_apply` 说明。 */
 const quality_notes = [
   "一次提交会处理完整批次中的 `creates`、`updates` 和 `deletes`。",
-  "同一对象的删除已接受时，更新返回 `merge_conflict`。依赖删除的新增或更新，在删除失败时可能返回 `dependency_conflict`。",
   "排序时，先移除删除对象与明确指定 `sort` 的对象，其余对象保留相对顺序。再按非负 `sort` 值从小到大插入对象，将 `sort` 为 `-1` 的对象追加到末尾。",
   "插入位置相同时，先处理更新再处理新增，各自按变更文件中的行序排列。最后按对应领域规则整理结果。",
   "质量规则变更没有建议或强制的单批行数上限。",
@@ -84,6 +83,7 @@ const reference_notes: Readonly<Record<string, readonly string[]>> = {
   project_meta: ["工程元数据描述当前快照的语言、完整数量和文件顺序。"],
   items: [
     "`warnings` 按 `item_id` 关联条目，保存快照加载时的校对证据。正文与姓名属于同一个条目。",
+    "`item_extra` 原样保存条目的 `extra_field`，内部形状和含义由来源格式决定。",
     "`dst` 或 `name_dst` 实际变化时默认同步更新状态为 `PROCESSED`，同值提交不改变状态，省略的内容字段保持当前值。",
     '显式 `status` 覆盖内容修改的默认状态，接受现有结果时可提交 `status: "PROCESSED"`，最终内容和状态均相同时，回执为无变化。',
     "同文组按 `file_path`、`src` 与可见 `name_src` 关联，`NONE` 与 `DUPLICATED` 状态由宿主按重复过滤规则自动处理。",
@@ -109,7 +109,7 @@ const quality_entry_datasets = Object.fromEntries<DatasetDefinition>(
     {
       path: AGENT_WORKSPACE_QUALITY_ENTRY_PATHS[kind],
       format: "jsonl" as const,
-      purpose: `完整的 ${kind} 规则集合，按当前顺序排列，只读`,
+      purpose: `完整的 ${kind} 规则集合，按当前顺序排列`,
       identity: ["id"],
       schema: AGENT_WORKSPACE_QUALITY_SCHEMAS[kind].entries,
       reference: reference_path(kind),
@@ -144,8 +144,7 @@ const definition = {
       format: "jsonl" as const,
       schema: AGENT_WORKSPACE_PAGE_SCHEMA,
       reference: reference_path("pages"),
-      purpose:
-        "完整的 `pages` 集合，只读。每个 `page` 对应一个原稿页，通过 `changes.pages.updates` 完整替换其可修改内容",
+      purpose: "完整的 `pages` 集合，每个 `page` 对应一个原稿页",
       identity: ["file_path", "page"],
     },
     project_meta: {
@@ -158,7 +157,7 @@ const definition = {
     items: {
       path: AGENT_WORKSPACE_PATHS.items,
       format: "jsonl" as const,
-      purpose: "完整的 `items` 集合，只读。正文与姓名属于同一个 `item`",
+      purpose: "完整的 `items` 集合，正文与姓名属于同一个 `item`",
       identity: ["item_id"],
       schema: AGENT_WORKSPACE_ITEM_SCHEMA,
       reference: reference_path("items"),
@@ -171,10 +170,18 @@ const definition = {
       schema: AGENT_WORKSPACE_WARNING_SCHEMA,
       reference: reference_path("items"),
     },
+    item_extra: {
+      path: AGENT_WORKSPACE_PATHS.itemExtra,
+      format: "jsonl" as const,
+      purpose: "条目的格式私有扩展数据，按 `item_id` 关联条目",
+      identity: ["item_id"],
+      schema: AGENT_WORKSPACE_ITEM_EXTRA_SCHEMA,
+      reference: reference_path("items"),
+    },
     prompts: {
       path: AGENT_WORKSPACE_PATHS.prompts,
       format: "json" as const,
-      purpose: "当前翻译提示词及其指纹，只读",
+      purpose: "当前翻译提示词及其指纹",
       identity: [...PROMPT_KINDS],
       schema: AGENT_WORKSPACE_PROMPTS_SCHEMA,
       reference: reference_path("prompts"),
@@ -213,31 +220,6 @@ const definition = {
   },
 };
 
-/** 通用提交语义也供工具说明读取，保留字段类型且不携带记录 Schema 的 SDK 类型。 */
-const apply_contract = {
-  freshness: "提交时检查工程身份、语言与 `epoch` 是否兼容，并用 `fp` 核对事务内的当前对象",
-  transaction: "已接受的修改在同一事务中提交。事务失败时全部回滚",
-  partial_success: "在 `rejected` 中记录被拒绝行或对象的原因，继续提交无关对象",
-  rejection_reasons: [
-    "invalid_change",
-    "fp_mismatch",
-    "target_missing",
-    "merge_conflict",
-    "dependency_conflict",
-  ],
-  result: {
-    status: {
-      applied: "有实际变化且无拒绝",
-      partial: "有实际变化且有拒绝",
-      rejected: "无实际变化且有拒绝",
-      unchanged: "无实际变化且无拒绝",
-    },
-    fields: ["status", "applied", "rejected", "destroyed", "revisions"],
-    destroyed:
-      "实际提交或发现目标事实已变化后为 `true`，此时数据快照与当前变更清单已销毁，与当前工程相容的 `work/**` 仍保留。输入错误、无变化或事务回滚后为 `false`",
-  },
-};
-
 /** 索引公开定位信息，参考文档按记录 Schema 展开约束。 */
 function project_entries<T extends { schema: TSchema }>(entries: Record<string, T>) {
   return Object.fromEntries(
@@ -246,9 +228,7 @@ function project_entries<T extends { schema: TSchema }>(entries: Record<string, 
 }
 
 // 公开类型只暴露索引，避免声明产物携带内部记录 Schema 的 SDK 类型。
-export const AGENT_WORKSPACE_CONTRACT: AgentWorkspaceRuntimeContract & {
-  readonly apply: typeof apply_contract;
-} = Object.freeze({
+export const AGENT_WORKSPACE_CONTRACT: AgentWorkspaceRuntimeContract = Object.freeze({
   datasets: project_entries(definition.datasets),
   changes: Object.fromEntries(
     Object.entries(definition.changes).map(([name, operations]) => [
@@ -256,7 +236,6 @@ export const AGENT_WORKSPACE_CONTRACT: AgentWorkspaceRuntimeContract & {
       project_entries(operations),
     ]),
   ),
-  apply: apply_contract,
 });
 
 // 只展开一次全部入口，各主题从同一集合选择自己的读取与修改结构。
@@ -313,8 +292,6 @@ export const AGENT_WORKSPACE_REFERENCES: Readonly<Record<string, string>> = Obje
           "",
           ...notes.map((note) => `- ${note}`),
           "",
-          "提交前同时读取 `ws.contract.apply` 中的通用提交规则与回执说明。",
-          "",
         ].join("\n"),
       ];
     }),
@@ -335,7 +312,7 @@ export function describe_workspace_contract() {
     ).declarations(),
     member: [
       "/**",
-      " * 提供数据集、变更路径、参考入口与通用提交规则。",
+      " * 提供数据集、变更路径与参考入口。",
       " * 一般先读取目标的 `reference`，了解记录结构、修改格式和副作用。",
       " */",
       "contract: WorkspaceContract;",
