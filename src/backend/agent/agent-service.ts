@@ -20,6 +20,7 @@ import { type AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { isDeepStrictEqual } from "node:util";
 import { AgentChat, type AgentExecution } from "./agent-chat";
+import { describe_run_failure } from "./agent-run-failure";
 
 import { resolve_app_locale } from "../../domain/app-language";
 import { is_json_record, type JsonRecord } from "../../domain/json";
@@ -571,6 +572,7 @@ export class AgentService {
           previous.status = "running";
           previous.endedAt = null;
           previous.averageTokensPerSecond = null;
+          previous.failure = null;
         });
         const text = this.read_continue_text();
         const accepted = await chat.submit(
@@ -894,9 +896,11 @@ export class AgentService {
         await chat.close();
         break;
       }
+      // 失败摘要随轮次持久化，供失败入口行内展示。
+      const run_failure = failure === undefined ? null : describe_run_failure(failure);
       if (execution.controller.signal.aborted) {
         // 真实故障先封口，取消清理只结算仍在运行的轮次。
-        if (status === "error") await chat.finish_round(execution, status, null);
+        if (status === "error") await chat.finish_round(execution, status, null, run_failure);
         break;
       }
       const success = status === "success";
@@ -904,6 +908,7 @@ export class AgentService {
         execution,
         success ? "success" : "error",
         this.token_speed.finish_round(performance.now()),
+        run_failure,
       );
       this.token_speed_snapshot = null;
       await chat.cancel_inputs(execution);

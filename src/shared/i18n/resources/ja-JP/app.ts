@@ -244,6 +244,9 @@ export const ja_jp_app = {
     migration: {
       path_failed: "パスを移行できませんでした：{SOURCE_PATH} -> {DESTINATION_PATH} …",
     },
+    network: {
+      transport_failure: "リモートリクエストの転送に失敗しました …",
+    },
     renderer: {
       main_frame_load_failed: "レンダラーのメインフレームを読み込めませんでした …",
       process_exited: "レンダラープロセスが終了しました …",

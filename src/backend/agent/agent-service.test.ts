@@ -797,7 +797,11 @@ describe("AgentService", () => {
     fake_agent_state.release_tool_execution?.();
     await wait_for_idle(service);
     expect(runtime_gate.get_snapshot().owner).toBeNull();
-    expect(service.get_snapshot().entries[0]).toMatchObject({ text: "执行工具", status: "error" });
+    expect(service.get_snapshot().entries[0]).toMatchObject({
+      text: "执行工具",
+      status: "error",
+      failure: { status: null, detail: "background storage failed" },
+    });
     fake_agent_state.mode = "success";
     await service.send_message({ text: "重开", attachments: [] });
     await wait_for_idle(service);
@@ -1655,6 +1659,7 @@ describe("AgentService", () => {
     expect(failed_round).toMatchObject({
       status: "error",
       averageTokensPerSecond: expect.any(Number),
+      failure: { status: null, detail: "request failed" },
     });
     expect(service.get_snapshot().tokenSpeed).toBeNull();
     expect(change_calls(publish)).toContainEqual([

@@ -237,6 +237,9 @@ export const ko_kr_app = {
     migration: {
       path_failed: "경로 이전에 실패했습니다: {SOURCE_PATH} -> {DESTINATION_PATH} …",
     },
+    network: {
+      transport_failure: "원격 요청 전송에 실패했습니다 …",
+    },
     renderer: {
       main_frame_load_failed: "렌더러 기본 프레임을 불러오지 못했습니다 …",
       process_exited: "렌더러 프로세스가 종료되었습니다 …",

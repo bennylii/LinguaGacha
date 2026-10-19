@@ -1293,6 +1293,30 @@ describe("AgentChatStore", () => {
         },
         {
           kind: "user_message",
+          id: "user-invalid-failure-status",
+          delivery: "round",
+          averageTokensPerSecond: null,
+          text: "非法失败状态码",
+          attachments: [],
+          status: "error",
+          createdAt: 12,
+          endedAt: 12,
+          failure: { status: "400", detail: "请求失败" },
+        },
+        {
+          kind: "user_message",
+          id: "user-invalid-failure-detail",
+          delivery: "round",
+          averageTokensPerSecond: null,
+          text: "缺少失败说明",
+          attachments: [],
+          status: "error",
+          createdAt: 12,
+          endedAt: 12,
+          failure: { status: 400 },
+        },
+        {
+          kind: "user_message",
           id: "user-float-ended-at",
           delivery: "round",
           averageTokensPerSecond: null,
@@ -1399,6 +1423,7 @@ describe("AgentChatStore", () => {
         status: "success",
         createdAt: 10,
         endedAt: 12,
+        failure: null,
       },
       {
         kind: "user_message",
@@ -2029,6 +2054,7 @@ function user_entry(id: string, text: string, images: string[] = []) {
     status: "success" as const,
     createdAt: 1,
     endedAt: 2,
+    failure: null,
   };
 }
 

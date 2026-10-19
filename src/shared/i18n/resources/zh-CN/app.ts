@@ -235,6 +235,9 @@ export const zh_cn_app = {
     migration: {
       path_failed: "迁移路径失败：{SOURCE_PATH} -> {DESTINATION_PATH} …",
     },
+    network: {
+      transport_failure: "远端请求传输失败 …",
+    },
     renderer: {
       main_frame_load_failed: "渲染层主框架加载失败 …",
       process_exited: "渲染进程已退出 …",

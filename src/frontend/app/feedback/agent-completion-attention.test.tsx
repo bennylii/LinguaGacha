@@ -85,5 +85,6 @@ function round_entry(status: AgentEntry["status"]): AgentEntry {
     status,
     createdAt: 1,
     endedAt: status === "running" ? null : 2,
+    failure: null,
   };
 }

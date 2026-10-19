@@ -10,7 +10,7 @@ import type {
   UsageState,
 } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
-import type { AgentEntry, AgentUsageSnapshot } from "../../shared/agent";
+import type { AgentEntry, AgentRunFailure, AgentUsageSnapshot } from "../../shared/agent";
 import { JsonTool } from "../../shared/utils/json-tool";
 import { project_assistant_message_parts, read_agent_tool_result_status } from "./agent-message";
 import { read_agent_input, type AgentInputRecord, type AgentChatData } from "./agent-chat-data";
@@ -58,10 +58,10 @@ export class AgentChatView {
     return this.order.map((id) => this.rows.get(id)!.entry);
   }
   /** 实例故障只覆盖当前公开轮次，重开投影仍由持久化回执决定。 */
-  public fail_round(id: string | null, endedAt: number): void {
+  public fail_round(id: string | null, endedAt: number, failure: AgentRunFailure | null): void {
     const row = id === null ? undefined : this.rows.get(id);
     if (row?.entry.kind === "user_message" && row.entry.delivery === "round")
-      this.put({ ...row.entry, status: "error", endedAt }, row.order);
+      this.put({ ...row.entry, status: "error", endedAt, failure }, row.order);
   }
   /** 祖先分支只公开切点以前的事实。 */
   private visible(conversation: number, id: number): boolean {
@@ -305,6 +305,7 @@ export class AgentChatView {
             status: round?.status ?? "running",
             endedAt: round?.endedAt ?? null,
             averageTokensPerSecond: round?.averageTokensPerSecond ?? null,
+            failure: round?.failure ?? null,
           },
       record.id,
     );

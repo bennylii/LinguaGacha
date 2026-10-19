@@ -240,6 +240,9 @@ export const en_us_app = {
     migration: {
       path_failed: "Failed to migrate path: {SOURCE_PATH} -> {DESTINATION_PATH} …",
     },
+    network: {
+      transport_failure: "Remote request transport failed …",
+    },
     renderer: {
       main_frame_load_failed: "Renderer main frame failed to load …",
       process_exited: "Renderer process exited …",

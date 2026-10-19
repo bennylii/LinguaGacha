@@ -39,6 +39,12 @@ export type AgentContextSnapshot = JsonRecord & {
 /** 每个时间线条目独立持有结果。会话 state 不再复制轮次终态。 */
 export type AgentEntryStatus = "running" | "success" | "error" | "stopped";
 
+/** 失败轮次的原因摘要；没拿到 HTTP 响应时状态码为空，`detail` 保留原始说明。 */
+export type AgentRunFailure = JsonRecord & {
+  status: number | null;
+  detail: string;
+};
+
 /** 待审批写入的结构化变更摘要。按业务种类统计受影响对象数量。 */
 export type AgentPendingWriteSummary = Readonly<{
   pages: number; // 本批实际变化的 PDF 原页数
@@ -195,6 +201,7 @@ export type AgentEntry = JsonRecord &
               status: AgentEntryStatus;
               endedAt: number | null;
               averageTokensPerSecond: number | null; // 终态生成均速，运行中或没有有效统计时为空。
+              failure: AgentRunFailure | null; // 只有失败终态携带原因摘要。
             }
           | { delivery: "steer"; status: "success"; endedAt: number }
         ))

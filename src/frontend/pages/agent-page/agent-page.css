@@ -257,6 +257,13 @@
   white-space: nowrap;
 }
 
+.agent-continue-entry__detail {
+  grid-column: 2 / -1;
+  font-size: var(--ui-font-size-11);
+  font-weight: 400;
+  color: color-mix(in srgb, var(--ui-failure) 64%, var(--foreground));
+}
+
 .agent-continue-entry:hover:not(:disabled) {
   background: color-mix(in srgb, var(--ui-failure) 9%, var(--card));
 }

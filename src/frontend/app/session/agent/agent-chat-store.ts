@@ -27,6 +27,7 @@ import type {
   AgentQuestion,
   AgentQuestionResponse,
   AgentQueuedInput,
+  AgentRunFailure,
   AgentChatEvent,
   AgentChatChange,
   AgentChatSnapshot,
@@ -1132,6 +1133,7 @@ function normalize_entry(value: unknown): AgentEntry[] {
       return [{ ...base, delivery: "steer", status: "success", endedAt: ended_at }];
     }
     const average_speed = value["averageTokensPerSecond"];
+    const failure = normalize_run_failure(value["failure"]);
     if (
       value["delivery"] !== "round" ||
       (ended_at !== null && (typeof ended_at !== "number" || !Number.isInteger(ended_at))) ||
@@ -1140,7 +1142,8 @@ function normalize_entry(value: unknown): AgentEntry[] {
         (status === "running" ||
           typeof average_speed !== "number" ||
           !Number.isFinite(average_speed) ||
-          average_speed < 0))
+          average_speed < 0)) ||
+      failure === undefined
     ) {
       return [];
     }
@@ -1151,6 +1154,7 @@ function normalize_entry(value: unknown): AgentEntry[] {
         status,
         endedAt: ended_at,
         averageTokensPerSecond: average_speed,
+        failure,
       },
     ];
   }
@@ -1203,6 +1207,18 @@ function normalize_entry_status(value: unknown): AgentEntryStatus | null {
   return value === "running" || value === "success" || value === "error" || value === "stopped"
     ? value
     : null;
+}
+
+/** 失败摘要只服务行内展示；缺失表示没有失败，形状非法由调用方丢弃整个条目。 */
+function normalize_run_failure(value: unknown): AgentRunFailure | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (!is_json_record(value)) return undefined;
+  const status = value["status"];
+  const detail = value["detail"];
+  if (status !== null && (typeof status !== "number" || !Number.isInteger(status)))
+    return undefined;
+  if (typeof detail !== "string") return undefined;
+  return { status, detail };
 }
 
 /** 会话公开运行、停止收尾与空闲状态，非法值触发完整恢复。 */

@@ -13,6 +13,7 @@ import type {
   AgentAssistantMessageParts,
   AgentEntry,
   AgentEntryStatus,
+  AgentRunFailure,
   AgentSkillSnapshot,
   AgentToolEntry,
 } from "@shared/agent";
@@ -264,6 +265,7 @@ describe("AgentTimeline", () => {
     ).not.toBe(0);
     expect(error.textContent).toContain("app.feedback.model_request_failed");
     expect(error.textContent).toContain("agent_page.action.continue");
+    expect(error.querySelector(".agent-continue-entry__detail")).toBeNull();
     await act(async () => error.click());
     expect(on_continue).toHaveBeenCalledOnce();
     const edits = [
@@ -280,6 +282,28 @@ describe("AgentTimeline", () => {
     expect(on_edit).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ kind: "assistant_message", id: "assistant-error" }),
+    );
+  });
+
+  it("失败轮次的行内入口直接显示报错码与供应商说明", async () => {
+    const view = await render_timeline([
+      user_entry("user-error", "最新任务", "error", 0, 2_000, [], {
+        status: 400,
+        detail: "Upstream request failed: [security_audit_fail]",
+      }),
+    ]);
+    expect(view.querySelector(".agent-continue-entry__detail")?.textContent).toBe(
+      "HTTP 400 · Upstream request failed: [security_audit_fail]",
+    );
+
+    const transport = await render_timeline([
+      user_entry("user-transport", "最新任务", "error", 0, 2_000, [], {
+        status: null,
+        detail: "Connection error.",
+      }),
+    ]);
+    expect(transport.querySelector(".agent-continue-entry__detail")?.textContent).toBe(
+      "Connection error.",
     );
   });
 
@@ -708,6 +732,7 @@ function user_entry(
   createdAt: number,
   endedAt: number | null,
   images: string[] = [],
+  failure: AgentRunFailure | null = null,
 ) {
   return {
     kind: "user_message" as const,
@@ -719,6 +744,7 @@ function user_entry(
     status,
     createdAt,
     endedAt,
+    failure,
   };
 }
 

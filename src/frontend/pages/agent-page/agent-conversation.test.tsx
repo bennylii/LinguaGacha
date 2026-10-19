@@ -1414,6 +1414,7 @@ function user_entry(
     status,
     createdAt,
     endedAt,
+    failure: null,
   };
 }
 

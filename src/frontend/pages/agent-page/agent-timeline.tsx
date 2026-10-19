@@ -19,6 +19,7 @@ import { Check, CircleAlert, Copy, GitFork, Pencil } from "lucide-react";
 
 import type {
   AgentEntry,
+  AgentRunFailure,
   AgentSkillSnapshot,
   AgentEntryStatus,
   AgentAssistantMessagePart,
@@ -187,6 +188,7 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
       {show_failure_continue ? (
         <AgentContinueEntry
           label={props.t("app.feedback.model_request_failed")}
+          detail={read_run_failure_detail(user.failure)}
           action_label={props.t("agent_page.action.continue")}
           disabled={props.continue_disabled}
           on_continue={props.on_continue}
@@ -372,9 +374,19 @@ function get_agent_copy_text(entry: UserEntry | AssistantEntry): string {
     .join("\n\n");
 }
 
+/** 供应商答复带状态码，没拿到响应时只保留原始说明。 */
+function read_run_failure_detail(failure: AgentRunFailure | null): string | undefined {
+  if (failure === null) return undefined;
+  const parts =
+    failure.status === null ? [failure.detail] : [`HTTP ${failure.status}`, failure.detail];
+  const detail = parts.filter((part) => part !== "").join(" · ");
+  return detail === "" ? undefined : detail;
+}
+
 /** 所有尾部失败共用整块“继续”入口，具体步骤由后端权威状态决定。 */
 function AgentContinueEntry(props: {
   label: string;
+  detail: string | undefined;
   action_label: string;
   disabled: boolean;
   on_continue: () => void;
@@ -389,6 +401,9 @@ function AgentContinueEntry(props: {
       <CircleAlert aria-hidden="true" />
       <span>{props.label}</span>
       <span className="agent-continue-entry__action">{props.action_label}</span>
+      {props.detail === undefined ? null : (
+        <span className="agent-continue-entry__detail">{props.detail}</span>
+      )}
     </button>
   );
 }

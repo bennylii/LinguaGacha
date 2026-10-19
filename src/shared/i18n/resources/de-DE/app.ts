@@ -250,6 +250,9 @@ export const de_de_app = {
     migration: {
       path_failed: "Fehler beim Migrieren des Pfads: {SOURCE_PATH} -> {DESTINATION_PATH} …",
     },
+    network: {
+      transport_failure: "Transport der Remote-Anfrage fehlgeschlagen …",
+    },
     renderer: {
       main_frame_load_failed: "Renderer-Hauptframe konnte nicht geladen werden …",
       process_exited: "Renderer-Prozess beendet …",
