@@ -121,6 +121,10 @@ export const de_de_agent_page = {
     copied: "Kopiert",
     follow_latest: "Neueste verfolgen",
   },
+  auto_resume: {
+    waiting: "Automatisches Fortsetzen {attempt}/{max_attempts} · startet in {seconds}s",
+    cancel: "Automatisches Fortsetzen abbrechen",
+  },
   editing: {
     user: "Deine Nachricht wird bearbeitet",
     assistant: "Modellantwort wird bearbeitet",

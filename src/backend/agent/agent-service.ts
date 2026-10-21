@@ -20,7 +20,8 @@ import { type AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { isDeepStrictEqual } from "node:util";
 import { AgentChat, type AgentExecution } from "./agent-chat";
-import { describe_run_failure } from "./agent-run-failure";
+import { AgentModelError, describe_run_failure } from "./agent-run-failure";
+import { AGENT_AUTO_RESUME_MAX_ATTEMPTS, auto_resume_delay_ms } from "./agent-auto-resume";
 
 import { resolve_app_locale } from "../../domain/app-language";
 import { is_json_record, type JsonRecord } from "../../domain/json";
@@ -37,6 +38,8 @@ import {
   type AgentMessageInput,
   type AgentChatChange,
   type AgentChatSnapshot,
+  type AgentEntry,
+  type AgentAutoResumeSnapshot,
 } from "../../shared/agent";
 import * as AppErrors from "../../shared/error";
 import { format_i18n_message } from "../../shared/i18n";
@@ -111,7 +114,11 @@ type AgentChatFields = Pick<
   | "context"
   | "usage"
   | "tokenSpeed"
+  | "autoResume"
 >;
+
+/** 失败轮次的身份与终态是自动续跑恢复前的唯一校验依据。 */
+type FailedAgentRound = Extract<AgentEntry, { kind: "user_message"; delivery: "round" }>;
 
 /** 启动时加载的基础提示词和会话种子。 */
 type LoadedAgentResources = Readonly<{
@@ -142,6 +149,9 @@ export class AgentService {
   private readonly token_speed = new AgentTokenSpeed();
   private token_speed_snapshot: AgentTokenSpeedSnapshot = null;
   private token_speed_updated_at: number | null = null;
+  private auto_resume_timer: ReturnType<typeof setTimeout> | null = null; // 只存在于当前进程，工程切换或退出即失效
+  private auto_resume_snapshot: AgentAutoResumeSnapshot | null = null;
+  private readonly auto_resume_attempts = new Map<string, number>(); // 轮次身份 -> 已安排的自动续跑次数
   private chat_id = "inactive"; // 无工程时的快照身份，激活后采用持久化身份
   private readonly database: AgentServiceOptions["database"];
   private store: AgentChatStorage | null = null; // 工程连接的使用权覆盖 SDK 与上传收尾
@@ -310,6 +320,7 @@ export class AgentService {
       context: structuredClone(chat?.context ?? { tokens: null, compactable: false, limits: null }),
       usage: { ...(chat?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }) },
       tokenSpeed: structuredClone(this.token_speed_snapshot),
+      autoResume: structuredClone(this.auto_resume_snapshot),
     };
   }
   /** 协调器同步清除决定并发布事件，回执指向浮层关闭后的修订。 */
@@ -541,10 +552,12 @@ export class AgentService {
     const round = chat.entries.findLast(
       (entry) => entry.kind === "user_message" && entry.delivery === "round",
     );
-    const failed =
-      round?.kind === "user_message" && round.delivery === "round" && round.status === "error";
+    const failed_round =
+      round?.kind === "user_message" && round.delivery === "round" && round.status === "error"
+        ? round
+        : null;
     const message = read_agent_continue_message(request, this.resolve_file);
-    if (!chat.queue.has_items && !failed)
+    if (!chat.queue.has_items && failed_round === null)
       throw agent_queue_validation_error("agent_continue_unavailable");
     if (message !== null && !chat.queue.has_items)
       throw agent_queue_validation_error("agent_continue_message_without_queue");
@@ -554,41 +567,52 @@ export class AgentService {
         if (message !== null) queue.enqueue(message);
         queue.resume();
       }, read_input_command_id(request));
-      if (failed) {
-        await this.update_model(chat, execution);
-        execution.roundId = round.id;
-        execution.phase = "running";
-        this.token_speed_snapshot =
-          round.averageTokensPerSecond === null
-            ? null
-            : {
-                roundId: round.id,
-                tokensPerSecond: Number(
-                  round.averageTokensPerSecond.toFixed(AGENT_TOKEN_SPEED_DECIMAL_PLACES),
-                ),
-              };
-        await chat.change((state) => {
-          const previous = state.rounds[round.id]!;
-          previous.status = "running";
-          previous.endedAt = null;
-          previous.averageTokensPerSecond = null;
-          previous.failure = null;
-        });
-        const text = this.read_continue_text();
-        const accepted = await chat.submit(
-          { text, attachments: [] },
-          { text, images: [] },
-          execution,
-          "hidden",
-        );
-        chat.log.begin_run(round.id, "continue");
-        this.launch(chat, execution, () => this.drive(chat, execution, accepted));
+      if (failed_round !== null) {
+        // 用户主动继续重新获得完整的自动续跑额度。
+        this.auto_resume_attempts.delete(failed_round.id);
+        await this.resume_failed_round(chat, execution, failed_round);
       } else {
         const next = chat.queue.read_next();
         if (next === null) throw agent_queue_validation_error("agent_continue_unavailable");
         await this.accept_round(execution, next, next.id);
       }
     });
+  }
+
+  /** 手动继续与自动续跑共用失败轮次恢复，避免两套隐藏输入语义。 */
+  private async resume_failed_round(
+    chat: AgentChat,
+    execution: AgentExecution,
+    round: FailedAgentRound,
+  ): Promise<void> {
+    await this.update_model(chat, execution);
+    execution.roundId = round.id;
+    execution.phase = "running";
+    this.token_speed_snapshot =
+      round.averageTokensPerSecond === null
+        ? null
+        : {
+            roundId: round.id,
+            tokensPerSecond: Number(
+              round.averageTokensPerSecond.toFixed(AGENT_TOKEN_SPEED_DECIMAL_PLACES),
+            ),
+          };
+    await chat.change((state) => {
+      const previous = state.rounds[round.id]!;
+      previous.status = "running";
+      previous.endedAt = null;
+      previous.averageTokensPerSecond = null;
+      previous.failure = null;
+    });
+    const text = this.read_continue_text();
+    const accepted = await chat.submit(
+      { text, attachments: [] },
+      { text, images: [] },
+      execution,
+      "hidden",
+    );
+    chat.log.begin_run(round.id, "continue");
+    this.launch(chat, execution, () => this.drive(chat, execution, accepted));
   }
   /** 完整轮次分叉共用输入命令幂等与运行租约。 */
   public async fork_round(request: JsonRecord): Promise<AgentCommandAck> {
@@ -689,7 +713,12 @@ export class AgentService {
     const chat = this.chat;
     const execution = this.execution;
     if (chat?.can_stop === false) throw new AppErrors.AppError("runtime.busy");
-    if (execution === null || execution.cancellation !== undefined) return this.ack();
+    if (execution === null) {
+      // 等待自动续跑时没有活动执行，停止语义是取消等待而不是拒绝命令。
+      this.cancel_auto_resume(false);
+      return this.ack();
+    }
+    if (execution.cancellation !== undefined) return this.ack();
     const average = this.token_speed.finish_round(performance.now());
     this.token_speed_snapshot = null;
     this.cancel_execution(chat, execution, "user", average);
@@ -727,6 +756,7 @@ export class AgentService {
   public async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.cancel_auto_resume(false);
     this.unsubscribe_project_session();
     this.unsubscribe_skills();
     if (this.chat_reset !== null) await this.chat_reset;
@@ -735,6 +765,7 @@ export class AgentService {
 
   /** 每次运行只有一个控制器和租约，迟到操作依执行对象身份失效。 */
   private begin_execution(commandId?: string): AgentExecution {
+    this.cancel_auto_resume(false);
     const chat = this.require_chat();
     chat.assert_usable();
     const lease = this.runtime_gate.begin_runtime("agent");
@@ -860,6 +891,7 @@ export class AgentService {
   ): ReturnType<AgentChat["submit"]> {
     execution.phase = "running";
     execution.translationStopped = false;
+    this.auto_resume_attempts.clear();
     this.token_speed.reset();
     this.token_speed_updated_at = null;
     this.token_speed_snapshot = null;
@@ -914,8 +946,12 @@ export class AgentService {
       await chat.cancel_inputs(execution);
       if (!success) {
         await chat.change_queue((queue) => queue.pause());
+        if (failure instanceof AgentModelError && failure.retryable) {
+          this.schedule_auto_resume(chat, execution.roundId);
+        }
         break;
       }
+      this.auto_resume_attempts.clear();
       const next = chat.queue.read_next();
       if (next === null) break;
       execution.phase = "preparing";
@@ -938,6 +974,85 @@ export class AgentService {
       }
     }
   }
+  /** 只对 SDK 已认定为可重试的模型故障安排外层续跑，并按轮次累计次数。 */
+  private schedule_auto_resume(chat: AgentChat, round_id: string | null): void {
+    if (round_id === null || this.disposed || chat.sealed) return;
+    this.cancel_auto_resume(false);
+    const attempt = (this.auto_resume_attempts.get(round_id) ?? 0) + 1;
+    if (attempt > AGENT_AUTO_RESUME_MAX_ATTEMPTS) return;
+    this.auto_resume_attempts.set(round_id, attempt);
+    const delay = auto_resume_delay_ms(attempt);
+    this.auto_resume_snapshot = {
+      roundId: round_id,
+      attempt,
+      maxAttempts: AGENT_AUTO_RESUME_MAX_ATTEMPTS,
+      retryAt: Date.now() + delay,
+    };
+    this.auto_resume_timer = setTimeout(() => {
+      void this.run_auto_resume(round_id, attempt).catch((error: unknown) => {
+        chat.log.report_failure("cleanup", error);
+        chat.log.flush();
+      });
+    }, delay);
+    this.publish_snapshot();
+  }
+
+  /** 定时器触发前重新核对会话、最新轮次和运行占用，迟到等待不得启动新执行。 */
+  private async run_auto_resume(round_id: string, attempt: number): Promise<void> {
+    if (
+      this.auto_resume_timer === null ||
+      this.auto_resume_snapshot?.roundId !== round_id ||
+      this.auto_resume_snapshot.attempt !== attempt
+    )
+      return;
+    this.auto_resume_timer = null;
+    this.auto_resume_snapshot = null;
+    this.publish_snapshot();
+    if (
+      this.disposed ||
+      this.chat_reset !== null ||
+      this.execution !== null ||
+      this.decisions.has_pending
+    )
+      return;
+    const chat = this.chat;
+    if (chat === null || chat.sealed) return;
+    const round = chat.entries.findLast(
+      (entry) => entry.kind === "user_message" && entry.delivery === "round",
+    );
+    if (
+      round?.kind !== "user_message" ||
+      round.delivery !== "round" ||
+      round.id !== round_id ||
+      round.status !== "error" ||
+      round.failure === null
+    )
+      return;
+    let execution: AgentExecution;
+    try {
+      execution = this.begin_execution();
+    } catch (error) {
+      // 另一个运行先取得租约时，等待失效即可，不把正常的占用冲突记为清理故障。
+      if (AppErrors.is_app_error(error) && error.code === "runtime.busy") return;
+      throw error;
+    }
+    await this.accept(execution, async () => {
+      await chat.change_queue((queue) => queue.resume());
+      await this.resume_failed_round(chat, execution, round);
+    });
+  }
+
+  /** 取消等待只清计时器与公开快照；尝试计数由新轮次或用户主动继续重置。 */
+  private cancel_auto_resume(publish = true): void {
+    if (this.auto_resume_timer !== null) {
+      clearTimeout(this.auto_resume_timer);
+      this.auto_resume_timer = null;
+    }
+    if (this.auto_resume_snapshot === null) return;
+    this.auto_resume_snapshot = null;
+    if (publish) this.publish_snapshot();
+  }
+
   /** 已存在的会话在配置前检查认证，失败保留原有历史。 */
   private async update_model(chat: AgentChat, execution: AgentExecution): Promise<void> {
     const resolved = await this.prepare_model(chat, execution);
@@ -1120,6 +1235,8 @@ export class AgentService {
       const changes: AgentChatChange[] = [];
       if (!isDeepStrictEqual(fields.tokenSpeed, previous.tokenSpeed))
         changes.push({ type: "token_speed", tokenSpeed: fields.tokenSpeed });
+      if (!isDeepStrictEqual(fields.autoResume, previous.autoResume))
+        changes.push({ type: "auto_resume", autoResume: fields.autoResume });
       for (const entry of timeline?.entries ?? []) changes.push({ type: "entry_upsert", entry });
       if (fields.state !== previous.state)
         changes.push({ type: "chat_status", state: fields.state });
@@ -1171,6 +1288,7 @@ export class AgentService {
   }
   /** 命令和工程生命周期共用关闭屏障。所有权切换只在旧使用者收尾后发生。 */
   private transition(operation: () => Promise<void>): Promise<void> {
+    this.cancel_auto_resume(false);
     if (this.chat_reset !== null)
       return this.chat_reset.then(
         () => this.transition(operation),
@@ -1252,6 +1370,8 @@ export class AgentService {
 
   /** 关闭保存事实并释放资源。目录删除只由显式重置和数量清理负责。 */
   private async close_chat(reason: AgentStopReason): Promise<void> {
+    this.cancel_auto_resume(false);
+    this.auto_resume_attempts.clear();
     const chat = this.chat;
     const execution = this.execution;
     const store = this.store;

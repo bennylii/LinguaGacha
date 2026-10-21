@@ -1,8 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "../../shared/error";
-import { describe_run_failure } from "./agent-run-failure";
+import { create_agent_model_error, describe_run_failure } from "./agent-run-failure";
 
 describe("轮次失败摘要", () => {
+  it("模型错误携带 SDK 的可重试分类", () => {
+    expect(create_agent_model_error("503: Service Unavailable")).toMatchObject({
+      message: "503: Service Unavailable",
+      retryable: true,
+    });
+    expect(create_agent_model_error("403: forbidden")).toMatchObject({ retryable: false });
+  });
+
+  it("模型错误仍能收敛成公开摘要", () => {
+    expect(describe_run_failure(create_agent_model_error("429: Too Many Requests"))).toEqual({
+      status: 429,
+      detail: "Too Many Requests",
+    });
+  });
+
   it("供应商 JSON 错误体取状态码与说明文本", () => {
     const message =
       '400: {"type":"server_error","message":"Upstream request failed: [security_audit_fail] 抱歉，您所输入的内容含有违规信息"}';

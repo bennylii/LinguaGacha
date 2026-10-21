@@ -221,6 +221,14 @@ export type AgentTokenSpeedSnapshot =
   | (JsonRecord & { roundId: string; tokensPerSecond: number })
   | null;
 
+/** 可重试失败后的自动续跑等待；`retryAt` 是后端时钟的绝对毫秒时间。 */
+export type AgentAutoResumeSnapshot = JsonRecord & {
+  roundId: string;
+  attempt: number; // 从 1 开始
+  maxAttempts: number;
+  retryAt: number;
+};
+
 /** 当前产品对话累计的模型用量，历史修订后仍保留已发生的消耗。 */
 export type AgentUsageSnapshot = JsonRecord & {
   input: number; // 普通输入，缓存读取和写入分别计数
@@ -242,6 +250,7 @@ export type AgentChatSnapshot = JsonRecord & {
   context: AgentContextSnapshot;
   usage: AgentUsageSnapshot;
   tokenSpeed: AgentTokenSpeedSnapshot;
+  autoResume: AgentAutoResumeSnapshot | null;
 };
 
 /** 写命令只确认后端受理到的事件边界，公开事实继续由事件同步。 */
@@ -267,6 +276,7 @@ export type AgentChatChange = JsonRecord &
     | { type: "input_queue"; inputQueue: AgentInputQueueSnapshot }
     | { type: "doing"; doing: string | null }
     | { type: "token_speed"; tokenSpeed: AgentTokenSpeedSnapshot }
+    | { type: "auto_resume"; autoResume: AgentAutoResumeSnapshot | null }
     | { type: "context"; context: AgentContextSnapshot }
     | { type: "usage"; usage: AgentUsageSnapshot }
   );

@@ -142,6 +142,7 @@ const fake_agent_state = vi.hoisted(() => ({
     | "tools_error"
     | "pending"
     | "retry"
+    | "retry_exhausted"
     | "streaming"
     | "thinking"
     | "tool_only"
@@ -395,6 +396,13 @@ function create_fake_response(context: TranscriptContext): FauxResponseStep {
     return fauxAssistantMessage([], {
       stopReason: "error",
       errorMessage: "Selected model is at capacity",
+    });
+  }
+  if (fake_agent_state.mode === "retry_exhausted") {
+    // 持续瞬时失败耗尽 SDK 内层重试，交给运行时外层自动续跑。
+    return fauxAssistantMessage([], {
+      stopReason: "error",
+      errorMessage: "503: Service Unavailable",
     });
   }
   if (fake_agent_state.mode === "thinking") {
@@ -2258,6 +2266,7 @@ describe("AgentService", () => {
       inputQueue: { paused: false, canSendNow: false, items: [] },
       doing: null,
       tokenSpeed: null,
+      autoResume: null,
       context: { tokens: null, compactable: false, limits: null },
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
@@ -2631,7 +2640,8 @@ describe("AgentService", () => {
     const { service, runtime_gate, log_append } = await create_service();
     const original = AgentChat.prototype.stop;
     const failure = new Error("取消收尾失败");
-    vi.spyOn(AgentChat.prototype, "stop").mockImplementation(async function (
+    // 原型 spy 不会被配置级恢复重置，显式还原避免后续用例命中这里的抛错实现。
+    const stop = vi.spyOn(AgentChat.prototype, "stop").mockImplementation(async function (
       this: AgentChat,
       execution,
       average,
@@ -2661,6 +2671,7 @@ describe("AgentService", () => {
         error: { message: "取消收尾失败" },
       },
     ]);
+    stop.mockRestore();
   });
 
   it.each(["expected", "warning"] as const)(
@@ -2854,6 +2865,7 @@ describe("AgentService", () => {
       inputQueue: { paused: false, canSendNow: false, items: [] },
       doing: null,
       tokenSpeed: null,
+      autoResume: null,
       context: { tokens: null, compactable: false, limits: null },
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
@@ -3101,6 +3113,131 @@ describe("AgentService", () => {
     });
     expect(diagnostics()).toEqual([]);
   });
+
+  it("可重试模型失败耗尽内层重试后自动续跑并清除等待", async () => {
+    vi.useFakeTimers();
+    const { service, diagnostics } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "自动续跑", attachments: [] });
+    await advance_to_auto_resume(service);
+
+    expect(fake_agent_state.model_call_count).toBe(4);
+    expect(fake_agent_state.prompts.at(-1)).toBe("自动续跑");
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1, maxAttempts: 5 });
+    expect(service.get_snapshot().entries[0]).toMatchObject({
+      kind: "user_message",
+      status: "error",
+      failure: { status: 503, detail: "Service Unavailable" },
+    });
+
+    fake_agent_state.mode = "success";
+    await vi.advanceTimersByTimeAsync(5_000);
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.model_call_count).toBe(5);
+    expect(fake_agent_state.prompts.at(-1)).toBe("继续");
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    expect(service.get_snapshot().entries[0]).toMatchObject({ status: "success", failure: null });
+    expect(diagnostics()).toMatchObject([
+      { level: "error", content: { event: "run_end", status: "error" } },
+    ]);
+  });
+
+  it("自动续跑达到五次上限后保留失败轮次并停止等待", async () => {
+    vi.useFakeTimers();
+    const { service, diagnostics } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "持续故障", attachments: [] });
+    await vi.runAllTimersAsync();
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.model_call_count).toBe(4 * (1 + 5));
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    expect(service.get_snapshot().entries[0]).toMatchObject({ status: "error" });
+    expect(diagnostics()).toHaveLength(6);
+    expect(diagnostics().every((payload) => payload.level === "error")).toBe(true);
+  });
+
+  it("不可重试模型失败不安排自动续跑", async () => {
+    vi.useFakeTimers();
+    const { service } = await create_service();
+    fake_agent_state.mode = "error";
+
+    await service.send_message({ text: "终止失败", attachments: [] });
+    await vi.runAllTimersAsync();
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.model_call_count).toBe(1);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    expect(service.get_snapshot().entries[0]).toMatchObject({ status: "error" });
+  });
+
+  it("等待自动续跑期间停止只取消等待，不再请求模型", async () => {
+    vi.useFakeTimers();
+    const { service } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "等待停止", attachments: [] });
+    await advance_to_auto_resume(service);
+    expect(service.get_snapshot().autoResume).not.toBeNull();
+    const calls = fake_agent_state.model_call_count;
+
+    await service.stop();
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    await vi.runAllTimersAsync();
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.model_call_count).toBe(calls);
+    expect(service.get_snapshot().entries[0]).toMatchObject({ status: "error" });
+  });
+
+  it("手动继续取消自动等待并重新获得完整续跑额度", async () => {
+    vi.useFakeTimers();
+    const { service } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "手动继续", attachments: [] });
+    await advance_to_auto_resume(service);
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1 });
+
+    await service.continue_chat({ chatId: service.get_snapshot().chatId });
+    await vi.advanceTimersByTimeAsync(14_000);
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.model_call_count).toBe(8);
+    // 用户主动继续后从第 1 次重新计数，而不是沿用已安排的次数。
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1 });
+    await service.stop();
+  });
+
+  it.each(["reset", "project_change", "dispose"] as const)(
+    "%s 取消等待中的自动续跑",
+    async (action) => {
+      vi.useFakeTimers();
+      const { service, session_state } = await create_service();
+      fake_agent_state.mode = "retry_exhausted";
+
+      await service.send_message({ text: action, attachments: [] });
+      await advance_to_auto_resume(service);
+      expect(service.get_snapshot().autoResume).not.toBeNull();
+      const calls = fake_agent_state.model_call_count;
+
+      if (action === "reset") {
+        await service.reset();
+        expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+      } else if (action === "project_change") {
+        await session_state.mark_loaded("next.lg");
+        expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+      } else {
+        await service.dispose();
+      }
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(fake_agent_state.model_call_count).toBe(calls);
+    },
+  );
 
   it("已受理 steer 的后续生成失败时，整个产品轮次失败并暂停草稿", async () => {
     const { service } = await create_service();
@@ -4437,6 +4574,12 @@ async function prepare_manual_compaction_history(service: AgentService): Promise
 /** 等待公开会话终态，不依赖 SDK 内部 idle 时序。 */
 async function wait_for_idle(service: AgentService): Promise<void> {
   await vi.waitFor(() => expect(service.get_snapshot().state).toBe("idle"));
+}
+
+/** 推进 SDK 内层 2/4/8 秒重试，直到外层自动续跑等待发布。 */
+async function advance_to_auto_resume(service: AgentService): Promise<void> {
+  await vi.advanceTimersByTimeAsync(14_000);
+  await wait_for_idle(service);
 }
 
 /** 从公开时间线读取模型实际收到的工具 JSON，验证跨回合生命周期。 */

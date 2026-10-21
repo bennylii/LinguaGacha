@@ -355,6 +355,44 @@ describe("AgentChatStore", () => {
     }
   });
 
+  it("自动续跑等待通过快照和增量事件同步，拒绝非法帧", async () => {
+    const resuming = { roundId: "round-1", attempt: 1, maxAttempts: 5, retryAt: 1_000 };
+    desktop_api_mocks.api_get.mockResolvedValueOnce(agent_snapshot({ autoResume: resuming }));
+    let latest!: ReturnType<typeof useAgentChat>;
+    await render_probe(() => {
+      latest = useAgentChat();
+    });
+    await wait_for(() => expect(latest.transport).toBe("ready"));
+    expect(latest.autoResume).toEqual(resuming);
+
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { ...resuming, attempt: 2, retryAt: 6_000 },
+      });
+    });
+    expect(latest.autoResume).toMatchObject({ attempt: 2, retryAt: 6_000 });
+
+    await act(async () => {
+      event_source.change({ type: "auto_resume", autoResume: null });
+    });
+    expect(latest.autoResume).toBeNull();
+
+    await act(async () => {
+      event_source.change({ type: "auto_resume", autoResume: resuming });
+    });
+    expect(latest.autoResume).toEqual(resuming);
+
+    // 非法帧整批丢弃，保留最近一次合法值。
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { roundId: "", attempt: 0, maxAttempts: 0, retryAt: -1 },
+      });
+    });
+    expect(latest.autoResume).toEqual(resuming);
+  });
+
   it("StrictMode effect 重放后仍能完成会话恢复", async () => {
     let latest!: ReturnType<typeof useAgentChat>;
     /** 在 StrictMode 重放期间订阅同一公开会话。 */
@@ -1084,6 +1122,7 @@ describe("AgentChatStore", () => {
       doing: null,
       context: { tokens: null, compactable: false, limits: null },
       tokenSpeed: null,
+      autoResume: null,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       skills: [
         TEST_SKILLS[0],
@@ -1355,6 +1394,7 @@ describe("AgentChatStore", () => {
       doing: null,
       context: { tokens: null, compactable: false, limits: null },
       tokenSpeed: null,
+      autoResume: null,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
     let latest!: ReturnType<typeof useAgentChat>;
@@ -2077,6 +2117,7 @@ function agent_snapshot(overrides: Partial<AgentChatSnapshot> = {}): AgentChatSn
     context: { tokens: null, compactable: false, limits: null },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     tokenSpeed: null,
+    autoResume: null,
     ...overrides,
   };
 }

@@ -282,6 +282,27 @@
   opacity: 0.58;
 }
 
+.agent-auto-resume-entry {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--ui-radius-button);
+  background: color-mix(in srgb, var(--muted) 42%, var(--card));
+  padding: 4px 8px;
+  color: color-mix(in srgb, var(--foreground) 78%, var(--muted-foreground));
+  font-size: var(--ui-font-size-12);
+  line-height: 1.45;
+}
+
+.agent-auto-resume-entry__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .agent-message-actions {
   display: flex;
   min-height: 24px;

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AgentAssistantMessageParts,
+  AgentAutoResumeSnapshot,
   AgentEntry,
   AgentEntryStatus,
   AgentRunFailure,
@@ -68,6 +69,7 @@ describe("AgentTimeline", () => {
   let root: Root | null = null;
   const on_edit = vi.fn();
   const on_continue = vi.fn();
+  const on_cancel_auto_resume = vi.fn();
   const on_compact = vi.fn();
   const on_add_annotation = vi.fn();
   const write_clipboard = vi.fn(async (_text: string) => undefined);
@@ -91,6 +93,7 @@ describe("AgentTimeline", () => {
     container = null;
     on_edit.mockReset();
     on_continue.mockReset();
+    on_cancel_auto_resume.mockReset();
     on_compact.mockReset();
     on_add_annotation.mockReset();
     write_clipboard.mockReset();
@@ -102,6 +105,7 @@ describe("AgentTimeline", () => {
     entries: readonly AgentEntry[],
     follow_reset_revision = 0,
     skills: readonly AgentSkillSnapshot[] = [],
+    auto_resume: AgentAutoResumeSnapshot | null = null,
   ): Promise<HTMLDivElement> {
     if (container === null) {
       container = document.createElement("div");
@@ -121,6 +125,8 @@ describe("AgentTimeline", () => {
 
               follow_reset_revision={follow_reset_revision}
               on_continue={on_continue}
+              auto_resume={auto_resume}
+              on_cancel_auto_resume={on_cancel_auto_resume}
               on_edit={on_edit}
               on_add_annotation={on_add_annotation}
               revision_disabled={false}
@@ -305,6 +311,40 @@ describe("AgentTimeline", () => {
     expect(transport.querySelector(".agent-continue-entry__detail")?.textContent).toBe(
       "Connection error.",
     );
+  });
+
+  it("失败轮次的自动续跑等待显示倒计时并允许取消", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const view = await render_timeline(
+      [user_entry("user-error", "最新任务", "error", 0, 2_000)],
+      0,
+      [],
+      { roundId: "user-error", attempt: 2, maxAttempts: 5, retryAt: 5_000 },
+    );
+
+    const waiting = view.querySelector(".agent-auto-resume-entry");
+    expect(waiting?.textContent).toContain("agent_page.auto_resume.waiting:2,5,5");
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(waiting?.textContent).toContain("agent_page.auto_resume.waiting:2,5,4");
+
+    const cancel = view.querySelector<HTMLButtonElement>(".agent-auto-resume-entry button");
+    expect(cancel?.textContent).toContain("agent_page.auto_resume.cancel");
+    await act(async () => cancel?.click());
+    expect(on_cancel_auto_resume).toHaveBeenCalledOnce();
+  });
+
+  it("自动续跑等待只挂在对应失败轮次上", async () => {
+    const view = await render_timeline(
+      [
+        user_entry("user-old", "旧任务", "error", 0, 2_000),
+        user_entry("user-latest", "最新任务", "error", 3_000, 5_000),
+      ],
+      0,
+      [],
+      { roundId: "user-latest", attempt: 1, maxAttempts: 5, retryAt: 5_000 },
+    );
+    expect(view.querySelectorAll(".agent-auto-resume-entry")).toHaveLength(1);
   });
 
   it("成功轮次只允许修改最终助手回复，状态行不提供回合重试", async () => {

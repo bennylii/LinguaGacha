@@ -121,6 +121,10 @@ export const en_us_agent_page = {
     copied: "Copied",
     follow_latest: "Follow latest",
   },
+  auto_resume: {
+    waiting: "Auto continue {attempt}/{max_attempts} · starts in {seconds}s",
+    cancel: "Cancel auto continue",
+  },
   editing: {
     user: "Editing your message",
     assistant: "Editing the model response",

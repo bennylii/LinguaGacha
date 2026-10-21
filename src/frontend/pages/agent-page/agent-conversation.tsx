@@ -73,7 +73,7 @@ const AGENT_TASK_SUGGESTIONS = [
     Icon: BookOpenText,
   },
   {
-    skillName: "translation",
+    skillName: "proofreading",
     suggestionKey: "agent_page.empty.suggestions.review_translation",
     Icon: ScanText,
   },
@@ -451,6 +451,11 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
     });
   }, [agent_actions, show_command_error]);
 
+  /** 取消自动续跑等待复用停止入口，等待期间没有正在执行的轮次。 */
+  const cancel_auto_resume = useCallback((): void => {
+    void stop();
+  }, [stop]);
+
   /** 时间线批注写入普通 Composer 草稿，由用户继续编辑和发送。 */
   const add_response_annotation = useCallback(
     (annotation: Parameters<AgentComposerHandle["add_response_annotation"]>[0]): void => {
@@ -608,6 +613,8 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
               on_compact={compact_context}
               follow_reset_revision={follow_reset_revision}
               on_continue={continue_latest_round}
+              auto_resume={controls.autoResume}
+              on_cancel_auto_resume={cancel_auto_resume}
               on_edit={start_edit}
               render_entry_editor={render_entry_editor}
               on_add_annotation={add_response_annotation}
