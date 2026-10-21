@@ -1,6 +1,6 @@
 # 条目审校
 
-本流程用于检查、审校和修正条目的已有或拟议译文。
+本流程用于检查、审校和修正条目的已有或拟议译文。需要逐条覆盖全文、持续到范围内最后一条的完整审校使用 `proofreading` 技能。
 
 - 术语见 `SKILL.md`。
 - 译文质量按 `writing-guide` 的 `references/translation.md` 判断。
