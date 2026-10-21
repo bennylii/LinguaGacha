@@ -31,6 +31,16 @@ export type AgentApprovalMode = (typeof AGENT_APPROVAL_MODES)[number];
 export const NETWORK_PROXY_MODES = ["system", "proxy", "direct"] as const;
 export type NetworkProxyMode = (typeof NETWORK_PROXY_MODES)[number];
 export const DEFAULT_NETWORK_PROXY_ADDRESS = "127.0.0.1:6789"; // 自定义模式的初始地址，常见本地代理混合端口
+/** Agent 自动重试的等待时间与次数边界，设置页与运行时共用同一组取值。 */
+export const AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MIN = 1;
+export const AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MAX = 3_600;
+export const AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MIN = 1;
+export const AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MAX = 86_400;
+export const AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT = 1_000; // 0 表示不限次数
+export const AGENT_AUTO_RESUME_DEFAULT_ENABLED = true;
+export const AGENT_AUTO_RESUME_DEFAULT_INITIAL_DELAY_SECONDS = 5;
+export const AGENT_AUTO_RESUME_DEFAULT_MAX_DELAY_SECONDS = 300;
+export const AGENT_AUTO_RESUME_DEFAULT_MAX_ATTEMPTS = 0;
 /** 出站请求解析路由所需的最小代理策略。 */
 export interface NetworkProxyPolicy {
   mode: NetworkProxyMode;
@@ -45,6 +55,10 @@ export type RecentProjectSetting = Static<typeof RECENT_PROJECT_SETTING_SCHEMA>;
 export const SETTING_SNAPSHOT_SCHEMA = Type.Object(
   {
     agent_approval_mode: Type.Enum(AGENT_APPROVAL_MODES), // Agent 工程写入的审批方式。
+    agent_auto_resume_enabled: Type.Boolean(), // Agent 可重试失败后是否自动重试。
+    agent_auto_resume_initial_delay: Type.Number(), // 首次自动重试前的等待秒数。
+    agent_auto_resume_max_delay: Type.Number(), // 指数退避封顶的等待秒数。
+    agent_auto_resume_max_attempts: Type.Number(), // 自动重试次数上限，0 表示不限。
     app_language: Type.Enum(APP_LANGUAGE_DEFINITIONS.map(({ code }) => code)), // 界面与日志文案的应用语言。
     source_language: Type.String(), // 源语言允许 `ALL`，由具体过滤器进一步收窄。
     target_language: Type.String(), // 译文目标语言，参与提示词和工程设置镜像。
@@ -90,6 +104,10 @@ type SettingKey = keyof SettingSnapshot;
 
 export const DEFAULT_SETTING: SettingSnapshot & JsonRecord = {
   agent_approval_mode: "manual",
+  agent_auto_resume_enabled: AGENT_AUTO_RESUME_DEFAULT_ENABLED,
+  agent_auto_resume_initial_delay: AGENT_AUTO_RESUME_DEFAULT_INITIAL_DELAY_SECONDS,
+  agent_auto_resume_max_delay: AGENT_AUTO_RESUME_DEFAULT_MAX_DELAY_SECONDS,
+  agent_auto_resume_max_attempts: AGENT_AUTO_RESUME_DEFAULT_MAX_ATTEMPTS,
   app_language: "ZH",
   source_language: "JA",
   target_language: "ZH",
@@ -224,6 +242,12 @@ export class Setting {
    */
   public static normalize_value(key: string, value: JsonValue): JsonValue {
     if (key === "agent_approval_mode") return normalize_agent_approval_mode(value);
+    if (key === "agent_auto_resume_enabled") return normalize_agent_auto_resume_enabled(value);
+    if (key === "agent_auto_resume_initial_delay")
+      return normalize_agent_auto_resume_initial_delay(value);
+    if (key === "agent_auto_resume_max_delay") return normalize_agent_auto_resume_max_delay(value);
+    if (key === "agent_auto_resume_max_attempts")
+      return normalize_agent_auto_resume_max_attempts(value);
     if (key === "agent_personality") return typeof value === "string" ? value : null;
     if (key === "agent_skills") return normalize_agent_skill_settings(value);
     if (key === "app_language") {
@@ -271,6 +295,41 @@ export class Setting {
 // 项目保存模式写入设置前先确认合法值，避免页面草稿值落盘
 export function is_project_save_mode(value: unknown): value is ProjectSaveMode {
   return PROJECT_SAVE_MODE_SET.has(value as ProjectSaveMode);
+}
+
+/** 自动重试开关只接受布尔值，缺失或旧配置非法时保持开启。 */
+export function normalize_agent_auto_resume_enabled(value: unknown): boolean {
+  return read_json_boolean(value, AGENT_AUTO_RESUME_DEFAULT_ENABLED);
+}
+
+/** 自动重试间隔只接受整数秒，越界值收窄到设置页允许的范围。 */
+export function normalize_agent_auto_resume_initial_delay(value: unknown): number {
+  return normalize_bounded_integer_setting(
+    value,
+    AGENT_AUTO_RESUME_DEFAULT_INITIAL_DELAY_SECONDS,
+    AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MIN,
+    AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MAX,
+  );
+}
+
+/** 最长间隔与初始间隔独立收窄；运行时再取两者较大值作为实际封顶。 */
+export function normalize_agent_auto_resume_max_delay(value: unknown): number {
+  return normalize_bounded_integer_setting(
+    value,
+    AGENT_AUTO_RESUME_DEFAULT_MAX_DELAY_SECONDS,
+    AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MIN,
+    AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MAX,
+  );
+}
+
+/** 0 表示不限次数，其余值收窄到 1 至上限。 */
+export function normalize_agent_auto_resume_max_attempts(value: unknown): number {
+  return normalize_bounded_integer_setting(
+    value,
+    AGENT_AUTO_RESUME_DEFAULT_MAX_ATTEMPTS,
+    0,
+    AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
+  );
 }
 
 /** 写入命令据此拒绝非法模式；读取配置时由归一化入口补默认值。 */
@@ -356,6 +415,18 @@ function read_setting_record(value: unknown): JsonRecord {
 function read_project_string_setting(value: JsonValue | undefined, fallback: string): string {
   const text = String(value ?? "").trim();
   return text === "" ? fallback : text.toUpperCase();
+}
+
+/** 整数设置按边界收窄，缺失和非有限值沿用基线。 */
+function normalize_bounded_integer_setting(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const number_value = Number(value ?? fallback);
+  if (!Number.isFinite(number_value)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(number_value)));
 }
 
 /** 有限数值才进入设置，缺失和非有限值沿用基线。 */

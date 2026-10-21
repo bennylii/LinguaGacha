@@ -373,6 +373,20 @@ describe("AgentChatStore", () => {
     });
     expect(latest.autoResume).toMatchObject({ attempt: 2, retryAt: 6_000 });
 
+    // 重试执行期以空 retryAt 表示，空 maxAttempts 表示不限次数。
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { roundId: "round-1", attempt: 2, maxAttempts: null, retryAt: null },
+      });
+    });
+    expect(latest.autoResume).toEqual({
+      roundId: "round-1",
+      attempt: 2,
+      maxAttempts: null,
+      retryAt: null,
+    });
+
     await act(async () => {
       event_source.change({ type: "auto_resume", autoResume: null });
     });
@@ -391,6 +405,29 @@ describe("AgentChatStore", () => {
       });
     });
     expect(latest.autoResume).toEqual(resuming);
+  });
+
+  it("自动重试等待期间空闲状态也允许取消", async () => {
+    desktop_api_mocks.api_get.mockResolvedValueOnce(
+      agent_snapshot({
+        state: "idle",
+        autoResume: { roundId: "round-1", attempt: 1, maxAttempts: null, retryAt: 1_000 },
+      }),
+    );
+    desktop_api_mocks.api_fetch.mockResolvedValueOnce({ revision: 0, status: "accepted" });
+    let latest!: ReturnType<typeof useAgentChat>;
+    await render_probe(() => {
+      latest = useAgentChat();
+    });
+    await wait_for(() => expect(latest.transport).toBe("ready"));
+    expect(latest.state).toBe("idle");
+    expect(latest.autoResume).not.toBeNull();
+
+    await act(async () => {
+      await latest.stop();
+    });
+
+    expect(desktop_api_mocks.api_fetch).toHaveBeenCalledWith("/api/agent/stop");
   });
 
   it("StrictMode effect 重放后仍能完成会话恢复", async () => {

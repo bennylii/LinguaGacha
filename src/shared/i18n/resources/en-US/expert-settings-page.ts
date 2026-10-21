@@ -4,6 +4,29 @@ import type { LocaleMessageSchema } from "../../types";
 export const en_us_expert_settings_page = {
   title: "Expert Settings",
   fields: {
+    agent_auto_resume_enabled: {
+      title: "Agent Auto Retry",
+      description:
+        "Automatically retry the same round on transient model or transport failures (429, 503, connection errors, timeouts), enabled by default" +
+        "\n" +
+        "400, 401, 403, quota, billing, and authentication errors are never retried; every retry starts a new model request",
+    },
+    agent_auto_resume_initial_delay: {
+      title: "Initial Retry Delay (seconds)",
+      description:
+        "Wait before the first automatic retry; each later wait doubles, default 5 seconds",
+    },
+    agent_auto_resume_max_delay: {
+      title: "Maximum Retry Delay (seconds)",
+      description:
+        "Upper bound for the exponential backoff; retries continue at this interval once reached, default 300 seconds" +
+        "\n" +
+        "When smaller than the initial delay, the initial delay is used",
+    },
+    agent_auto_resume_max_attempts: {
+      title: "Maximum Retry Attempts",
+      description: "Upper bound for consecutive automatic retries; 0 means unlimited, default 0",
+    },
     preceding_lines_threshold: {
       title: "Preceding Lines Threshold",
       description:
@@ -40,6 +63,12 @@ export const en_us_expert_settings_page = {
     },
   },
   feedback: {
+    agent_auto_resume_initial_delay_invalid:
+      "The initial retry delay must be a whole number of seconds from 1 to 3600 …",
+    agent_auto_resume_max_delay_invalid:
+      "The maximum retry delay must be a whole number of seconds from 1 to 86400 …",
+    agent_auto_resume_max_attempts_invalid:
+      "The maximum retry attempts must be a whole number from 0 to 1000 …",
     preceding_lines_threshold_invalid:
       "Preceding lines threshold must be a number within the valid range …",
   },

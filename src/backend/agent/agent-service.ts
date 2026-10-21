@@ -21,7 +21,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { isDeepStrictEqual } from "node:util";
 import { AgentChat, type AgentExecution } from "./agent-chat";
 import { AgentModelError, describe_run_failure } from "./agent-run-failure";
-import { AGENT_AUTO_RESUME_MAX_ATTEMPTS, auto_resume_delay_ms } from "./agent-auto-resume";
+import { auto_resume_delay_ms, read_agent_auto_resume_policy } from "./agent-auto-resume";
 
 import { resolve_app_locale } from "../../domain/app-language";
 import { is_json_record, type JsonRecord } from "../../domain/json";
@@ -570,7 +570,7 @@ export class AgentService {
       if (failed_round !== null) {
         // 用户主动继续重新获得完整的自动续跑额度。
         this.auto_resume_attempts.delete(failed_round.id);
-        await this.resume_failed_round(chat, execution, failed_round);
+        await this.resume_failed_round(chat, execution, failed_round, false);
       } else {
         const next = chat.queue.read_next();
         if (next === null) throw agent_queue_validation_error("agent_continue_unavailable");
@@ -579,11 +579,12 @@ export class AgentService {
     });
   }
 
-  /** 手动继续与自动续跑共用失败轮次恢复，避免两套隐藏输入语义。 */
+  /** 手动继续与自动重试共用失败轮次恢复，避免两套隐藏输入语义。 */
   private async resume_failed_round(
     chat: AgentChat,
     execution: AgentExecution,
     round: FailedAgentRound,
+    keep_failure: boolean,
   ): Promise<void> {
     await this.update_model(chat, execution);
     execution.roundId = round.id;
@@ -602,7 +603,8 @@ export class AgentService {
       previous.status = "running";
       previous.endedAt = null;
       previous.averageTokensPerSecond = null;
-      previous.failure = null;
+      // 自动重试期间保留最近一次失败原因，界面同时展示失败与重试进度。
+      if (!keep_failure) previous.failure = null;
     });
     const text = this.read_continue_text();
     const accepted = await chat.submit(
@@ -926,6 +928,7 @@ export class AgentService {
       });
       if (chat.sealed) {
         await chat.close();
+        this.cancel_auto_resume();
         break;
       }
       // 失败摘要随轮次持久化，供失败入口行内展示。
@@ -933,6 +936,7 @@ export class AgentService {
       if (execution.controller.signal.aborted) {
         // 真实故障先封口，取消清理只结算仍在运行的轮次。
         if (status === "error") await chat.finish_round(execution, status, null, run_failure);
+        this.cancel_auto_resume();
         break;
       }
       const success = status === "success";
@@ -948,10 +952,14 @@ export class AgentService {
         await chat.change_queue((queue) => queue.pause());
         if (failure instanceof AgentModelError && failure.retryable) {
           this.schedule_auto_resume(chat, execution.roundId);
+        } else {
+          // 确定性失败不再重试，清掉上一轮自动重试留下的“正在重试”状态。
+          this.cancel_auto_resume();
         }
         break;
       }
       this.auto_resume_attempts.clear();
+      this.cancel_auto_resume();
       const next = chat.queue.read_next();
       if (next === null) break;
       execution.phase = "preparing";
@@ -974,18 +982,23 @@ export class AgentService {
       }
     }
   }
-  /** 只对 SDK 已认定为可重试的模型故障安排外层续跑，并按轮次累计次数。 */
+  /** 只对 SDK 已认定为可重试的模型故障安排外层自动重试，并按轮次累计次数。 */
   private schedule_auto_resume(chat: AgentChat, round_id: string | null): void {
     if (round_id === null || this.disposed || chat.sealed) return;
+    const policy = read_agent_auto_resume_policy(this.settings.read_setting());
+    const had_snapshot = this.auto_resume_snapshot !== null;
     this.cancel_auto_resume(false);
     const attempt = (this.auto_resume_attempts.get(round_id) ?? 0) + 1;
-    if (attempt > AGENT_AUTO_RESUME_MAX_ATTEMPTS) return;
+    if (!policy.enabled || (policy.maxAttempts > 0 && attempt > policy.maxAttempts)) {
+      if (had_snapshot) this.publish_snapshot();
+      return;
+    }
     this.auto_resume_attempts.set(round_id, attempt);
-    const delay = auto_resume_delay_ms(attempt);
+    const delay = auto_resume_delay_ms(attempt, policy);
     this.auto_resume_snapshot = {
       roundId: round_id,
       attempt,
-      maxAttempts: AGENT_AUTO_RESUME_MAX_ATTEMPTS,
+      maxAttempts: policy.maxAttempts > 0 ? policy.maxAttempts : null,
       retryAt: Date.now() + delay,
     };
     this.auto_resume_timer = setTimeout(() => {
@@ -999,24 +1012,35 @@ export class AgentService {
 
   /** 定时器触发前重新核对会话、最新轮次和运行占用，迟到等待不得启动新执行。 */
   private async run_auto_resume(round_id: string, attempt: number): Promise<void> {
+    const waiting = this.auto_resume_snapshot;
     if (
       this.auto_resume_timer === null ||
-      this.auto_resume_snapshot?.roundId !== round_id ||
-      this.auto_resume_snapshot.attempt !== attempt
+      waiting === null ||
+      waiting.roundId !== round_id ||
+      waiting.attempt !== attempt
     )
       return;
     this.auto_resume_timer = null;
-    this.auto_resume_snapshot = null;
-    this.publish_snapshot();
+    // 等待期间关闭开关或调低次数上限时，本次等待直接失效。
+    const policy = read_agent_auto_resume_policy(this.settings.read_setting());
+    if (!policy.enabled || (policy.maxAttempts > 0 && attempt > policy.maxAttempts)) {
+      this.cancel_auto_resume();
+      return;
+    }
     if (
       this.disposed ||
       this.chat_reset !== null ||
       this.execution !== null ||
       this.decisions.has_pending
-    )
+    ) {
+      this.cancel_auto_resume();
       return;
+    }
     const chat = this.chat;
-    if (chat === null || chat.sealed) return;
+    if (chat === null || chat.sealed) {
+      this.cancel_auto_resume();
+      return;
+    }
     const round = chat.entries.findLast(
       (entry) => entry.kind === "user_message" && entry.delivery === "round",
     );
@@ -1026,20 +1050,32 @@ export class AgentService {
       round.id !== round_id ||
       round.status !== "error" ||
       round.failure === null
-    )
+    ) {
+      this.cancel_auto_resume();
       return;
+    }
     let execution: AgentExecution;
     try {
       execution = this.begin_execution();
     } catch (error) {
       // 另一个运行先取得租约时，等待失效即可，不把正常的占用冲突记为清理故障。
+      this.publish_snapshot();
       if (AppErrors.is_app_error(error) && error.code === "runtime.busy") return;
       throw error;
     }
-    await this.accept(execution, async () => {
-      await chat.change_queue((queue) => queue.resume());
-      await this.resume_failed_round(chat, execution, round);
-    });
+    // begin_execution 已静默清掉等待快照；改用 retryAt 为空的重试状态承载轮次与次数。
+    this.auto_resume_snapshot = { ...waiting, retryAt: null };
+    this.publish_snapshot();
+    try {
+      await this.accept(execution, async () => {
+        await chat.change_queue((queue) => queue.resume());
+        await this.resume_failed_round(chat, execution, round, true);
+      });
+    } catch (error) {
+      // 受理失败不能再留下“正在重试”的公开状态。
+      this.cancel_auto_resume();
+      throw error;
+    }
   }
 
   /** 取消等待只清计时器与公开快照；尝试计数由新轮次或用户主动继续重置。 */

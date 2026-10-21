@@ -122,8 +122,10 @@ export const en_us_agent_page = {
     follow_latest: "Follow latest",
   },
   auto_resume: {
-    waiting: "Auto continue {attempt}/{max_attempts} · starts in {seconds}s",
-    cancel: "Cancel auto continue",
+    waiting: "Auto retry attempt {attempt} · starts in {seconds}s",
+    waiting_limited: "Auto retry {attempt}/{max_attempts} · starts in {seconds}s",
+    retrying: "Auto retrying (attempt {attempt})",
+    cancel: "Cancel auto retry",
   },
   editing: {
     user: "Editing your message",

@@ -800,9 +800,9 @@ export class AgentChatStore {
     );
   };
 
-  /** 仅运行中的会话接受停止请求。 */
+  /** 运行中或等待自动重试时接受停止；等待期后端状态是空闲，停止语义为取消等待。 */
   private readonly stop = async (): Promise<void> => {
-    if (this.controls.state !== "running") return;
+    if (this.controls.state !== "running" && this.controls.autoResume === null) return;
     await this.execute_command("stop", () => api_fetch<AgentCommandAck>("/api/agent/stop"));
   };
 
@@ -1004,7 +1004,7 @@ function normalize_token_speed(value: unknown): AgentTokenSpeedSnapshot | undefi
     : undefined;
 }
 
-/** 自动续跑等待必须完整可倒计时；非法帧由 `revision` 缺口恢复。 */
+/** 自动重试状态必须完整：等待期带倒计时，重试执行期由空 `retryAt` 表示。 */
 function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null | undefined {
   if (value === null) return null;
   if (!is_json_record(value)) return undefined;
@@ -1018,12 +1018,12 @@ function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null |
     typeof attempt !== "number" ||
     !Number.isSafeInteger(attempt) ||
     attempt < 1 ||
-    typeof max_attempts !== "number" ||
-    !Number.isSafeInteger(max_attempts) ||
-    max_attempts < attempt ||
-    typeof retry_at !== "number" ||
-    !Number.isSafeInteger(retry_at) ||
-    retry_at < 0
+    (max_attempts !== null &&
+      (typeof max_attempts !== "number" ||
+        !Number.isSafeInteger(max_attempts) ||
+        max_attempts < attempt)) ||
+    (retry_at !== null &&
+      (typeof retry_at !== "number" || !Number.isSafeInteger(retry_at) || retry_at < 0))
   )
     return undefined;
   return { roundId: round_id, attempt, maxAttempts: max_attempts, retryAt: retry_at };

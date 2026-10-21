@@ -5,6 +5,10 @@ export const PRECEDING_LINES_THRESHOLD_MAX = 9_999_999;
 
 export type ExpertSettingsSnapshot = Pick<
   SettingsSnapshot,
+  | "agent_auto_resume_enabled"
+  | "agent_auto_resume_initial_delay"
+  | "agent_auto_resume_max_delay"
+  | "agent_auto_resume_max_attempts"
   | "preceding_lines_threshold"
   | "clean_ruby"
   | "deduplication_in_bilingual"
@@ -16,6 +20,10 @@ export function build_expert_settings_snapshot(
   settings_snapshot: SettingsSnapshot,
 ): ExpertSettingsSnapshot {
   return {
+    agent_auto_resume_enabled: settings_snapshot.agent_auto_resume_enabled,
+    agent_auto_resume_initial_delay: settings_snapshot.agent_auto_resume_initial_delay,
+    agent_auto_resume_max_delay: settings_snapshot.agent_auto_resume_max_delay,
+    agent_auto_resume_max_attempts: settings_snapshot.agent_auto_resume_max_attempts,
     preceding_lines_threshold: settings_snapshot.preceding_lines_threshold,
     clean_ruby: settings_snapshot.clean_ruby,
     deduplication_in_bilingual: settings_snapshot.deduplication_in_bilingual,

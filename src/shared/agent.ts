@@ -201,7 +201,7 @@ export type AgentEntry = JsonRecord &
               status: AgentEntryStatus;
               endedAt: number | null;
               averageTokensPerSecond: number | null; // 终态生成均速，运行中或没有有效统计时为空。
-              failure: AgentRunFailure | null; // 只有失败终态携带原因摘要。
+              failure: AgentRunFailure | null; // 最近一次失败原因；自动重试运行中仍保留，成功或停止后清空。
             }
           | { delivery: "steer"; status: "success"; endedAt: number }
         ))
@@ -221,12 +221,12 @@ export type AgentTokenSpeedSnapshot =
   | (JsonRecord & { roundId: string; tokensPerSecond: number })
   | null;
 
-/** 可重试失败后的自动续跑等待；`retryAt` 是后端时钟的绝对毫秒时间。 */
+/** 可重试失败后的自动重试状态；`retryAt` 为等待中的后端时钟绝对毫秒，为空表示重试正在执行。 */
 export type AgentAutoResumeSnapshot = JsonRecord & {
   roundId: string;
   attempt: number; // 从 1 开始
-  maxAttempts: number;
-  retryAt: number;
+  maxAttempts: number | null; // 空表示不限次数
+  retryAt: number | null; // 空表示重试已开始
 };
 
 /** 当前产品对话累计的模型用量，历史修订后仍保留已发生的消耗。 */

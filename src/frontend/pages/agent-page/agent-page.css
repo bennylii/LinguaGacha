@@ -264,15 +264,19 @@
   color: color-mix(in srgb, var(--ui-failure) 64%, var(--foreground));
 }
 
-.agent-continue-entry:hover:not(:disabled) {
+.agent-continue-entry--static {
+  cursor: default;
+}
+
+button.agent-continue-entry:hover:not(:disabled) {
   background: color-mix(in srgb, var(--ui-failure) 9%, var(--card));
 }
 
-.agent-continue-entry:active:not(:disabled) {
+button.agent-continue-entry:active:not(:disabled) {
   transform: translateY(1px);
 }
 
-.agent-continue-entry:focus-visible {
+button.agent-continue-entry:focus-visible {
   outline: 1px solid var(--ring);
   outline-offset: 2px;
 }

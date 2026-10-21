@@ -1,16 +1,44 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 
-/** 外层续跑只承接 SDK 内层重试耗尽后的瞬时故障，次数与等待都必须有界。 */
-export const AGENT_AUTO_RESUME_MAX_ATTEMPTS = 5;
-export const AGENT_AUTO_RESUME_BASE_DELAY_MS = 5_000;
-export const AGENT_AUTO_RESUME_MAX_DELAY_MS = 60_000;
+import type { JsonRecord } from "../../domain/json";
+import {
+  normalize_agent_auto_resume_enabled,
+  normalize_agent_auto_resume_initial_delay,
+  normalize_agent_auto_resume_max_attempts,
+  normalize_agent_auto_resume_max_delay,
+} from "../../domain/setting";
 
-/** 第 1 至 5 次等待分别为 5、10、20、40、60 秒。 */
-export function auto_resume_delay_ms(attempt: number): number {
+/** 外层自动重试策略；次数为 0 时持续重试，等待间隔按指数增长并封顶。 */
+export type AgentAutoResumePolicy = {
+  enabled: boolean;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  maxAttempts: number; // 0 表示不限
+};
+
+/** 读取设置快照中的自动重试策略，缺失或非法值由领域归一化回默认。 */
+export function read_agent_auto_resume_policy(setting: JsonRecord): AgentAutoResumePolicy {
+  return {
+    enabled: normalize_agent_auto_resume_enabled(setting["agent_auto_resume_enabled"]),
+    initialDelayMs:
+      normalize_agent_auto_resume_initial_delay(setting["agent_auto_resume_initial_delay"]) * 1_000,
+    maxDelayMs:
+      normalize_agent_auto_resume_max_delay(setting["agent_auto_resume_max_delay"]) * 1_000,
+    maxAttempts: normalize_agent_auto_resume_max_attempts(
+      setting["agent_auto_resume_max_attempts"],
+    ),
+  };
+}
+
+/** 第 N 次等待从初始间隔开始翻倍，达到最长间隔后固定。 */
+export function auto_resume_delay_ms(attempt: number, policy: AgentAutoResumePolicy): number {
   const normalized = Math.max(1, Math.floor(attempt));
-  const delay = AGENT_AUTO_RESUME_BASE_DELAY_MS * 2 ** (normalized - 1);
-  return Math.min(delay, AGENT_AUTO_RESUME_MAX_DELAY_MS);
+  const base = Math.max(1, Math.floor(policy.initialDelayMs));
+  const max_delay = Math.max(base, Math.floor(policy.maxDelayMs));
+  // 指数超过 31 时 2 的幂已超出 setTimeout 可表示范围，直接使用封顶值。
+  if (normalized - 1 >= 31) return max_delay;
+  return Math.min(base * 2 ** (normalized - 1), max_delay);
 }
 
 /**

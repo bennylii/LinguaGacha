@@ -3114,7 +3114,7 @@ describe("AgentService", () => {
     expect(diagnostics()).toEqual([]);
   });
 
-  it("可重试模型失败耗尽内层重试后自动续跑并清除等待", async () => {
+  it("可重试模型失败耗尽内层重试后自动重试并清除等待", async () => {
     vi.useFakeTimers();
     const { service, diagnostics } = await create_service();
     fake_agent_state.mode = "retry_exhausted";
@@ -3124,7 +3124,10 @@ describe("AgentService", () => {
 
     expect(fake_agent_state.model_call_count).toBe(4);
     expect(fake_agent_state.prompts.at(-1)).toBe("自动续跑");
-    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1, maxAttempts: 5 });
+    expect(service.get_snapshot().autoResume).toMatchObject({
+      attempt: 1,
+      maxAttempts: null,
+    });
     expect(service.get_snapshot().entries[0]).toMatchObject({
       kind: "user_message",
       status: "error",
@@ -3144,9 +3147,36 @@ describe("AgentService", () => {
     ]);
   });
 
-  it("自动续跑达到五次上限后保留失败轮次并停止等待", async () => {
+  it("默认不限次数时持续安排自动重试", async () => {
     vi.useFakeTimers();
-    const { service, diagnostics } = await create_service();
+    const { service } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "持续故障", attachments: [] });
+    await advance_to_auto_resume(service);
+    expect(service.get_snapshot().autoResume).toMatchObject({
+      attempt: 1,
+      maxAttempts: null,
+    });
+
+    // 第二次失败后仍按增长后的间隔继续安排，没有五次上限。
+    await vi.advanceTimersByTimeAsync(5_000);
+    await advance_to_auto_resume(service);
+
+    expect(fake_agent_state.model_call_count).toBe(8);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle" });
+    expect(service.get_snapshot().autoResume).toMatchObject({
+      attempt: 2,
+      maxAttempts: null,
+    });
+    expect(service.get_snapshot().entries[0]).toMatchObject({ status: "error" });
+    await service.stop();
+  });
+
+  it("配置次数上限后停止继续安排", async () => {
+    vi.useFakeTimers();
+    const { service, diagnostics, set_auto_resume_settings } = await create_service();
+    set_auto_resume_settings({ agent_auto_resume_max_attempts: 5 });
     fake_agent_state.mode = "retry_exhausted";
 
     await service.send_message({ text: "持续故障", attachments: [] });
@@ -3158,6 +3188,123 @@ describe("AgentService", () => {
     expect(service.get_snapshot().entries[0]).toMatchObject({ status: "error" });
     expect(diagnostics()).toHaveLength(6);
     expect(diagnostics().every((payload) => payload.level === "error")).toBe(true);
+  });
+
+  it("关闭自动重试后不安排等待", async () => {
+    vi.useFakeTimers();
+    const { service, set_auto_resume_settings } = await create_service();
+    set_auto_resume_settings({ agent_auto_resume_enabled: false });
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "关闭重试", attachments: [] });
+    await vi.runAllTimersAsync();
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.model_call_count).toBe(4);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    expect(service.get_snapshot().entries[0]).toMatchObject({ status: "error" });
+  });
+
+  it("首次等待时长来自设置并持续翻倍", async () => {
+    vi.useFakeTimers();
+    const { service, set_auto_resume_settings } = await create_service();
+    set_auto_resume_settings({
+      agent_auto_resume_initial_delay: 2,
+      agent_auto_resume_max_delay: 9,
+    });
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "自定义间隔", attachments: [] });
+    await advance_to_auto_resume(service);
+
+    const first_remaining = (service.get_snapshot().autoResume?.retryAt ?? 0) - Date.now();
+    // 快照创建与实际推进之间存在毫秒级偏差，只校验落在设置决定的区间内。
+    expect(first_remaining).toBeGreaterThan(1_000);
+    expect(first_remaining).toBeLessThanOrEqual(2_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fake_agent_state.model_call_count).toBe(4);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await advance_to_auto_resume(service);
+
+    // 第二次等待翻倍到 4 秒，仍未达到最长间隔。
+    expect(fake_agent_state.model_call_count).toBe(8);
+    const second_remaining = (service.get_snapshot().autoResume?.retryAt ?? 0) - Date.now();
+    expect(second_remaining).toBeGreaterThan(2_000);
+    expect(second_remaining).toBeLessThanOrEqual(4_000);
+    await service.stop();
+  });
+
+  it("自动重试运行中保留上次失败并公开重试状态", async () => {
+    vi.useFakeTimers();
+    const { service } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "重试中", attachments: [] });
+    await advance_to_auto_resume(service);
+    fake_agent_state.mode = "pending";
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(fake_agent_state.release_pending).not.toBeNull());
+
+    expect(service.get_snapshot().autoResume).toMatchObject({
+      attempt: 1,
+      retryAt: null,
+    });
+    // 失败轮次回到运行中，但最近一次失败原因继续展示。
+    expect(service.get_snapshot().entries[0]).toMatchObject({
+      kind: "user_message",
+      status: "running",
+      failure: { status: 503, detail: "Service Unavailable" },
+    });
+
+    fake_agent_state.release_pending?.();
+    await wait_for_idle(service);
+
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    expect(service.get_snapshot().entries[0]).toMatchObject({
+      status: "success",
+      failure: null,
+    });
+  });
+
+  it("等待期间关闭自动重试后本次等待不再请求模型", async () => {
+    vi.useFakeTimers();
+    const { service, set_auto_resume_settings } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "等待关闭", attachments: [] });
+    await advance_to_auto_resume(service);
+    expect(service.get_snapshot().autoResume).not.toBeNull();
+    const calls = fake_agent_state.model_call_count;
+
+    set_auto_resume_settings({ agent_auto_resume_enabled: false });
+    await vi.runAllTimersAsync();
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.model_call_count).toBe(calls);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    expect(service.get_snapshot().entries[0]).toMatchObject({ status: "error" });
+  });
+
+  it("自动重试执行中停止会结束轮次并清除重试状态", async () => {
+    vi.useFakeTimers();
+    const { service } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "重试中停止", attachments: [] });
+    await advance_to_auto_resume(service);
+    fake_agent_state.mode = "pending";
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(fake_agent_state.release_pending).not.toBeNull());
+    expect(service.get_snapshot().autoResume).toMatchObject({ retryAt: null });
+
+    await service.stop();
+    await wait_for_idle(service);
+
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    expect(service.get_snapshot().entries[0]).toMatchObject({
+      status: "stopped",
+      failure: null,
+    });
   });
 
   it("不可重试模型失败不安排自动续跑", async () => {
@@ -4317,6 +4464,14 @@ describe("AgentService", () => {
   });
 
   /** 只替换资源、模型与领域协作者，生命周期、门禁和 AgentChat 仍走生产实现。 */
+  /** 自动重试设置随每次读取生效，便于用例在失败之间调整策略。 */
+  type TestAutoResumeSettings = {
+    agent_auto_resume_enabled: boolean;
+    agent_auto_resume_initial_delay: number;
+    agent_auto_resume_max_delay: number;
+    agent_auto_resume_max_attempts: number;
+  };
+
   async function create_service(
     load_resources = true,
     web_search?: AgentWebSearchPort,
@@ -4351,6 +4506,7 @@ describe("AgentService", () => {
     select_batch_translation_model: (model_id: string | null) => void;
     set_personality: (value: string | null) => void;
     set_approval_mode: (value: AgentApprovalMode) => void;
+    set_auto_resume_settings: (value: Partial<TestAutoResumeSettings>) => void;
     session_state: ProjectSessionState;
   }> {
     const session_state = new ProjectSessionState();
@@ -4361,12 +4517,19 @@ describe("AgentService", () => {
     let app_language: AppLanguage = "ZH";
     let personality: string | null = null;
     let approval_mode: AgentApprovalMode = "manual";
+    let auto_resume_settings: TestAutoResumeSettings = {
+      agent_auto_resume_enabled: true,
+      agent_auto_resume_initial_delay: 5,
+      agent_auto_resume_max_delay: 300,
+      agent_auto_resume_max_attempts: 0,
+    };
     const settings = {
       read_setting: () => {
         return {
           app_language,
           agent_personality: personality,
           agent_approval_mode: approval_mode,
+          ...auto_resume_settings,
           model_selection: {
             translation: "active",
             agent: agent_model_id,
@@ -4509,6 +4672,9 @@ describe("AgentService", () => {
       },
       set_personality: (value: string | null) => {
         personality = value;
+      },
+      set_auto_resume_settings: (value) => {
+        auto_resume_settings = { ...auto_resume_settings, ...value };
       },
       service,
       workspace: effective_workspace,
