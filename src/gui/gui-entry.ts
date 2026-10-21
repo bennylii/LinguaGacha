@@ -1,5 +1,6 @@
 import { resolve_workspace_runtime_directory } from "../native/workspace-runtime";
 import { app, BrowserWindow, session, shell } from "electron";
+import { spawn } from "node:child_process";
 import path from "node:path";
 
 import * as AppErrors from "../shared/error";
@@ -28,6 +29,7 @@ import { BackendRuntimeClient } from "./runtime/backend-runtime-client";
 export interface GuiEntryOptions {
   desktopBundleDir: string; // 产品入口解析出的桌面 bundle 根目录
   backendRuntimeWorkerEntryUrl: URL;
+  initialProjectPath?: string | null; // 新窗口由 --project 预加载的工程
 }
 
 const PROXY_BYPASS_RULES = "localhost,127.0.0.1,[::1]"; // 本机回环固定直连，与后端路由保持一致
@@ -92,6 +94,24 @@ export function run_gui_entry(options: GuiEntryOptions): void {
       const result = await pick_save_path(win, null, default_name, []);
       return result.canceled ? null : (result.paths[0] ?? null);
     },
+    focusWindow: async () => {
+      const target = win;
+      if (target === null || target.isDestroyed()) return;
+      if (target.isMinimized()) target.restore();
+      target.show();
+      target.focus();
+    },
+    openProjectWindow: async (project_path) => {
+      // 开发态 process.execPath 是 Electron 可执行文件，必须显式带上应用目录。
+      const args = process.defaultApp
+        ? [app.getAppPath(), "--project", project_path]
+        : ["--project", project_path];
+      const child = spawn(process.execPath, args, {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    },
     onUnexpectedExit: (error) => {
       try_show_native_error_dialog("LinguaGacha 后端异常退出", error.message);
       void quit_app_after_backend_shutdown(1);
@@ -139,6 +159,31 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     }
 
     return backend_ready;
+  }
+
+  /**
+   * 新窗口在 renderer 首次读取快照前打开 --project，避免首屏先显示工程主页。
+   * 打开失败仍继续启动；工程主页会保留可见的错误入口。
+   */
+  async function open_initial_project(api_base_url: string): Promise<void> {
+    const project_path = options.initialProjectPath?.trim() ?? "";
+    if (project_path === "") return;
+    try {
+      const response = await fetch(`${api_base_url}/api/session/project/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: project_path }),
+      });
+      if (!response.ok)
+        throw new Error(`Initial project open failed: ${response.status.toString()}.`);
+    } catch (error) {
+      await record_host_diagnostic({
+        level: "warning",
+        messageKey: "app.diagnostic.lifecycle.app_start_failed",
+        error,
+        context: { reason: "initial_project_open_failed", project_path },
+      });
+    }
   }
 
   /**
@@ -271,6 +316,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
         recordHostDiagnostic: record_host_diagnostic,
       });
       register_runtime_ipc_handlers();
+      await open_initial_project(backend_start_result.apiBaseUrl);
       // Backend、更新器和 IPC 完整就绪后才允许 macOS Dock 恢复窗口。
       app.on("activate", () => {
         if (shutdown_promise === null && (win === null || win.isDestroyed())) {

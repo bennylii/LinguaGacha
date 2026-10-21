@@ -104,6 +104,55 @@
   --path-selection-card-tone: var(--project-home-source);
 }
 
+.project-home__novel-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px dashed color-mix(in srgb, var(--project-home-source) 45%, var(--border));
+  border-radius: var(--ui-radius-card);
+  background: color-mix(in srgb, var(--project-home-source) 4%, transparent);
+}
+
+.project-home__novel-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-home__novel-hint {
+  margin: 0;
+  font-size: var(--ui-font-size-12);
+  line-height: 1.5;
+  color: var(--project-home-muted);
+}
+
+.project-home__novel-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.project-home__novel-title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--ui-font-size-14);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.project-home__novel-subtitle,
+.project-home__novel-meta {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--ui-font-size-12);
+  line-height: 1.45;
+  color: var(--project-home-muted);
+}
+
 .project-home__selection--project {
   --path-selection-card-tone: var(--project-home-project);
 }

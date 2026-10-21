@@ -36,7 +36,13 @@ export class BackendResources {
     public readonly logManager: LogManager,
     public readonly proxyResolver: SystemProxyResolver, // 按设置解析路由，工作区子进程与后端共用同一策略
     private readonly system_proxy_http_client: SystemProxyHttpClient,
-  ) {}
+    private readonly novelia_http_client: SystemProxyHttpClient,
+  ) {
+    // 站点导入需要跟随站点 302；与全局 transport 分开，避免放开其他 SDK 的自动重定向。
+    this.noveliaFetch = novelia_http_client.fetch;
+  }
+
+  public readonly noveliaFetch: typeof globalThis.fetch;
 
   /** 启动迁移、设置、日志、数据库与共享出站 HTTP transport。 */
   public static async start(options: BackendResourceOptions): Promise<BackendResources> {
@@ -51,6 +57,7 @@ export class BackendResources {
     });
     const database = new ProjectDatabase();
     let system_proxy_http_client: SystemProxyHttpClient | null = null;
+    let novelia_http_client: SystemProxyHttpClient | null = null;
 
     try {
       write_bootstrap_log("", log_manager);
@@ -72,6 +79,14 @@ export class BackendResources {
           }),
       });
       system_proxy_http_client.install_as_global_fetch();
+      novelia_http_client = new SystemProxyHttpClient(proxy_resolver, {
+        redirects: "request",
+        onTransportFailure: (failure) =>
+          log_manager.warning(t_main_log("app.diagnostic.network.transport_failure"), {
+            error: failure.error,
+            context: describe_transport_failure(failure),
+          }),
+      });
       return new BackendResources(
         paths,
         metadata,
@@ -80,6 +95,7 @@ export class BackendResources {
         log_manager,
         proxy_resolver,
         system_proxy_http_client,
+        novelia_http_client,
       );
     } catch (error) {
       const failures: unknown[] = [error];
@@ -92,6 +108,7 @@ export class BackendResources {
       } catch (log_error) {
         failures.push(log_error);
       }
+      await collect_failure(failures, async () => await novelia_http_client?.dispose());
       await collect_failure(failures, async () => await system_proxy_http_client?.dispose());
       await collect_failure(failures, () => database.close());
       await collect_failure(failures, async () => await log_manager.shutdown());
@@ -108,6 +125,7 @@ export class BackendResources {
     if (this.disposed) return;
     this.disposed = true;
     const failures: unknown[] = [];
+    await collect_failure(failures, async () => await this.novelia_http_client.dispose());
     await collect_failure(failures, async () => await this.system_proxy_http_client.dispose());
     await collect_failure(failures, () => this.database.close());
     await collect_failure(failures, async () => await this.logManager.shutdown());

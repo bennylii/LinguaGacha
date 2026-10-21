@@ -327,6 +327,8 @@ function create_client(
     throw new Error("无法打开目录");
   });
   const pick_save_path = vi.fn(async (_name: string): Promise<string | null> => null);
+  const focus_window = vi.fn(async () => {});
+  const open_project_window = vi.fn(async (_project_path: string) => {});
   const on_unexpected_exit = vi.fn();
   return {
     client: new BackendRuntimeClient({
@@ -337,6 +339,8 @@ function create_client(
       resolveProxy: resolve_proxy,
       openDirectory: open_directory,
       pickSavePath: pick_save_path,
+      focusWindow: focus_window,
+      openProjectWindow: open_project_window,
       ...(pdfHost === undefined ? {} : { pdfHost }),
       imageHost,
       onUnexpectedExit: on_unexpected_exit,
@@ -344,6 +348,8 @@ function create_client(
     resolve_proxy,
     open_directory,
     pick_save_path,
+    focus_window,
+    open_project_window,
     on_unexpected_exit,
   };
 }

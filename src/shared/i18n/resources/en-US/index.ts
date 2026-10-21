@@ -18,6 +18,7 @@ import { en_us_preset_editor } from "./preset-editor";
 import { en_us_proofreading_page } from "./proofreading-page";
 import { en_us_project_page } from "./project-page";
 import { en_us_quality_rule_editor } from "./quality-rule-editor";
+import { en_us_remote_page } from "./remote-page";
 import { en_us_task_progress } from "./task-progress";
 import { en_us_text_preserve_page } from "./text-preserve-page";
 import { en_us_text_replacement_page } from "./text-replacement-page";
@@ -45,6 +46,7 @@ export const en_us_messages = {
   proofreading_page: en_us_proofreading_page,
   project_page: en_us_project_page,
   quality_rule_editor: en_us_quality_rule_editor,
+  remote_page: en_us_remote_page,
   task_progress: en_us_task_progress,
   text_preserve_page: en_us_text_preserve_page,
   text_replacement_page: en_us_text_replacement_page,

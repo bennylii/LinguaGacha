@@ -1,4 +1,4 @@
-import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
+import { push_error_toast, push_toast } from "@frontend/app/feedback/desktop-toast";
 import { TranslationGenerationProvider } from "@frontend/app/session/translation-generation/translation-generation-provider";
 import { PageLeaveProvider } from "@frontend/app/navigation/page-leave-provider";
 import { usePageLeave } from "@frontend/app/navigation/page-leave-context";
@@ -50,6 +50,12 @@ import { Toaster } from "@frontend/shadcn/sonner";
 import { TooltipProvider } from "@frontend/shadcn/tooltip";
 import { AppSidebar } from "@frontend/app/shell/app-sidebar";
 import { AppTitlebar } from "@frontend/app/shell/app-titlebar";
+import { ProjectSwitcher } from "@frontend/app/shell/project-switcher";
+import { format_project_settings_aligned_toast } from "@frontend/app/feedback/project-settings-alignment-feedback";
+import {
+  build_project_prefilter_settings,
+  open_project_in_current_window,
+} from "@frontend/app/project/open-project";
 import { AppActionDialog, AppConfirmDialog } from "@frontend/widgets/app-alert-dialog";
 import { LogWindowPage } from "@frontend/pages/log-window-page/page";
 import {
@@ -114,6 +120,10 @@ function AppContent(): JSX.Element {
     project_session_status,
     settings_snapshot,
     set_pending_target_route,
+    set_project_session_status,
+    refresh_project_snapshot,
+    refresh_settings,
+    refresh_batch_translation,
     update_app_language,
   } = useDesktopState();
 
@@ -512,6 +522,34 @@ function AppContent(): JSX.Element {
     }
   }
 
+  /**
+   * 顶栏切换工程复用打开工程的设置对齐链路，随后由 DesktopState 监听快照变化完成会话加载。
+   */
+  async function handle_switch_project(project_path: string): Promise<void> {
+    const alignment = await open_project_in_current_window({
+      path: project_path,
+      settings: settings_snapshot,
+    });
+    set_project_session_status("warming");
+    await refresh_project_snapshot();
+    const file_name = project_path.split(/[\\/]+/u).at(-1) ?? project_path;
+    await api_fetch("/api/settings/recent-projects/add", {
+      path: project_path,
+      name: file_name.replace(/\.[^.]+$/u, ""),
+    });
+    await Promise.all([refresh_settings(), refresh_batch_translation()]);
+    if (alignment.aligned) {
+      push_toast(
+        "info",
+        format_project_settings_aligned_toast({
+          settings: build_project_prefilter_settings(settings_snapshot),
+          changed_fields: alignment.changed_fields,
+          t,
+        }),
+      );
+    }
+  }
+
   return (
     <>
       <RendererDiagnosticsSync
@@ -542,7 +580,16 @@ function AppContent(): JSX.Element {
             } as CSSProperties
           }
         >
-          <AppTitlebar title={app_title} />
+          <AppTitlebar
+            title={app_title}
+            actions={
+              <ProjectSwitcher
+                current_project_path={project_snapshot.loaded ? project_snapshot.path : ""}
+                recent_projects={settings_snapshot.recent_projects}
+                on_open_in_current_window={handle_switch_project}
+              />
+            }
+          />
           <section className="shell-body">
             <AppSidebar
               groups={visible_navigation_groups}

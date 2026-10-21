@@ -18,6 +18,7 @@ import { zh_cn_preset_editor } from "./preset-editor";
 import { zh_cn_proofreading_page } from "./proofreading-page";
 import { zh_cn_project_page } from "./project-page";
 import { zh_cn_quality_rule_editor } from "./quality-rule-editor";
+import { zh_cn_remote_page } from "./remote-page";
 import { zh_cn_task_progress } from "./task-progress";
 import { zh_cn_text_preserve_page } from "./text-preserve-page";
 import { zh_cn_text_replacement_page } from "./text-replacement-page";
@@ -43,6 +44,7 @@ export const zh_cn_messages = {
   proofreading_page: zh_cn_proofreading_page,
   project_page: zh_cn_project_page,
   quality_rule_editor: zh_cn_quality_rule_editor,
+  remote_page: zh_cn_remote_page,
   task_progress: zh_cn_task_progress,
   text_preserve_page: zh_cn_text_preserve_page,
   text_replacement_page: zh_cn_text_replacement_page,

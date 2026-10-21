@@ -49,6 +49,8 @@ export class BackendRuntimeClient {
       resolveProxy: (url: string) => Promise<string>;
       openDirectory: (path: string) => Promise<void>;
       pickSavePath: (defaultName: string) => Promise<string | null>;
+      focusWindow: () => Promise<void>;
+      openProjectWindow: (projectPath: string) => Promise<void>;
       onUnexpectedExit: (error: Error) => void;
     },
   ) {}
@@ -195,6 +197,12 @@ export class BackendRuntimeClient {
           break;
         case "pick_save_path":
           data = await this.options.pickSavePath(operation.defaultName);
+          break;
+        case "focus_window":
+          data = await this.options.focusWindow();
+          break;
+        case "open_project_window":
+          data = await this.options.openProjectWindow(operation.project_path);
           break;
       }
       result = { ok: true, data };

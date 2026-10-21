@@ -25,10 +25,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProjectDatabase, ProjectDatabaseAccess } from "../database/database-operations";
 import { read_json_record, type JsonRecord, type JsonValue } from "../../domain/json";
+import type { ItemNameField, ItemStatus } from "../../domain/item";
+import type { ProjectDataSectionRevisions } from "../../shared/project-event";
 import { FileFormatService } from "../file/file-format-service";
 import type { LogManager } from "../log/log-manager";
 import { RuntimeOperationGate } from "../runtime-operation-gate";
 import { ProjectContentService } from "./project-content-service";
+import type { RemoteOldItem, RemoteRowPlan } from "../remote/novelia-source";
+import { REMOTE_SOURCE_META_KEY, type RemoteSourceBinding } from "../remote/remote-source";
 import { adapt_project_change, type ProjectChangePublisher } from "./project-write-event-adapter";
 import { ProjectWriteStore } from "./project-write-store";
 
@@ -2011,5 +2015,153 @@ describe("ProjectContentService", () => {
     ).rejects.toThrow(expect.objectContaining({ code: "request.validation_failed" }));
 
     await database.close();
+  });
+
+  it("整本替换保留可复用条目的 id、译文与状态并写入远程绑定", async () => {
+    const { database, service, lg_path } = await create_service();
+    const source = project_path("remote-novel.txt");
+    fs.writeFileSync(source, "第一行\n第二行\n第三行");
+    const revisions = async (): Promise<ProjectDataSectionRevisions> =>
+      (
+        await database.read(lg_path, (access) =>
+          new ProjectDataReader(access).build_manifest({ loaded: true, projectPath: lg_path }),
+        )
+      ).sectionRevisions as unknown as ProjectDataSectionRevisions;
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      provider_id: "kakuyomu",
+      novel_id: "123456",
+      url: "https://n.novelia.cc/novel/kakuyomu/123456",
+      title: "测试小说",
+      asset_path: "remote-novel.txt",
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+
+    try {
+      const preview = await service.preview_import_files({ source_paths: [source] });
+      await service.import_files({
+        files: preview.files!,
+        conflict_action: "replace",
+        expected_section_revisions: await revisions(),
+      });
+      const old_items = await database.get_all_items(lg_path);
+      expect(old_items.map((item) => item.src)).toEqual(["第一行", "第二行", "第三行"]);
+      await database.transaction(lg_path, (writer) =>
+        writer.set_items(
+          lg_path,
+          old_items.map((item, index) => ({
+            ...item,
+            dst: `译文${(index + 1).toString()}`,
+            status: "PROCESSED" as const,
+          })),
+        ),
+      );
+      const translated_items = (await database.get_all_items(lg_path)).map((item) => ({
+        id: Number(item["id"]),
+        row: Number(item["row"]),
+        src: String(item["src"] ?? ""),
+        dst: String(item["dst"] ?? ""),
+        name_dst: (item["name_dst"] ?? null) as ItemNameField,
+        status: String(item["status"] ?? "NONE") as ItemStatus,
+        extra_field: (item["extra_field"] ?? "") as JsonValue,
+      }));
+      const old_item = (index: number): RemoteOldItem => {
+        const item = translated_items.find((candidate) => candidate.row === index)!;
+        return {
+          item_id: item.id,
+          row: item.row,
+          src: item.src,
+          dst: item.dst,
+          name_dst: item.name_dst,
+          status: item.status,
+          extra_field: item.extra_field,
+        };
+      };
+      const rows: RemoteRowPlan[] = [
+        {
+          row: 0,
+          src: "第一行",
+          src_hash: "hash-0",
+          chapter_index: 0,
+          decision: "preserve",
+          old_item: old_item(0),
+          similarity: 1,
+          review: false,
+        },
+        {
+          row: 1,
+          src: "第二行改",
+          src_hash: "hash-1",
+          chapter_index: 0,
+          decision: "retranslate",
+          old_item: old_item(1),
+          similarity: 0.4,
+          review: true,
+        },
+        {
+          row: 2,
+          src: "第三行",
+          src_hash: "hash-2",
+          chapter_index: 0,
+          decision: "keep",
+          old_item: old_item(2),
+          similarity: 0.9,
+          review: true,
+        },
+        {
+          row: 3,
+          src: "第四行",
+          src_hash: "hash-3",
+          chapter_index: 0,
+          decision: "retranslate",
+          old_item: null,
+          similarity: 0,
+          review: false,
+        },
+      ];
+
+      const result = await service.replace_remote_asset({
+        assetPath: "remote-novel.txt",
+        content: "第一行\n第二行改\n第三行\n第四行",
+        binding,
+        rows,
+        overrides: new Map([[0, { action: "keep", dst: "手改译文" }]]),
+        expectedSectionRevisions: await revisions(),
+      });
+
+      expect(result.changes[0]).toMatchObject({ source: "remote_sync" });
+      expect(
+        (await database.read_asset_content(lg_path, "remote-novel.txt"))?.toString("utf8"),
+      ).toBe("第一行\n第二行改\n第三行\n第四行");
+      const saved_items = (await database.get_all_items(lg_path))
+        .map((item) => ({
+          id: Number(item["id"]),
+          row: Number(item["row"]),
+          src: item["src"],
+          dst: item["dst"],
+          status: item["status"],
+        }))
+        .sort((left, right) => left.row - right.row);
+      expect(saved_items).toMatchObject([
+        { row: 0, src: "第一行", dst: "手改译文", status: "PROCESSED" },
+        { row: 1, src: "第二行改", dst: "", status: "NONE" },
+        { row: 2, src: "第三行", dst: "译文3", status: "PROCESSED" },
+        { row: 3, src: "第四行", dst: "", status: "NONE" },
+      ]);
+      // 保留旧译的行沿用原 item id，重译与新行分配新 id。
+      expect(saved_items[0]?.id).toBe(translated_items.find((item) => item.row === 0)?.id);
+      expect(saved_items[1]?.id).not.toBe(translated_items.find((item) => item.row === 1)?.id);
+      expect(saved_items[2]?.id).toBe(translated_items.find((item) => item.row === 2)?.id);
+      expect(await read_meta(database, lg_path, REMOTE_SOURCE_META_KEY, null)).toMatchObject({
+        title: "测试小说",
+        asset_path: "remote-novel.txt",
+      });
+    } finally {
+      await database.close();
+    }
   });
 });

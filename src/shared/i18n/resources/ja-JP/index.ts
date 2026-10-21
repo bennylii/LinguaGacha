@@ -18,6 +18,7 @@ import { ja_jp_preset_editor } from "./preset-editor";
 import { ja_jp_project_page } from "./project-page";
 import { ja_jp_proofreading_page } from "./proofreading-page";
 import { ja_jp_quality_rule_editor } from "./quality-rule-editor";
+import { ja_jp_remote_page } from "./remote-page";
 import { ja_jp_task_progress } from "./task-progress";
 import { ja_jp_text_preserve_page } from "./text-preserve-page";
 import { ja_jp_text_replacement_page } from "./text-replacement-page";
@@ -46,6 +47,7 @@ export const ja_jp_messages = {
   project_page: ja_jp_project_page,
   proofreading_page: ja_jp_proofreading_page,
   quality_rule_editor: ja_jp_quality_rule_editor,
+  remote_page: ja_jp_remote_page,
   task_progress: ja_jp_task_progress,
   text_preserve_page: ja_jp_text_preserve_page,
   text_replacement_page: ja_jp_text_replacement_page,

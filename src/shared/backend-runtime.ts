@@ -23,7 +23,9 @@ export type BackendRuntimeHostOperation =
   | AgentImageHostOperation
   | { kind: "resolve_proxy"; url: string }
   | { kind: "open_directory"; path: string }
-  | { kind: "pick_save_path"; defaultName: string };
+  | { kind: "pick_save_path"; defaultName: string }
+  | { kind: "focus_window" }
+  | { kind: "open_project_window"; project_path: string };
 
 export type BackendRuntimeDiagnosticLevel = "warning" | "error" | "fatal";
 
