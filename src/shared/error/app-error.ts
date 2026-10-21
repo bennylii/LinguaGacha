@@ -34,6 +34,11 @@ export const APP_ERROR_DEFINITIONS = {
     status: 404,
     severity: "expected",
   },
+  "project.already_open": {
+    message: "The project is already open in another window.",
+    status: 409,
+    severity: "expected",
+  },
   "translation.generation_failed": {
     message: "Translation file generation failed.",
     status: 500,
@@ -156,6 +161,66 @@ export const APP_ERROR_DEFINITIONS = {
   "prompt.unknown_prompt_type": {
     message: "The prompt type is invalid.",
     status: 400,
+    severity: "expected",
+  },
+  "remote.invalid_url": {
+    message: "The novel URL is not supported.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.auth_missing": {
+    message: "The novel site credential is missing.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.auth_rejected": {
+    message: "The novel site rejected the credential.",
+    status: 502,
+    severity: "warning",
+  },
+  "remote.fetch_failed": {
+    message: "The novel site request failed.",
+    status: 502,
+    severity: "warning",
+  },
+  "remote.source_not_bound": {
+    message: "The project is not bound to a remote novel.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.workspace_empty": {
+    message: "The remote novel has no readable chapters.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.alignment_stale": {
+    message: "The remote text changed after the sync preview.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.alignment_required": {
+    message: "The changes are too large for automatic alignment.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.stash_expired": {
+    message: "The sync preview has expired.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.bridge_unavailable": {
+    message: "The local credential bridge is unavailable.",
+    status: 500,
+    severity: "warning",
+  },
+  "remote.instance_unavailable": {
+    message: "The target application instance is unavailable.",
+    status: 502,
+    severity: "warning",
+  },
+  "remote.window_unsupported": {
+    message: "Opening another window is not supported in this environment.",
+    status: 500,
     severity: "expected",
   },
 } as const satisfies Readonly<Record<string, AppErrorDefinition>>;

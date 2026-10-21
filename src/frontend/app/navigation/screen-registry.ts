@@ -11,6 +11,7 @@ import { ModelPage } from "@frontend/pages/model-page/page";
 import { SkillsPage } from "@frontend/pages/skills-page/page";
 import { ProofreadingPage } from "@frontend/pages/proofreading-page/page";
 import { ProjectPage } from "@frontend/pages/project-page/page";
+import { RemotePage } from "@frontend/pages/remote-page/page";
 import { TextPreservePage } from "@frontend/pages/text-preserve-page/page";
 import { TextReplacementPage } from "@frontend/pages/text-replacement-page/page";
 import { ToolboxPage } from "@frontend/pages/toolbox-page/page";
@@ -91,6 +92,10 @@ export const SCREEN_REGISTRY: ScreenRegistry = {
   toolbox: {
     component: ToolboxPage,
     title_key: "toolbox_page.title",
+  },
+  remote: {
+    component: RemotePage,
+    title_key: "remote_page.title",
   },
   "game-font": {
     component: GameFontPage,

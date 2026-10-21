@@ -19,6 +19,7 @@ export type RouteId =
   | "custom-prompt"
   | "laboratory"
   | "toolbox"
+  | "remote"
   | "game-font";
 
 /** 规则页跳转到校对页时只传一次性搜索条件，不携带页面筛选缓存。 */

@@ -111,6 +111,12 @@ export async function run_backend_runtime(args: {
       }
       return result;
     },
+    focusWindow: async () => {
+      await call_host({ kind: "focus_window" });
+    },
+    openProjectWindow: async (project_path) => {
+      await call_host({ kind: "open_project_window", project_path });
+    },
     workspaceRuntimeDirectory: args.workspaceRuntimeDirectory,
     workerExecution:
       build_worker_threads_backend_worker_execution_from_desktop_bundle_dir(desktop_bundle_dir),

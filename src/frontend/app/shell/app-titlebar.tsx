@@ -1,5 +1,5 @@
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
-import { type JSX, startTransition } from "react";
+import { type JSX, type ReactNode, startTransition } from "react";
 
 import { useI18n } from "@frontend/app/locale/locale-context";
 import { useSidebar } from "@frontend/shadcn/sidebar-context";
@@ -11,6 +11,7 @@ import "@frontend/app/shell/app-titlebar.css";
 
 type AppTitlebarProps = {
   title: string;
+  actions?: ReactNode; // 页面级工具（例如工程切换器）由应用根注入，标题栏不感知业务状态
 };
 
 /** 标题栏共享侧栏切换入口，并用同一动作文案提供提示和无障碍名称。 */
@@ -67,6 +68,7 @@ export function AppTitlebar(props: AppTitlebarProps): JSX.Element {
             </strong>
           </div>
         </div>
+        {props.actions === undefined ? null : <div className="topbar__right">{props.actions}</div>}
       </div>
       <div className="topbar__safe-area topbar__safe-area--end" aria-hidden="true" />
     </header>

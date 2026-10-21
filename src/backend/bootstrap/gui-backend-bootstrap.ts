@@ -31,6 +31,8 @@ export interface GuiBackendBootstrapOptions {
   workspaceRuntimeDirectory: string; // 与 runner 同版本的标准 npm 环境
   openDirectory: (path: string) => Promise<void>; // Electron main 副作用端口
   pickSavePath: (defaultName: string) => Promise<string | null>; // 原生保存选择，取消返回 null
+  focusWindow?: (() => Promise<void>) | undefined; // 聚焦本实例窗口，供其他实例的切换请求调用
+  openProjectWindow?: ((projectPath: string) => Promise<void>) | undefined; // 以 --project 启动新窗口
   workerExecution: BackendWorkerExecution; // 正式 worker_threads 与测试执行策略
 }
 
@@ -107,11 +109,15 @@ export class GuiBackendBootstrap {
         logManager: resources.logManager,
         publishEvent: (topic, payload) => event_stream.publish(topic, payload),
         openOutputFolder: this.options.openDirectory,
+        focusWindow: this.options.focusWindow,
+        openProjectWindow: this.options.openProjectWindow,
         pdfHost: this.options.pdfHost,
         workspaceRuntimeDirectory: this.options.workspaceRuntimeDirectory,
         workerExecution: this.options.workerExecution,
+        noveliaFetch: resources.noveliaFetch,
       });
       this.services = services;
+      await services.start_remote_services();
       const web_search = new WebSearchService(
         resources.metadata.read_version_or_default(),
         resources.logManager,
@@ -183,6 +189,15 @@ export class GuiBackendBootstrap {
       this.gateway = gateway;
       const gateway_result = await gateway.start();
       this.state = "ready";
+      // 端口确定后才能写入实例注册项；注册失败只失去窗口切换能力，不应阻止启动。
+      try {
+        await services.start_instances(gateway_result.baseUrl);
+      } catch (error) {
+        resources.logManager.warning(t_main_log("app.diagnostic.lifecycle.app_start_failed"), {
+          error,
+          context: { reason: "instance_registry_start_failed" },
+        });
+      }
       services.start_model_catalog_check();
       return {
         apiBaseUrl: gateway_result.baseUrl,

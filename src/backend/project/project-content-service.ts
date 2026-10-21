@@ -42,6 +42,8 @@ import {
   type ProjectItemPublicRecord,
   type Item,
 } from "../../domain/item";
+import type { RemoteRowDecision, RemoteRowPlan } from "../remote/novelia-source";
+import { REMOTE_SOURCE_META_KEY, type RemoteSourceBinding } from "../remote/remote-source";
 import { is_json_record, read_json_record } from "../../domain/json";
 import {
   normalize_project_settings_snapshot,
@@ -68,6 +70,21 @@ type ProjectWriteSnapshot = {
 };
 
 type ProjectImportConflictAction = "skip" | "replace";
+
+/** 同步应用时每行的人工决定；只覆盖自动对齐结果，不改写新原文。 */
+export interface RemoteAssetRowOverride {
+  action: RemoteRowDecision;
+  dst?: string | undefined; // 提供时直接作为该行译文，空字符串表示重译
+}
+
+export interface RemoteAssetReplaceRequest {
+  assetPath: string;
+  content: string;
+  binding: RemoteSourceBinding;
+  rows: readonly RemoteRowPlan[];
+  overrides: ReadonlyMap<number, RemoteAssetRowOverride>;
+  expectedSectionRevisions: ProjectExpectedSectionRevisions;
+}
 
 type ImportProjectFileCommand = {
   source_path: string; // 用户选中的真实文件路径，只允许慢准备阶段读取
@@ -330,6 +347,118 @@ export class ProjectContentService {
       return parse_result.failed_files.length === 0
         ? write_result
         : { ...write_result, failed_files: parse_result.failed_files };
+    });
+  }
+
+  /**
+   * 远端整本同步以当前工程条目为语义基准：保留可匹配条目的身份、译文与人工状态，
+   * 新行分配新身份，再按当前设置重算预过滤与进度。
+   */
+  public async replace_remote_asset(
+    request: RemoteAssetReplaceRequest,
+  ): Promise<ProjectWriteResult> {
+    const project_path = this.session_state.require_loaded_project_path();
+    return await this.runtime_gate.run_project_write(async () => {
+      const snapshot = await this.read_project_write_snapshot(project_path);
+      const existing_asset = snapshot.asset_records.find(
+        (asset) => asset.path === request.assetPath,
+      );
+      if (existing_asset === undefined) {
+        throw new AppErrors.AppError("remote.source_not_bound", {
+          public_details: { reason: "asset_missing", asset_path: request.assetPath },
+        });
+      }
+      if (existing_asset.file_type !== "TXT") {
+        throw new AppErrors.AppError("remote.source_not_bound", {
+          public_details: { reason: "asset_not_text", asset_path: request.assetPath },
+        });
+      }
+      const settings = await this.read_project_write_settings(project_path, undefined);
+      const next_items = new Map<number, ProjectItemPublicRecord>();
+      const used_item_ids = new Set<number>();
+      let next_item_id = this.next_item_id_seed(snapshot.public_items_by_id);
+      for (const item of snapshot.public_items_by_id.values()) {
+        if (item.file_path === request.assetPath) continue;
+        next_items.set(item.item_id, { ...item });
+        used_item_ids.add(item.item_id);
+      }
+      for (const row of request.rows) {
+        const override = request.overrides.get(row.row);
+        const decision = override?.action ?? row.decision;
+        const previous =
+          row.old_item === null ? undefined : snapshot.public_items_by_id.get(row.old_item.item_id);
+        const can_reuse = previous !== undefined && decision !== "retranslate";
+        let item_id: number;
+        if (can_reuse && !used_item_ids.has(previous.item_id)) {
+          item_id = previous.item_id;
+        } else {
+          next_item_id += 1;
+          while (used_item_ids.has(next_item_id)) next_item_id += 1;
+          item_id = next_item_id;
+        }
+        used_item_ids.add(item_id);
+        const dst = override?.dst ?? (can_reuse ? previous.dst : "");
+        next_items.set(item_id, {
+          item_id,
+          row_number: row.row,
+          src: row.src,
+          dst,
+          name_src: can_reuse ? previous.name_src : null,
+          name_dst: can_reuse ? previous.name_dst : null,
+          extra_field: can_reuse ? previous.extra_field : "",
+          tag: can_reuse ? previous.tag : "",
+          file_type: can_reuse ? previous.file_type : "TXT",
+          file_path: request.assetPath,
+          status:
+            override?.dst !== undefined
+              ? dst === ""
+                ? "NONE"
+                : "PROCESSED"
+              : can_reuse
+                ? previous.status
+                : "NONE",
+          skip_internal_filter: can_reuse ? previous.skip_internal_filter : false,
+        });
+      }
+      const files: ProjectFileSection = {
+        ...snapshot.files,
+        [request.assetPath]: {
+          ...(snapshot.files[request.assetPath] ?? {
+            rel_path: request.assetPath,
+            sort_index: existing_asset.sort_order,
+          }),
+          rel_path: request.assetPath,
+          file_type: existing_asset.file_type,
+        },
+      };
+      const write_output = await this.compute_prefilter_output({
+        project_path,
+        files,
+        items: this.public_item_record(next_items.values()),
+        settings,
+      });
+      const meta: MutableJsonRecord = {
+        ...this.build_prefilter_reset_meta(settings, write_output),
+        [REMOTE_SOURCE_META_KEY]: request.binding as unknown as JsonValue,
+      };
+      return await this.write_store.replace_project_items_and_files({
+        projectPath: project_path,
+        expectedSectionRevisions: request.expectedSectionRevisions,
+        revisionSections: ["files", "items"],
+        source: "remote_sync",
+        updatedSections: ["files", "items"],
+        assetWrites: [
+          {
+            kind: "update",
+            path: request.assetPath,
+            content: new TextEncoder().encode(request.content),
+            fileType: existing_asset.file_type,
+            pdfDocument: null,
+          },
+        ],
+        items: build_project_item_persistent_records(write_output.items),
+        meta,
+      });
     });
   }
 
