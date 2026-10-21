@@ -144,7 +144,7 @@ export function useTranslationGenerationFlow(): TranslationGenerationFlow {
     request_generation_ref.current += 1;
     apply_state({ phase: "closed" });
     navigate_to_agent({
-      text: `${t("agent_page.empty.suggestions.review_translation")} ${format_agent_reference({ kind: "skill", name: "translation" })}`,
+      text: `${t("agent_page.empty.suggestions.review_translation")} ${format_agent_reference({ kind: "skill", name: "proofreading" })}`,
       mode: "if-empty",
     });
   }, [apply_state, navigate_to_agent, t]);

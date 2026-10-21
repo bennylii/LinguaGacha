@@ -264,15 +264,19 @@
   color: color-mix(in srgb, var(--ui-failure) 64%, var(--foreground));
 }
 
-.agent-continue-entry:hover:not(:disabled) {
+.agent-continue-entry--static {
+  cursor: default;
+}
+
+button.agent-continue-entry:hover:not(:disabled) {
   background: color-mix(in srgb, var(--ui-failure) 9%, var(--card));
 }
 
-.agent-continue-entry:active:not(:disabled) {
+button.agent-continue-entry:active:not(:disabled) {
   transform: translateY(1px);
 }
 
-.agent-continue-entry:focus-visible {
+button.agent-continue-entry:focus-visible {
   outline: 1px solid var(--ring);
   outline-offset: 2px;
 }
@@ -280,6 +284,27 @@
 .agent-continue-entry:disabled {
   cursor: default;
   opacity: 0.58;
+}
+
+.agent-auto-resume-entry {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--ui-radius-button);
+  background: color-mix(in srgb, var(--muted) 42%, var(--card));
+  padding: 4px 8px;
+  color: color-mix(in srgb, var(--foreground) 78%, var(--muted-foreground));
+  font-size: var(--ui-font-size-12);
+  line-height: 1.45;
+}
+
+.agent-auto-resume-entry__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .agent-message-actions {

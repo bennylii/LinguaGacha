@@ -36,6 +36,7 @@ import type {
   AgentSkillSnapshot,
   AgentToolEntry,
   AgentTokenSpeedSnapshot,
+  AgentAutoResumeSnapshot,
   AgentUsageSnapshot,
   AgentWriteApprovalDecision,
 } from "@shared/agent";
@@ -79,6 +80,7 @@ export type AgentControlsSlice = Readonly<{
   pendingDecision: AgentPendingDecision | null;
   context: AgentContextSnapshot;
   usage: AgentUsageSnapshot;
+  autoResume: AgentAutoResumeSnapshot | null;
   transport: AgentTransportState;
   command: AgentCommand;
 }>;
@@ -130,6 +132,7 @@ const EMPTY_CONTROLS: AgentControlsSlice = {
   pendingDecision: null,
   context: { tokens: null, compactable: false, limits: null },
   usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  autoResume: null,
   transport: "restoring",
   command: null,
 };
@@ -343,6 +346,10 @@ export class AgentChatStore {
       next.usage.output === this.controls.usage.output &&
       next.usage.cacheRead === this.controls.usage.cacheRead &&
       next.usage.cacheWrite === this.controls.usage.cacheWrite &&
+      next.autoResume?.roundId === this.controls.autoResume?.roundId &&
+      next.autoResume?.attempt === this.controls.autoResume?.attempt &&
+      next.autoResume?.maxAttempts === this.controls.autoResume?.maxAttempts &&
+      next.autoResume?.retryAt === this.controls.autoResume?.retryAt &&
       next.transport === this.controls.transport &&
       next.command === this.controls.command
     ) {
@@ -442,6 +449,7 @@ export class AgentChatStore {
         pendingDecision: snapshot.pendingDecision,
         context: snapshot.context,
         usage: snapshot.usage,
+        autoResume: snapshot.autoResume,
       };
       this.sync_countdown();
       this.emit("queue");
@@ -521,6 +529,9 @@ export class AgentChatStore {
         break;
       case "usage":
         this.set_controls({ usage: change.usage });
+        break;
+      case "auto_resume":
+        this.set_controls({ autoResume: change.autoResume });
         break;
       case "input_queue":
         this.queue = { inputQueue: change.inputQueue };
@@ -789,9 +800,9 @@ export class AgentChatStore {
     );
   };
 
-  /** 仅运行中的会话接受停止请求。 */
+  /** 运行中或等待自动重试时接受停止；等待期后端状态是空闲，停止语义为取消等待。 */
   private readonly stop = async (): Promise<void> => {
-    if (this.controls.state !== "running") return;
+    if (this.controls.state !== "running" && this.controls.autoResume === null) return;
     await this.execute_command("stop", () => api_fetch<AgentCommandAck>("/api/agent/stop"));
   };
 
@@ -882,6 +893,7 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
   const input_queue = normalize_input_queue(record["inputQueue"]);
   const doing = normalize_doing(record["doing"]);
   const token_speed = normalize_token_speed(record["tokenSpeed"]);
+  const auto_resume = normalize_auto_resume(record["autoResume"]);
   const context = normalize_context(record["context"]);
   const usage = normalize_usage(record["usage"]);
   if (
@@ -890,7 +902,8 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
     doing === undefined ||
     context === null ||
     usage === null ||
-    token_speed === undefined
+    token_speed === undefined ||
+    auto_resume === undefined
   ) {
     throw new TypeError("Agent snapshot is invalid.");
   }
@@ -906,6 +919,7 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
     context,
     usage,
     tokenSpeed: token_speed,
+    autoResume: auto_resume,
   };
 }
 
@@ -954,6 +968,10 @@ function normalize_agent_change(value: unknown): AgentChatChange | null {
       const token_speed = normalize_token_speed(record["tokenSpeed"]);
       return token_speed === undefined ? null : { type: "token_speed", tokenSpeed: token_speed };
     }
+    case "auto_resume": {
+      const auto_resume = normalize_auto_resume(record["autoResume"]);
+      return auto_resume === undefined ? null : { type: "auto_resume", autoResume: auto_resume };
+    }
     case "context": {
       const context = normalize_context(record["context"]);
       return context === null ? null : { type: "context", context };
@@ -984,6 +1002,31 @@ function normalize_token_speed(value: unknown): AgentTokenSpeedSnapshot | undefi
     speed >= 0
     ? { roundId: round_id, tokensPerSecond: speed }
     : undefined;
+}
+
+/** 自动重试状态必须完整：等待期带倒计时，重试执行期由空 `retryAt` 表示。 */
+function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null | undefined {
+  if (value === null) return null;
+  if (!is_json_record(value)) return undefined;
+  const round_id = value["roundId"];
+  const attempt = value["attempt"];
+  const max_attempts = value["maxAttempts"];
+  const retry_at = value["retryAt"];
+  if (
+    typeof round_id !== "string" ||
+    round_id === "" ||
+    typeof attempt !== "number" ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    (max_attempts !== null &&
+      (typeof max_attempts !== "number" ||
+        !Number.isSafeInteger(max_attempts) ||
+        max_attempts < attempt)) ||
+    (retry_at !== null &&
+      (typeof retry_at !== "number" || !Number.isSafeInteger(retry_at) || retry_at < 0))
+  )
+    return undefined;
+  return { roundId: round_id, attempt, maxAttempts: max_attempts, retryAt: retry_at };
 }
 
 /** 累计用量必须完整且非负，非法事件由 `revision` 缺口恢复。 */

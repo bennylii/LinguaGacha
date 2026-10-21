@@ -123,6 +123,12 @@ export const ko_kr_agent_page = {
     copied: "복사됨",
     follow_latest: "최신 내용 따라가기",
   },
+  auto_resume: {
+    waiting: "자동 재시도 {attempt}회 · {seconds}초 후 시작",
+    waiting_limited: "자동 재시도 {attempt}/{max_attempts} · {seconds}초 후 시작",
+    retrying: "자동 재시도 중 ({attempt}회)",
+    cancel: "자동 재시도 취소",
+  },
   editing: {
     user: "내 메시지 수정 중",
     assistant: "모델 응답 수정 중",

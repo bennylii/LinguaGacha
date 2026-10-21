@@ -123,6 +123,12 @@ export const ja_jp_agent_page = {
     copied: "コピーしました",
     follow_latest: "最新を追従",
   },
+  auto_resume: {
+    waiting: "自動再試行 {attempt} 回目 · {seconds} 秒後に開始",
+    waiting_limited: "自動再試行 {attempt}/{max_attempts} · {seconds} 秒後に開始",
+    retrying: "自動再試行中（{attempt} 回目）",
+    cancel: "自動再試行をキャンセル",
+  },
   editing: {
     user: "メッセージを編集中",
     assistant: "モデルの返信を編集中",

@@ -2,11 +2,27 @@ import { is_json_record } from "../../domain/json";
 import type { AgentRunFailure } from "../../shared/agent";
 import { AppError } from "../../shared/error";
 import { create_provider_error } from "../network/provider-error";
+import { is_retryable_model_error } from "./agent-auto-resume";
 
 /** 摘要只服务界面展示，截断避免把整包错误体写进会话记录。 */
 const MAX_DETAIL_LENGTH = 200;
 /** Pi 把供应商错误压成 `<status>: <body>`，此处按同一格式取回状态码。 */
 const PROVIDER_ERROR_PREFIX = /^(\d{3}): ([\s\S]*)$/;
+
+/** 模型终帧错误保留 SDK 分类，自动续跑只依赖这个事实而不是重新解析摘要。 */
+export class AgentModelError extends Error {
+  public constructor(
+    message: string,
+    public readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = "AgentModelError";
+  }
+}
+
+export function create_agent_model_error(message: string): AgentModelError {
+  return new AgentModelError(message, is_retryable_model_error(message));
+}
 
 /** 把轮次失败收敛成可展示的原因摘要；结构化事实优先于文本。 */
 export function describe_run_failure(error: unknown): AgentRunFailure {

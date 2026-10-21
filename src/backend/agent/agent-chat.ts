@@ -42,7 +42,7 @@ import type {
   AgentEntryStatus,
 } from "../../shared/agent";
 import type { RuntimeLease } from "../runtime-operation-gate";
-import { describe_run_failure } from "./agent-run-failure";
+import { create_agent_model_error, describe_run_failure } from "./agent-run-failure";
 import { AGENT_COMPACTION_RESERVE_TOKENS } from "../../domain/model-agent";
 import { AppError } from "../../shared/error";
 import type { PreparedAgentMessage } from "./agent-message-input";
@@ -835,7 +835,7 @@ export class AgentChat {
               if (result.status === "error") throw result.error;
             }
           }
-          throw new Error(
+          throw create_agent_model_error(
             typeof unanswered.detail === "string" ? unanswered.detail : unanswered.reason,
           );
         }

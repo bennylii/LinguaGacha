@@ -101,6 +101,45 @@ describe("设置快照", () => {
     );
   });
 
+  it("自动重试设置按整数秒与次数边界归一，0 次保留为不限", () => {
+    expect(normalize_setting_snapshot({})).toMatchObject({
+      agent_auto_resume_enabled: true,
+      agent_auto_resume_initial_delay: 5,
+      agent_auto_resume_max_delay: 300,
+      agent_auto_resume_max_attempts: 0,
+    });
+    expect(
+      normalize_setting_snapshot({
+        agent_auto_resume_enabled: "bad",
+        agent_auto_resume_initial_delay: 0.8,
+        agent_auto_resume_max_delay: 999_999,
+        agent_auto_resume_max_attempts: -3,
+      }),
+    ).toMatchObject({
+      agent_auto_resume_enabled: true,
+      agent_auto_resume_initial_delay: 1,
+      agent_auto_resume_max_delay: 86_400,
+      agent_auto_resume_max_attempts: 0,
+    });
+    expect(
+      normalize_setting_snapshot({
+        agent_auto_resume_enabled: false,
+        agent_auto_resume_initial_delay: 12.9,
+        agent_auto_resume_max_delay: 600,
+        agent_auto_resume_max_attempts: 42.7,
+      }),
+    ).toMatchObject({
+      agent_auto_resume_enabled: false,
+      agent_auto_resume_initial_delay: 12,
+      agent_auto_resume_max_delay: 600,
+      agent_auto_resume_max_attempts: 42,
+    });
+    expect(
+      Setting.from_json({ agent_auto_resume_initial_delay: Infinity }).to_snapshot()
+        .agent_auto_resume_initial_delay,
+    ).toBe(5);
+  });
+
   it("结果检查旧字段不会进入设置快照", () => {
     const snapshot = normalize_setting_snapshot({
       check_kana_residue: false,
