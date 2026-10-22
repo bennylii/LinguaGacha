@@ -126,7 +126,6 @@ export const ko_kr_agent_page = {
   auto_resume: {
     waiting: "자동 재시도 {attempt}회 · {seconds}초 후 시작",
     waiting_limited: "자동 재시도 {attempt}/{max_attempts} · {seconds}초 후 시작",
-    retrying: "자동 재시도 중 ({attempt}회)",
     cancel: "자동 재시도 취소",
   },
   auto_continue: {

@@ -373,20 +373,7 @@ describe("AgentChatStore", () => {
     });
     expect(latest.autoResume).toMatchObject({ attempt: 2, retryAt: 6_000 });
 
-    // 重试执行期以空 retryAt 表示，空 maxAttempts 表示不限次数。
-    await act(async () => {
-      event_source.change({
-        type: "auto_resume",
-        autoResume: { roundId: "round-1", attempt: 2, maxAttempts: null, retryAt: null },
-      });
-    });
-    expect(latest.autoResume).toEqual({
-      roundId: "round-1",
-      attempt: 2,
-      maxAttempts: null,
-      retryAt: null,
-    });
-
+    // 重试开始后只发布空快照。
     await act(async () => {
       event_source.change({ type: "auto_resume", autoResume: null });
     });
@@ -397,11 +384,17 @@ describe("AgentChatStore", () => {
     });
     expect(latest.autoResume).toEqual(resuming);
 
-    // 非法帧整批丢弃，保留最近一次合法值。
+    // 非法帧整批丢弃，保留最近一次合法值；重试执行期不再用空 retryAt 表示。
     await act(async () => {
       event_source.change({
         type: "auto_resume",
         autoResume: { roundId: "", attempt: 0, maxAttempts: 0, retryAt: -1 },
+      });
+    });
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { roundId: "round-1", attempt: 2, maxAttempts: null, retryAt: null },
       });
     });
     expect(latest.autoResume).toEqual(resuming);

@@ -156,9 +156,6 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
   const show_failure_continue = revision_available && user.status === "error";
   const auto_resume = props.auto_resume?.roundId === user.id ? props.auto_resume : null;
   const auto_continue = props.auto_continue?.roundId === user.id ? props.auto_continue : null;
-  // 自动重试运行中保留上一次失败原因，让用户同时看到失败与重试进度。
-  const auto_retrying =
-    user.status === "running" && user.failure !== null && auto_resume?.retryAt === null;
   const user_editor = props.render_entry_editor?.(user) ?? null;
   return (
     <>
@@ -209,16 +206,8 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
           disabled={props.continue_disabled}
           on_continue={props.on_continue}
         />
-      ) : auto_retrying ? (
-        <AgentContinueEntry
-          label={props.t("app.feedback.model_request_failed")}
-          detail={read_run_failure_detail(user.failure)}
-          action_label={null}
-          disabled={props.continue_disabled}
-          on_continue={null}
-        />
       ) : null}
-      {auto_resume !== null && (user.status === "error" || auto_retrying) ? (
+      {auto_resume !== null && user.status === "error" ? (
         <AgentAutoResumeEntry
           auto_resume={auto_resume}
           disabled={props.continue_disabled}
@@ -418,29 +407,14 @@ function read_run_failure_detail(failure: AgentRunFailure | null): string | unde
   return detail === "" ? undefined : detail;
 }
 
-/** 所有尾部失败共用整块“继续”入口，具体步骤由后端权威状态决定。 */
+/** 失败轮次共用的继续入口，具体步骤由后端权威状态决定。 */
 function AgentContinueEntry(props: {
   label: string;
   detail: string | undefined;
-  action_label: string | null; // 空表示只展示失败原因，不提供继续入口
+  action_label: string;
   disabled: boolean;
-  on_continue: (() => void) | null;
+  on_continue: () => void;
 }): JSX.Element {
-  const content = (
-    <>
-      <CircleAlert aria-hidden="true" />
-      <span>{props.label}</span>
-      {props.action_label === null ? null : (
-        <span className="agent-continue-entry__action">{props.action_label}</span>
-      )}
-      {props.detail === undefined ? null : (
-        <span className="agent-continue-entry__detail">{props.detail}</span>
-      )}
-    </>
-  );
-  if (props.on_continue === null) {
-    return <div className="agent-continue-entry agent-continue-entry--static">{content}</div>;
-  }
   return (
     <button
       type="button"
@@ -448,12 +422,17 @@ function AgentContinueEntry(props: {
       disabled={props.disabled}
       onClick={props.on_continue}
     >
-      {content}
+      <CircleAlert aria-hidden="true" />
+      <span>{props.label}</span>
+      <span className="agent-continue-entry__action">{props.action_label}</span>
+      {props.detail === undefined ? null : (
+        <span className="agent-continue-entry__detail">{props.detail}</span>
+      )}
     </button>
   );
 }
 
-/** 自动重试等待展示剩余秒数，执行中展示次数；两种情况都允许用户取消。 */
+/** 自动重试等待展示剩余秒数并允许取消；重试开始后后端清除快照，本行随之消失。 */
 function AgentAutoResumeEntry(props: {
   auto_resume: AgentAutoResumeSnapshot;
   disabled: boolean;
@@ -461,11 +440,8 @@ function AgentAutoResumeEntry(props: {
   t: Translate;
 }): JSX.Element {
   const retry_at = props.auto_resume.retryAt;
-  const [remaining, set_remaining] = useState(() =>
-    retry_at === null ? 0 : read_auto_resume_seconds(retry_at),
-  );
+  const [remaining, set_remaining] = useState(() => read_auto_resume_seconds(retry_at));
   useEffect(() => {
-    if (retry_at === null) return;
     set_remaining(read_auto_resume_seconds(retry_at));
     const timer = window.setInterval(() => {
       set_remaining(read_auto_resume_seconds(retry_at));
@@ -474,18 +450,16 @@ function AgentAutoResumeEntry(props: {
   }, [retry_at]);
   const attempt = props.auto_resume.attempt.toString();
   const label =
-    retry_at === null
-      ? props.t("agent_page.auto_resume.retrying", { attempt })
-      : props.auto_resume.maxAttempts === null
-        ? props.t("agent_page.auto_resume.waiting", {
-            attempt,
-            seconds: remaining.toString(),
-          })
-        : props.t("agent_page.auto_resume.waiting_limited", {
-            attempt,
-            max_attempts: props.auto_resume.maxAttempts.toString(),
-            seconds: remaining.toString(),
-          });
+    props.auto_resume.maxAttempts === null
+      ? props.t("agent_page.auto_resume.waiting", {
+          attempt,
+          seconds: remaining.toString(),
+        })
+      : props.t("agent_page.auto_resume.waiting_limited", {
+          attempt,
+          max_attempts: props.auto_resume.maxAttempts.toString(),
+          seconds: remaining.toString(),
+        });
   return (
     <div className="agent-auto-resume-entry" role="status">
       <span className="agent-auto-resume-entry__label">{label}</span>

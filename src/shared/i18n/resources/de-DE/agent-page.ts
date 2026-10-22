@@ -124,7 +124,6 @@ export const de_de_agent_page = {
   auto_resume: {
     waiting: "Automatischer Neuversuch {attempt} · startet in {seconds}s",
     waiting_limited: "Automatischer Neuversuch {attempt}/{max_attempts} · startet in {seconds}s",
-    retrying: "Automatischer Neuversuch läuft (Versuch {attempt})",
     cancel: "Automatischen Neuversuch abbrechen",
   },
   auto_continue: {

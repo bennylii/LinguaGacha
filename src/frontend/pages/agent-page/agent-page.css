@@ -264,10 +264,6 @@
   color: color-mix(in srgb, var(--ui-failure) 64%, var(--foreground));
 }
 
-.agent-continue-entry--static {
-  cursor: default;
-}
-
 button.agent-continue-entry:hover:not(:disabled) {
   background: color-mix(in srgb, var(--ui-failure) 9%, var(--card));
 }

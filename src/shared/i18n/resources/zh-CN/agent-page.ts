@@ -124,7 +124,6 @@ export const zh_cn_agent_page = {
   auto_resume: {
     waiting: "自动重试第 {attempt} 次 · {seconds} 秒后开始",
     waiting_limited: "自动重试 {attempt}/{max_attempts} · {seconds} 秒后开始",
-    retrying: "正在自动重试（第 {attempt} 次）",
     cancel: "取消自动重试",
   },
   auto_continue: {

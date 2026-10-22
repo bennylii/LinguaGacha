@@ -352,7 +352,7 @@ describe("AgentTimeline", () => {
     );
   });
 
-  it("自动重试运行中保留失败详情并展示重试进度", async () => {
+  it("自动重试运行中不显示失败行与重试行", async () => {
     const view = await render_timeline(
       [
         user_entry("user-error", "最新任务", "running", 0, null, [], {
@@ -362,22 +362,15 @@ describe("AgentTimeline", () => {
       ],
       0,
       [],
-      { roundId: "user-error", attempt: 3, maxAttempts: null, retryAt: null },
+      { roundId: "user-error", attempt: 3, maxAttempts: null, retryAt: 5_000 },
     );
 
-    expect(view.querySelector(".agent-continue-entry__detail")?.textContent).toBe(
-      "HTTP 503 · Service Unavailable",
+    // 即使数据里残留失败与等待快照，运行中的轮次也只显示处理中。
+    expect(view.querySelector(".agent-continue-entry")).toBeNull();
+    expect(view.querySelector(".agent-auto-resume-entry")).toBeNull();
+    expect(view.querySelector(".agent-round-footer")?.textContent).toContain(
+      "agent_page.round.running",
     );
-    // 重试执行中不再提供手动继续入口，只保留失败原因。
-    expect(view.querySelector(".agent-continue-entry button")).toBeNull();
-    expect(view.querySelector(".agent-continue-entry__action")).toBeNull();
-    expect(view.querySelector(".agent-auto-resume-entry")?.textContent).toContain(
-      "agent_page.auto_resume.retrying:3",
-    );
-
-    const cancel = view.querySelector<HTMLButtonElement>(".agent-auto-resume-entry button");
-    await act(async () => cancel?.click());
-    expect(on_cancel_auto_resume).toHaveBeenCalledOnce();
   });
 
   it("自动续跑等待只挂在对应失败轮次上", async () => {

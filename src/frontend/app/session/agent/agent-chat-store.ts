@@ -1023,7 +1023,7 @@ function normalize_token_speed(value: unknown): AgentTokenSpeedSnapshot | undefi
     : undefined;
 }
 
-/** 自动重试状态必须完整：等待期带倒计时，重试执行期由空 `retryAt` 表示。 */
+/** 自动重试状态只存在于等待期，必须带倒计时；重试开始后后端发布空快照。 */
 function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null | undefined {
   if (value === null) return null;
   if (!is_json_record(value)) return undefined;
@@ -1041,8 +1041,9 @@ function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null |
       (typeof max_attempts !== "number" ||
         !Number.isSafeInteger(max_attempts) ||
         max_attempts < attempt)) ||
-    (retry_at !== null &&
-      (typeof retry_at !== "number" || !Number.isSafeInteger(retry_at) || retry_at < 0))
+    typeof retry_at !== "number" ||
+    !Number.isSafeInteger(retry_at) ||
+    retry_at < 0
   )
     return undefined;
   return { roundId: round_id, attempt, maxAttempts: max_attempts, retryAt: retry_at };

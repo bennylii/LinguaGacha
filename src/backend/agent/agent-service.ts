@@ -179,6 +179,7 @@ export class AgentService {
   private revision = 0;
   private disposed = false;
   private publishedFields: AgentChatFields | null = null; // 上一批已发布的控制字段，用于抑制重复通知
+  private deferred_publish_depth = 0; // 失败轮次恢复期间只发布最终状态，避免先露出失败与无等待的中间态
 
   /** 连接工程生命周期、技能变更与决定协调器，会话事实统一提交后发布。 */
   public constructor(options: AgentServiceOptions) {
@@ -585,19 +586,25 @@ export class AgentService {
       throw agent_queue_validation_error("agent_continue_message_without_queue");
     const execution = this.begin_execution(read_input_command_id(request));
     return this.accept(execution, async () => {
-      await chat.change_queue((queue) => {
-        if (message !== null) queue.enqueue(message);
-        queue.resume();
-      }, read_input_command_id(request));
-      if (failed_round !== null) {
-        // 用户主动继续重新获得完整的自动续跑额度。
-        this.auto_resume_attempts.delete(failed_round.id);
-        await this.resume_failed_round(chat, execution, failed_round, false);
-      } else {
+      const resume_queue = async (): Promise<void> => {
+        await chat.change_queue((queue) => {
+          if (message !== null) queue.enqueue(message);
+          queue.resume();
+        }, read_input_command_id(request));
+      };
+      if (failed_round === null) {
+        await resume_queue();
         const next = chat.queue.read_next();
         if (next === null) throw agent_queue_validation_error("agent_continue_unavailable");
         await this.accept_round(execution, next, next.id);
+        return;
       }
+      // 用户主动继续重新获得完整的自动续跑额度；恢复队列与回到运行合并发布。
+      this.auto_resume_attempts.delete(failed_round.id);
+      await this.merge_publish(async () => {
+        await resume_queue();
+        await this.resume_failed_round(chat, execution, failed_round);
+      });
     });
   }
 
@@ -606,7 +613,6 @@ export class AgentService {
     chat: AgentChat,
     execution: AgentExecution,
     round: FailedAgentRound,
-    keep_failure: boolean,
   ): Promise<void> {
     await this.update_model(chat, execution);
     execution.roundId = round.id;
@@ -625,8 +631,8 @@ export class AgentService {
       previous.status = "running";
       previous.endedAt = null;
       previous.averageTokensPerSecond = null;
-      // 自动重试期间保留最近一次失败原因，界面同时展示失败与重试进度。
-      if (!keep_failure) previous.failure = null;
+      // 回到运行中即退出失败展示；再次失败会写入新的失败原因。
+      previous.failure = null;
     });
     const text = this.read_continue_text();
     const accepted = await chat.submit(
@@ -1098,16 +1104,16 @@ export class AgentService {
       if (AppErrors.is_app_error(error) && error.code === "runtime.busy") return;
       throw error;
     }
-    // begin_execution 已静默清掉等待快照；改用 retryAt 为空的重试状态承载轮次与次数。
-    this.auto_resume_snapshot = { ...waiting, retryAt: null };
-    this.publish_snapshot();
     try {
-      await this.accept(execution, async () => {
-        await chat.change_queue((queue) => queue.resume());
-        await this.resume_failed_round(chat, execution, round, true);
-      });
+      // 重试一开始就退出等待状态：队列恢复与轮次回到运行合并为一次发布。
+      await this.accept(execution, () =>
+        this.merge_publish(async () => {
+          await chat.change_queue((queue) => queue.resume());
+          await this.resume_failed_round(chat, execution, round);
+        }),
+      );
     } catch (error) {
-      // 受理失败不能再留下“正在重试”的公开状态。
+      // 快照已由 begin_execution 静默清除；受理失败时只保留本次结算后的轮次状态。
       this.cancel_auto_resume();
       throw error;
     }
@@ -1429,8 +1435,20 @@ export class AgentService {
       this.token_speed_updated_at = null;
     }
   }
+  /** 失败轮次恢复期间合并发布：队列恢复与轮次回到运行只对外呈现最终状态。 */
+  private async merge_publish(operation: () => Promise<void>): Promise<void> {
+    this.deferred_publish_depth++;
+    try {
+      await operation();
+    } finally {
+      this.deferred_publish_depth--;
+      if (this.deferred_publish_depth === 0) this.publish_snapshot();
+    }
+  }
+
   /** 投影直接提供条目变化。这里只比较会话控制字段。 */
   private publish_snapshot(force = false): void {
+    if (this.deferred_publish_depth > 0 && !force) return;
     if (this.disposed || (this.chat_reset !== null && !force)) return;
     const fields = this.read_fields();
     const previous = this.publishedFields;

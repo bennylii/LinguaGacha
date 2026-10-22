@@ -124,7 +124,6 @@ export const en_us_agent_page = {
   auto_resume: {
     waiting: "Auto retry attempt {attempt} · starts in {seconds}s",
     waiting_limited: "Auto retry {attempt}/{max_attempts} · starts in {seconds}s",
-    retrying: "Auto retrying (attempt {attempt})",
     cancel: "Cancel auto retry",
   },
   auto_continue: {
