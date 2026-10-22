@@ -127,6 +127,10 @@ export const de_de_agent_page = {
     retrying: "Automatischer Neuversuch läuft (Versuch {attempt})",
     cancel: "Automatischen Neuversuch abbrechen",
   },
+  auto_continue: {
+    judging: "Es wird geprüft, ob die Aufgabe abgeschlossen ist…",
+    continuing: "Aufgabe nicht abgeschlossen, automatisch fortgesetzt (Versuch {attempt})",
+  },
   editing: {
     user: "Deine Nachricht wird bearbeitet",
     assistant: "Modellantwort wird bearbeitet",

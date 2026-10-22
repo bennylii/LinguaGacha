@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 
 import {
+  AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
   AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MAX,
   AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MIN,
   AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
@@ -20,6 +21,8 @@ const EXPERT_SETTINGS_PENDING_FIELDS = [
   "agent_auto_resume_initial_delay",
   "agent_auto_resume_max_delay",
   "agent_auto_resume_max_attempts",
+  "agent_auto_continue_enabled",
+  "agent_auto_continue_max_continues",
   "preceding_lines_threshold",
   "clean_ruby",
   "deduplication_in_bilingual",
@@ -35,6 +38,8 @@ type UseExpertSettingsStateResult = {
   update_agent_auto_resume_initial_delay: (next_value: number) => Promise<void>;
   update_agent_auto_resume_max_delay: (next_value: number) => Promise<void>;
   update_agent_auto_resume_max_attempts: (next_value: number) => Promise<void>;
+  update_agent_auto_continue_enabled: (next_checked: boolean) => Promise<void>;
+  update_agent_auto_continue_max_continues: (next_value: number) => Promise<void>;
   update_preceding_lines_threshold: (next_value: number) => Promise<void>;
   update_clean_ruby: (next_checked: boolean) => Promise<void>;
   update_deduplication_in_bilingual: (next_checked: boolean) => Promise<void>;
@@ -115,6 +120,35 @@ export function useExpertSettingsState(): UseExpertSettingsStateResult {
     [commit_update, snapshot.agent_auto_resume_max_attempts],
   );
 
+  const update_agent_auto_continue_enabled = useCallback(
+    async (next_checked: boolean): Promise<void> => {
+      if (snapshot.agent_auto_continue_enabled !== next_checked) {
+        await commit_update("agent_auto_continue_enabled", {
+          agent_auto_continue_enabled: next_checked,
+        });
+      }
+    },
+    [commit_update, snapshot.agent_auto_continue_enabled],
+  );
+
+  const update_agent_auto_continue_max_continues = useCallback(
+    async (next_value: number): Promise<void> => {
+      const normalized = clamp_integer_setting(
+        next_value,
+        0,
+        AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
+      );
+      if (Number.isNaN(normalized) || snapshot.agent_auto_continue_max_continues === normalized) {
+        return;
+      }
+
+      await commit_update("agent_auto_continue_max_continues", {
+        agent_auto_continue_max_continues: normalized,
+      });
+    },
+    [commit_update, snapshot.agent_auto_continue_max_continues],
+  );
+
   const update_preceding_lines_threshold = useCallback(
     async (next_value: number): Promise<void> => {
       const normalized_threshold = clamp_integer_setting(
@@ -176,6 +210,8 @@ export function useExpertSettingsState(): UseExpertSettingsStateResult {
     update_agent_auto_resume_initial_delay,
     update_agent_auto_resume_max_delay,
     update_agent_auto_resume_max_attempts,
+    update_agent_auto_continue_enabled,
+    update_agent_auto_continue_max_continues,
     update_preceding_lines_threshold,
     update_clean_ruby,
     update_deduplication_in_bilingual,

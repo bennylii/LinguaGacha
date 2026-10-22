@@ -27,6 +27,18 @@ export const en_us_expert_settings_page = {
       title: "Maximum Retry Attempts",
       description: "Upper bound for consecutive automatic retries; 0 means unlimited, default 0",
     },
+    agent_auto_continue_enabled: {
+      title: "Agent Auto Continue",
+      description:
+        "After a round finishes successfully, the backend opens a separate judge thread to check whether the task is really done and sends a continue when it is not, disabled by default" +
+        "\n" +
+        "Every check costs one extra model request; a failed check or an unreadable verdict counts as done, so nothing is continued automatically",
+    },
+    agent_auto_continue_max_continues: {
+      title: "Maximum Auto Continuations",
+      description:
+        "Upper bound for consecutive automatic continuations within one round; 0 means unlimited, default 10",
+    },
     preceding_lines_threshold: {
       title: "Preceding Lines Threshold",
       description:
@@ -69,6 +81,8 @@ export const en_us_expert_settings_page = {
       "The maximum retry delay must be a whole number of seconds from 1 to 86400 …",
     agent_auto_resume_max_attempts_invalid:
       "The maximum retry attempts must be a whole number from 0 to 1000 …",
+    agent_auto_continue_max_continues_invalid:
+      "The maximum auto continuations must be a whole number from 0 to 1000 …",
     preceding_lines_threshold_invalid:
       "Preceding lines threshold must be a number within the valid range …",
   },

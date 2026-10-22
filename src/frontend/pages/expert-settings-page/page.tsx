@@ -1,6 +1,7 @@
 import { type JSX } from "react";
 
 import {
+  AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
   AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MAX,
   AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MIN,
   AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
@@ -52,6 +53,13 @@ export function ExpertSettingsPage(_props: ExpertSettingsPageProps): JSX.Element
     max: AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
     invalid_message: "expert_settings_page.feedback.agent_auto_resume_max_attempts_invalid",
     commit: expert_settings_state.update_agent_auto_resume_max_attempts,
+  });
+  const agent_auto_continue_max_continues_draft = useNumberSettingDraft({
+    value: expert_settings_state.snapshot.agent_auto_continue_max_continues,
+    min: 0,
+    max: AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
+    invalid_message: "expert_settings_page.feedback.agent_auto_continue_max_continues_invalid",
+    commit: expert_settings_state.update_agent_auto_continue_max_continues,
   });
   const preceding_lines_threshold_draft = useNumberSettingDraft({
     value: expert_settings_state.snapshot.preceding_lines_threshold,
@@ -150,6 +158,32 @@ export function ExpertSettingsPage(_props: ExpertSettingsPageProps): JSX.Element
             0,
             AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
             expert_settings_state.pending_state.agent_auto_resume_max_attempts,
+          )}
+        />
+
+        <SettingCardRow
+          title={t("expert_settings_page.fields.agent_auto_continue_enabled.title")}
+          description={t("expert_settings_page.fields.agent_auto_continue_enabled.description")}
+          action={render_boolean_toggle({
+            title_key: "expert_settings_page.fields.agent_auto_continue_enabled.title",
+            value: expert_settings_state.snapshot.agent_auto_continue_enabled,
+            disabled: expert_settings_state.pending_state.agent_auto_continue_enabled,
+            on_value_change: (next_value) => {
+              void expert_settings_state.update_agent_auto_continue_enabled(next_value);
+            },
+          })}
+        />
+
+        <SettingCardRow
+          title={t("expert_settings_page.fields.agent_auto_continue_max_continues.title")}
+          description={t(
+            "expert_settings_page.fields.agent_auto_continue_max_continues.description",
+          )}
+          action={render_number_field(
+            agent_auto_continue_max_continues_draft,
+            0,
+            AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
+            expert_settings_state.pending_state.agent_auto_continue_max_continues,
           )}
         />
 

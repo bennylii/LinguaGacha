@@ -129,6 +129,10 @@ export const ja_jp_agent_page = {
     retrying: "自動再試行中（{attempt} 回目）",
     cancel: "自動再試行をキャンセル",
   },
+  auto_continue: {
+    judging: "タスクの完了を確認しています…",
+    continuing: "タスクが未完了のため自動続行しました（{attempt} 回目）",
+  },
   editing: {
     user: "メッセージを編集中",
     assistant: "モデルの返信を編集中",

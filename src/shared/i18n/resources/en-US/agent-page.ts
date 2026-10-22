@@ -127,6 +127,10 @@ export const en_us_agent_page = {
     retrying: "Auto retrying (attempt {attempt})",
     cancel: "Cancel auto retry",
   },
+  auto_continue: {
+    judging: "Checking whether the task is finished…",
+    continuing: "Task not finished, continued automatically (attempt {attempt})",
+  },
   editing: {
     user: "Editing your message",
     assistant: "Editing the model response",

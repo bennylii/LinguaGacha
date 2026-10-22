@@ -22,6 +22,11 @@ import { isDeepStrictEqual } from "node:util";
 import { AgentChat, type AgentExecution } from "./agent-chat";
 import { AgentModelError, describe_run_failure } from "./agent-run-failure";
 import { auto_resume_delay_ms, read_agent_auto_resume_policy } from "./agent-auto-resume";
+import {
+  is_agent_auto_continue_exhausted,
+  read_agent_auto_continue_policy,
+} from "./agent-auto-continue";
+import { judge_agent_task_completion, type AgentCompletionVerdict } from "./agent-completion-judge";
 
 import { resolve_app_locale } from "../../domain/app-language";
 import { is_json_record, type JsonRecord } from "../../domain/json";
@@ -40,6 +45,7 @@ import {
   type AgentChatSnapshot,
   type AgentEntry,
   type AgentAutoResumeSnapshot,
+  type AgentAutoContinueSnapshot,
 } from "../../shared/agent";
 import * as AppErrors from "../../shared/error";
 import { format_i18n_message } from "../../shared/i18n";
@@ -62,6 +68,7 @@ import { create_agent_workspace_run_tool } from "./tools/workspace-run";
 import { format_agent_skills_for_system_prompt } from "./agent-skills";
 import {
   insert_agent_personality,
+  load_agent_completion_judge_prompt,
   load_agent_personality,
   load_agent_system_prompt,
 } from "./agent-system-prompt";
@@ -80,6 +87,7 @@ type AgentServicePaths = Pick<
   | "get_agent_user_skill_dir"
   | "get_agent_system_prompt_path"
   | "get_agent_chat_seed_path"
+  | "get_agent_completion_judge_prompt_path"
 >;
 
 type AgentServiceOptions = {
@@ -115,6 +123,7 @@ type AgentChatFields = Pick<
   | "usage"
   | "tokenSpeed"
   | "autoResume"
+  | "autoContinue"
 >;
 
 /** 失败轮次的身份与终态是自动续跑恢复前的唯一校验依据。 */
@@ -125,6 +134,7 @@ type LoadedAgentResources = Readonly<{
   baseSystemPrompt: string;
   defaultPersonality: string;
   chatSeed: AgentChatSeed;
+  completionJudgePrompt: string | null; // 缺失时自动继续不可用，不影响其它功能。
 }>;
 
 /** 产品命令协调唯一会话与运行租约。历史和公开条目来自 durable 提交。 */
@@ -152,6 +162,8 @@ export class AgentService {
   private auto_resume_timer: ReturnType<typeof setTimeout> | null = null; // 只存在于当前进程，工程切换或退出即失效
   private auto_resume_snapshot: AgentAutoResumeSnapshot | null = null;
   private readonly auto_resume_attempts = new Map<string, number>(); // 轮次身份 -> 已安排的自动续跑次数
+  private auto_continue_snapshot: AgentAutoContinueSnapshot | null = null;
+  private readonly auto_continue_attempts = new Map<string, number>(); // 轮次身份 -> 已发出的自动继续次数
   private chat_id = "inactive"; // 无工程时的快照身份，激活后采用持久化身份
   private readonly database: AgentServiceOptions["database"];
   private store: AgentChatStorage | null = null; // 工程连接的使用权覆盖 SDK 与上传收尾
@@ -321,6 +333,7 @@ export class AgentService {
       usage: { ...(chat?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }) },
       tokenSpeed: structuredClone(this.token_speed_snapshot),
       autoResume: structuredClone(this.auto_resume_snapshot),
+      autoContinue: structuredClone(this.auto_continue_snapshot),
     };
   }
   /** 协调器同步清除决定并发布事件，回执指向浮层关闭后的修订。 */
@@ -341,11 +354,20 @@ export class AgentService {
     const base_system_prompt = load_agent_system_prompt(this.paths);
     const default_personality = load_agent_personality(this.paths);
     const chat_seed = load_agent_chat_seed(this.paths);
+    const completion_judge_prompt = load_agent_completion_judge_prompt(this.paths);
+    if (completion_judge_prompt === null) {
+      this.log_manager.append({
+        level: "warning",
+        source: "agent",
+        content: "完成度判定指令缺失，自动继续不会生效。",
+      });
+    }
     await this.skills.refresh();
     this.resources = {
       baseSystemPrompt: base_system_prompt,
       defaultPersonality: default_personality,
       chatSeed: chat_seed,
+      completionJudgePrompt: completion_judge_prompt,
     };
     this.publishedFields = this.read_fields();
     const project = this.session_state.snapshot();
@@ -759,6 +781,7 @@ export class AgentService {
     if (this.disposed) return;
     this.disposed = true;
     this.cancel_auto_resume(false);
+    this.cancel_auto_continue(false);
     this.unsubscribe_project_session();
     this.unsubscribe_skills();
     if (this.chat_reset !== null) await this.chat_reset;
@@ -768,6 +791,7 @@ export class AgentService {
   /** 每次运行只有一个控制器和租约，迟到操作依执行对象身份失效。 */
   private begin_execution(commandId?: string): AgentExecution {
     this.cancel_auto_resume(false);
+    this.cancel_auto_continue(false);
     const chat = this.require_chat();
     chat.assert_usable();
     const lease = this.runtime_gate.begin_runtime("agent");
@@ -894,6 +918,7 @@ export class AgentService {
     execution.phase = "running";
     execution.translationStopped = false;
     this.auto_resume_attempts.clear();
+    this.auto_continue_attempts.clear();
     this.token_speed.reset();
     this.token_speed_updated_at = null;
     this.token_speed_snapshot = null;
@@ -929,6 +954,7 @@ export class AgentService {
       if (chat.sealed) {
         await chat.close();
         this.cancel_auto_resume();
+        this.cancel_auto_continue();
         break;
       }
       // 失败摘要随轮次持久化，供失败入口行内展示。
@@ -937,6 +963,7 @@ export class AgentService {
         // 真实故障先封口，取消清理只结算仍在运行的轮次。
         if (status === "error") await chat.finish_round(execution, status, null, run_failure);
         this.cancel_auto_resume();
+        this.cancel_auto_continue();
         break;
       }
       const success = status === "success";
@@ -950,6 +977,8 @@ export class AgentService {
       await chat.cancel_inputs(execution);
       if (!success) {
         await chat.change_queue((queue) => queue.pause());
+        // 轮次失败即结算，本轮不再有进行中的判定或自动继续。
+        this.cancel_auto_continue();
         if (failure instanceof AgentModelError && failure.retryable) {
           this.schedule_auto_resume(chat, execution.roundId);
         } else {
@@ -961,7 +990,13 @@ export class AgentService {
       this.auto_resume_attempts.clear();
       this.cancel_auto_resume();
       const next = chat.queue.read_next();
-      if (next === null) break;
+      if (next === null) {
+        // 轮次成功收口且没有排队输入时，判定任务是否真的做完；未做完由后端发出继续。
+        const continued = await this.auto_continue_after_round(chat, execution);
+        if (continued === null) break;
+        accepted = continued;
+        continue;
+      }
       execution.phase = "preparing";
       await chat.change_queue((queue) => queue.begin_send(next.id));
       try {
@@ -1087,6 +1122,151 @@ export class AgentService {
     if (this.auto_resume_snapshot === null) return;
     this.auto_resume_snapshot = null;
     if (publish) this.publish_snapshot();
+  }
+
+  /**
+   * 轮次成功收口且队列已空时判定任务是否真的做完。
+   * 判定为未完成时用隐藏继续输入让同一轮次接着做；判定不可用时按已完成处理。
+   */
+  private async auto_continue_after_round(
+    chat: AgentChat,
+    execution: AgentExecution,
+  ): Promise<Awaited<ReturnType<AgentChat["submit"]>> | null> {
+    const round_id = execution.roundId;
+    if (round_id === null || this.disposed || chat.sealed) return null;
+    if (execution.controller.signal.aborted) return null;
+    const policy = read_agent_auto_continue_policy(this.settings.read_setting());
+    const used = this.auto_continue_attempts.get(round_id) ?? 0;
+    if (!policy.enabled || is_agent_auto_continue_exhausted(policy, used)) {
+      // 不再判定时清掉上一轮留下的“正在继续”状态。
+      this.cancel_auto_continue();
+      return null;
+    }
+    // 判定指令缺失时该功能不可用，按已完成收口。
+    const judge_prompt = this.require_resources().completionJudgePrompt;
+    if (judge_prompt === null) {
+      this.cancel_auto_continue();
+      return null;
+    }
+    const task = this.read_agent_round_task(chat, round_id);
+    const answer = this.read_agent_last_answer(chat);
+    if (task === "" && answer === "") {
+      this.cancel_auto_continue();
+      return null;
+    }
+    const attempt = used + 1;
+    this.auto_continue_snapshot = { roundId: round_id, attempt, phase: "judging" };
+    this.publish_snapshot();
+    const verdict = await this.run_completion_judge(execution, judge_prompt, task, answer);
+    if (verdict.completed || execution.controller.signal.aborted) {
+      this.cancel_auto_continue();
+      return null;
+    }
+    // 判定为未完成：轮次回到运行中，用隐藏继续输入接着做。
+    try {
+      await chat.change((state) => {
+        const previous = state.rounds[round_id]!;
+        previous.status = "running";
+        previous.endedAt = null;
+        previous.failure = null;
+      });
+      this.auto_continue_attempts.set(round_id, attempt);
+      this.auto_continue_snapshot = { roundId: round_id, attempt, phase: "continuing" };
+      this.publish_snapshot();
+      const text = this.read_continue_text();
+      const accepted = await chat.submit(
+        { text, attachments: [] },
+        { text, images: [] },
+        execution,
+        "hidden",
+      );
+      chat.log.begin_run(round_id, "continue");
+      return accepted;
+    } catch (error) {
+      // 继续动作失败时回到结束状态，判定不得让轮次停不下来。
+      this.cancel_auto_continue();
+      chat.log.report_failure("cleanup", error);
+      return null;
+    }
+  }
+
+  /** 判定线程独立于公开时间线：独立模型集合、内存存储与只读工具集。 */
+  private async run_completion_judge(
+    execution: AgentExecution,
+    judge_prompt: string,
+    task: string,
+    answer: string,
+  ): Promise<AgentCompletionVerdict> {
+    try {
+      const models = createModels();
+      const resolved = register_agent_model(
+        models,
+        this.settings.read_setting(),
+        { user_agent: this.user_agent },
+        this.catalog,
+        this.auth,
+      );
+      return await judge_agent_task_completion({
+        models,
+        model: resolved.model,
+        thinkingLevel: resolved.thinkingLevel,
+        lease: execution.lease,
+        tools: this.create_judge_tools(),
+        systemPrompt: judge_prompt,
+        skillsPrompt: format_agent_skills_for_system_prompt(this.skills.get_current()),
+        log: new AgentRuntimeLog(this.log_manager, `${this.chat_id}:judge`),
+        cwd: this.paths.get_app_root(),
+        task,
+        answer,
+        signal: execution.controller.signal,
+      });
+    } catch (error) {
+      // 判定失败退化为已完成，判定不得让轮次停不下来。
+      this.log_manager.append({
+        level: "warning",
+        source: "agent",
+        content: "完成度判定失败，按已完成处理。",
+        error: error,
+      });
+      return { completed: true, reason: "判定线程失败，按已完成处理。" };
+    }
+  }
+
+  /** 判定线程只读工程事实：不提供提交、提问与批量翻译工具。 */
+  private create_judge_tools() {
+    return [
+      create_agent_workspace_run_tool({
+        run: (script, signal) => this.workspace.run(script, signal),
+        refresh_skills: () => this.skills.refresh(),
+      }),
+      create_agent_read_skill_tool(() => this.skills.get_current(), this.paths),
+    ];
+  }
+
+  /** 取消判定只清公开快照；判定线程随主执行中止。 */
+  private cancel_auto_continue(publish = true): void {
+    if (this.auto_continue_snapshot === null) return;
+    this.auto_continue_snapshot = null;
+    if (publish) this.publish_snapshot();
+  }
+
+  /** 判定输入取本轮的用户任务原文。 */
+  private read_agent_round_task(chat: AgentChat, round_id: string): string {
+    const round = chat.entries.findLast(
+      (entry) =>
+        entry.kind === "user_message" && entry.delivery === "round" && entry.id === round_id,
+    );
+    return round?.kind === "user_message" ? round.text : "";
+  }
+
+  /** 判定输入取最后一条助手答复正文，思考过程不进入判定。 */
+  private read_agent_last_answer(chat: AgentChat): string {
+    const answer = chat.entries.findLast((entry) => entry.kind === "assistant_message");
+    if (answer?.kind !== "assistant_message") return "";
+    return answer.parts
+      .filter((part) => part.kind === "text")
+      .map((part) => part.text)
+      .join("\n");
   }
 
   /** 已存在的会话在配置前检查认证，失败保留原有历史。 */
@@ -1273,6 +1453,8 @@ export class AgentService {
         changes.push({ type: "token_speed", tokenSpeed: fields.tokenSpeed });
       if (!isDeepStrictEqual(fields.autoResume, previous.autoResume))
         changes.push({ type: "auto_resume", autoResume: fields.autoResume });
+      if (!isDeepStrictEqual(fields.autoContinue, previous.autoContinue))
+        changes.push({ type: "auto_continue", autoContinue: fields.autoContinue });
       for (const entry of timeline?.entries ?? []) changes.push({ type: "entry_upsert", entry });
       if (fields.state !== previous.state)
         changes.push({ type: "chat_status", state: fields.state });
@@ -1325,6 +1507,7 @@ export class AgentService {
   /** 命令和工程生命周期共用关闭屏障。所有权切换只在旧使用者收尾后发生。 */
   private transition(operation: () => Promise<void>): Promise<void> {
     this.cancel_auto_resume(false);
+    this.cancel_auto_continue(false);
     if (this.chat_reset !== null)
       return this.chat_reset.then(
         () => this.transition(operation),
@@ -1407,7 +1590,9 @@ export class AgentService {
   /** 关闭保存事实并释放资源。目录删除只由显式重置和数量清理负责。 */
   private async close_chat(reason: AgentStopReason): Promise<void> {
     this.cancel_auto_resume(false);
+    this.cancel_auto_continue(false);
     this.auto_resume_attempts.clear();
+    this.auto_continue_attempts.clear();
     const chat = this.chat;
     const execution = this.execution;
     const store = this.store;

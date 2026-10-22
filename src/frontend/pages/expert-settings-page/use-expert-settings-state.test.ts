@@ -11,6 +11,8 @@ const snapshot: ExpertSettingsSnapshot = {
   agent_auto_resume_initial_delay: 5,
   agent_auto_resume_max_delay: 300,
   agent_auto_resume_max_attempts: 0,
+  agent_auto_continue_enabled: false,
+  agent_auto_continue_max_continues: 10,
   preceding_lines_threshold: 3,
   clean_ruby: false,
   deduplication_in_bilingual: false,
@@ -25,6 +27,8 @@ vi.mock("@frontend/features/settings-editor/use-settings-editor", () => ({
       agent_auto_resume_initial_delay: false,
       agent_auto_resume_max_delay: false,
       agent_auto_resume_max_attempts: false,
+      agent_auto_continue_enabled: false,
+      agent_auto_continue_max_continues: false,
       preceding_lines_threshold: false,
       clean_ruby: false,
       deduplication_in_bilingual: false,
@@ -114,6 +118,37 @@ describe("useExpertSettingsState", () => {
       await latest_state?.update_agent_auto_resume_initial_delay(5);
       await latest_state?.update_agent_auto_resume_max_delay(300);
       await latest_state?.update_agent_auto_resume_max_attempts(0);
+    });
+
+    expect(commit_update).not.toHaveBeenCalled();
+  });
+
+  it("自动继续设置按整数与边界提交，开关单独保存", async () => {
+    await render_hook();
+
+    await act(async () => {
+      await latest_state?.update_agent_auto_continue_enabled(true);
+      await latest_state?.update_agent_auto_continue_max_continues(-5);
+      await latest_state?.update_agent_auto_continue_max_continues(1_200);
+    });
+
+    expect(commit_update).toHaveBeenCalledWith("agent_auto_continue_enabled", {
+      agent_auto_continue_enabled: true,
+    });
+    expect(commit_update).toHaveBeenCalledWith("agent_auto_continue_max_continues", {
+      agent_auto_continue_max_continues: 0,
+    });
+    expect(commit_update).toHaveBeenCalledWith("agent_auto_continue_max_continues", {
+      agent_auto_continue_max_continues: 1_000,
+    });
+  });
+
+  it("自动继续设置与已保存值相同时不提交", async () => {
+    await render_hook();
+
+    await act(async () => {
+      await latest_state?.update_agent_auto_continue_enabled(false);
+      await latest_state?.update_agent_auto_continue_max_continues(10);
     });
 
     expect(commit_update).not.toHaveBeenCalled();

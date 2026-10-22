@@ -229,6 +229,13 @@ export type AgentAutoResumeSnapshot = JsonRecord & {
   retryAt: number | null; // 空表示重试已开始
 };
 
+/** 轮次成功结束后的完成度判定状态；`judging` 表示正在判定，`continuing` 表示判定后已发出继续。 */
+export type AgentAutoContinueSnapshot = JsonRecord & {
+  roundId: string;
+  attempt: number; // 从 1 开始
+  phase: "judging" | "continuing";
+};
+
 /** 当前产品对话累计的模型用量，历史修订后仍保留已发生的消耗。 */
 export type AgentUsageSnapshot = JsonRecord & {
   input: number; // 普通输入，缓存读取和写入分别计数
@@ -251,6 +258,7 @@ export type AgentChatSnapshot = JsonRecord & {
   usage: AgentUsageSnapshot;
   tokenSpeed: AgentTokenSpeedSnapshot;
   autoResume: AgentAutoResumeSnapshot | null;
+  autoContinue: AgentAutoContinueSnapshot | null;
 };
 
 /** 写命令只确认后端受理到的事件边界，公开事实继续由事件同步。 */
@@ -277,6 +285,7 @@ export type AgentChatChange = JsonRecord &
     | { type: "doing"; doing: string | null }
     | { type: "token_speed"; tokenSpeed: AgentTokenSpeedSnapshot }
     | { type: "auto_resume"; autoResume: AgentAutoResumeSnapshot | null }
+    | { type: "auto_continue"; autoContinue: AgentAutoContinueSnapshot | null }
     | { type: "context"; context: AgentContextSnapshot }
     | { type: "usage"; usage: AgentUsageSnapshot }
   );

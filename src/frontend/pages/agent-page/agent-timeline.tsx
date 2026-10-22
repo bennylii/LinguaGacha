@@ -25,6 +25,7 @@ import type {
   AgentAssistantMessagePart,
   AgentResponseAnnotationAttachment,
   AgentAutoResumeSnapshot,
+  AgentAutoContinueSnapshot,
 } from "@shared/agent";
 import { useI18n } from "@frontend/app/locale/locale-context";
 import { AppButton } from "@frontend/widgets/app-button";
@@ -58,6 +59,7 @@ type AgentTimelineProps = {
   on_continue: () => void;
   auto_resume: AgentAutoResumeSnapshot | null;
   on_cancel_auto_resume: () => void;
+  auto_continue: AgentAutoContinueSnapshot | null;
   on_edit: (entry: UserEntry | AssistantEntry) => void;
   render_entry_editor?: ((entry: UserEntry | AssistantEntry) => ReactNode | null) | undefined;
   on_add_annotation: (annotation: AgentResponseAnnotationAttachment) => void;
@@ -99,6 +101,7 @@ export function AgentTimeline(props: AgentTimelineProps): JSX.Element {
             on_continue={props.on_continue}
             auto_resume={props.auto_resume}
             on_cancel_auto_resume={props.on_cancel_auto_resume}
+            auto_continue={props.auto_continue}
             on_fork={props.on_fork}
             fork_disabled={props.fork_disabled}
             on_edit={props.on_edit}
@@ -129,6 +132,7 @@ type AgentRoundProps = {
   on_continue: () => void;
   auto_resume: AgentAutoResumeSnapshot | null;
   on_cancel_auto_resume: () => void;
+  auto_continue: AgentAutoContinueSnapshot | null;
   on_edit: (entry: UserEntry | AssistantEntry) => void;
   render_entry_editor?: ((entry: UserEntry | AssistantEntry) => ReactNode | null) | undefined;
   on_fork?: ((roundId: string) => void) | undefined;
@@ -151,6 +155,7 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
   const revision_available = props.revision_available && user.status !== "running";
   const show_failure_continue = revision_available && user.status === "error";
   const auto_resume = props.auto_resume?.roundId === user.id ? props.auto_resume : null;
+  const auto_continue = props.auto_continue?.roundId === user.id ? props.auto_continue : null;
   // 自动重试运行中保留上一次失败原因，让用户同时看到失败与重试进度。
   const auto_retrying =
     user.status === "running" && user.failure !== null && auto_resume?.retryAt === null;
@@ -220,6 +225,9 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
           on_cancel={props.on_cancel_auto_resume}
           t={props.t}
         />
+      ) : null}
+      {auto_continue !== null ? (
+        <AgentAutoContinueEntry auto_continue={auto_continue} t={props.t} />
       ) : null}
       <AgentRoundFooter user={user} />
     </>
@@ -498,6 +506,24 @@ function AgentAutoResumeEntry(props: {
 /** 剩余秒数按本地时钟向上取整，等待结束后归零。 */
 function read_auto_resume_seconds(retry_at: number): number {
   return Math.max(0, Math.ceil((retry_at - Date.now()) / 1_000));
+}
+
+/** 完成度判定与自动继续的进度行；判定失败时不发布状态，界面不会出现残留。 */
+function AgentAutoContinueEntry(props: {
+  auto_continue: AgentAutoContinueSnapshot;
+  t: Translate;
+}): JSX.Element {
+  const label =
+    props.auto_continue.phase === "judging"
+      ? props.t("agent_page.auto_continue.judging")
+      : props.t("agent_page.auto_continue.continuing", {
+          attempt: props.auto_continue.attempt.toString(),
+        });
+  return (
+    <div className="agent-auto-continue-entry" role="status">
+      <span className="agent-auto-continue-entry__label">{label}</span>
+    </div>
+  );
 }
 
 type AgentEntryViewProps = {

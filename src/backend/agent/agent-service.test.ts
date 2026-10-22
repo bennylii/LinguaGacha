@@ -126,9 +126,22 @@ const agent_resource_fixture = vi.hoisted(() => {
       () => `${system_prompt}\n\n{{agent_personality}}\n\nfixed-after-personality-fixture`,
     ),
     chat_seed_loader: vi.fn(() => chat_seed),
+    completion_judge_prompt_loader: vi.fn(() => "completion-judge-prompt-fixture"),
   };
 });
 const agent_model_registrar = vi.hoisted(() => vi.fn());
+// 判定线程的结论由测试直接给定，避免真的再发起一次模型请求。
+const agent_completion_judge_fixture = vi.hoisted(() => ({
+  judge: vi.fn(
+    async (_options: {
+      task: string;
+      answer: string;
+    }): Promise<{ completed: boolean; reason: string }> => ({
+      completed: true,
+      reason: "fixture",
+    }),
+  ),
+}));
 // 该窗口刚好容纳固定保留量与输出预留，用于稳定触发自动压缩边界。
 const TEST_COMPACTION_CONTEXT_WINDOW = 65_001;
 const FAKE_WORKSPACE_SCRIPT = "console.log(JSON.stringify({ items: [] }));";
@@ -194,6 +207,11 @@ vi.mock("./agent-system-prompt", async (original) => ({
   ...(await original<typeof import("./agent-system-prompt")>()),
   load_agent_system_prompt: agent_resource_fixture.system_prompt_loader,
   load_agent_personality: () => "default-personality-fixture",
+  load_agent_completion_judge_prompt: agent_resource_fixture.completion_judge_prompt_loader,
+}));
+vi.mock("./agent-completion-judge", async (original) => ({
+  ...(await original<typeof import("./agent-completion-judge")>()),
+  judge_agent_task_completion: agent_completion_judge_fixture.judge,
 }));
 vi.mock("./agent-model", async (original) => ({
   ...(await original<typeof import("./agent-model")>()),
@@ -575,6 +593,8 @@ describe("AgentService", () => {
     fake_agent_state.stream_tokens_per_second = undefined;
     agent_model_registrar.mockReset();
     agent_model_registrar.mockImplementation(register_fake_agent_model);
+    agent_completion_judge_fixture.judge.mockReset();
+    agent_completion_judge_fixture.judge.mockResolvedValue({ completed: true, reason: "fixture" });
     skill_test_fixture.loader.mockReset().mockReturnValue(skill_test_fixture.skills);
     agent_resource_fixture.system_prompt_loader.mockClear();
     agent_resource_fixture.chat_seed_loader.mockClear();
@@ -2267,6 +2287,7 @@ describe("AgentService", () => {
       doing: null,
       tokenSpeed: null,
       autoResume: null,
+      autoContinue: null,
       context: { tokens: null, compactable: false, limits: null },
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
@@ -2866,6 +2887,7 @@ describe("AgentService", () => {
       doing: null,
       tokenSpeed: null,
       autoResume: null,
+      autoContinue: null,
       context: { tokens: null, compactable: false, limits: null },
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
@@ -3385,6 +3407,148 @@ describe("AgentService", () => {
       expect(fake_agent_state.model_call_count).toBe(calls);
     },
   );
+
+  it("关闭自动继续时不发起完成度判定", async () => {
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: false });
+
+    await service.send_message({ text: "不判定", attachments: [] });
+    await wait_for_idle(service);
+
+    expect(agent_completion_judge_fixture.judge).not.toHaveBeenCalled();
+    expect(fake_agent_state.model_call_count).toBe(1);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoContinue: null });
+  });
+
+  it("判定为已完成时不自动继续", async () => {
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: true });
+    agent_completion_judge_fixture.judge.mockResolvedValueOnce({
+      completed: true,
+      reason: "账本显示 remaining_count 为 0。",
+    });
+
+    await service.send_message({ text: "已经做完", attachments: [] });
+    await wait_for_idle(service);
+
+    expect(agent_completion_judge_fixture.judge).toHaveBeenCalledOnce();
+    expect(fake_agent_state.model_call_count).toBe(1);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoContinue: null });
+    expect(service.get_snapshot().entries[0]).toMatchObject({ status: "success" });
+  });
+
+  it("判定为未完成时发出隐藏继续并接着跑同一轮次", async () => {
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: true });
+    agent_completion_judge_fixture.judge.mockResolvedValueOnce({
+      completed: false,
+      reason: "remaining_count 仍是 12。",
+    });
+
+    await service.send_message({ text: "还有尾巴", attachments: [] });
+    await wait_for_idle(service);
+
+    // 继续之后的那一轮结束后仍要再判定一次，判定为完成才真正收口。
+    expect(agent_completion_judge_fixture.judge).toHaveBeenCalledTimes(2);
+    // 判定后接着跑一次模型，轮次仍属于原来的那一轮。
+    expect(fake_agent_state.model_call_count).toBe(2);
+    const entries = service.get_snapshot().entries;
+    expect(entries.filter((entry) => entry.kind === "user_message")).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ status: "success" });
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoContinue: null });
+  });
+
+  it("判定输入带上本轮任务与上一轮答复", async () => {
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: true });
+    agent_completion_judge_fixture.judge.mockResolvedValueOnce({
+      completed: false,
+      reason: "remaining_count 仍是 1。",
+    });
+
+    await service.send_message({ text: "校对第三章", attachments: [] });
+    await wait_for_idle(service);
+
+    const options = agent_completion_judge_fixture.judge.mock.calls[0]![0];
+    expect(options.task).toContain("校对第三章");
+    expect(options.answer.length).toBeGreaterThan(0);
+  });
+
+  it("达到连续自动继续上限后不再判定", async () => {
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({
+      agent_auto_continue_enabled: true,
+      agent_auto_continue_max_continues: 1,
+    });
+    agent_completion_judge_fixture.judge.mockResolvedValue({
+      completed: false,
+      reason: "remaining_count 仍是 3。",
+    });
+
+    await service.send_message({ text: "一次就好", attachments: [] });
+    await wait_for_idle(service);
+
+    expect(agent_completion_judge_fixture.judge).toHaveBeenCalledOnce();
+    expect(fake_agent_state.model_call_count).toBe(2);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoContinue: null });
+  });
+
+  it("判定期间用户停止则不再发出继续", async () => {
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: true });
+    const judge_gate: { release: (() => void) | null } = { release: null };
+    agent_completion_judge_fixture.judge.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        judge_gate.release = resolve;
+      });
+      return { completed: false, reason: "remaining_count 仍是 5。" };
+    });
+
+    await service.send_message({ text: "判定中停止", attachments: [] });
+    await vi.waitFor(() => expect(judge_gate.release).not.toBeNull());
+    await service.stop();
+    judge_gate.release?.();
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.model_call_count).toBe(1);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoContinue: null });
+  });
+
+  it("判定与继续阶段发布 autoContinue 状态", async () => {
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: true });
+    const phases: string[] = [];
+    agent_completion_judge_fixture.judge.mockImplementationOnce(async () => {
+      phases.push(service.get_snapshot().autoContinue?.phase ?? "none");
+      return { completed: false, reason: "remaining_count 仍是 2。" };
+    });
+
+    await service.send_message({ text: "状态可见", attachments: [] });
+    await wait_for_idle(service);
+
+    expect(phases).toEqual(["judging"]);
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoContinue: null });
+  });
+
+  it("新用户轮次开始时重置自动继续计数", async () => {
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({
+      agent_auto_continue_enabled: true,
+      agent_auto_continue_max_continues: 1,
+    });
+    agent_completion_judge_fixture.judge.mockResolvedValue({
+      completed: false,
+      reason: "remaining_count 仍是 3。",
+    });
+
+    await service.send_message({ text: "第一轮", attachments: [] });
+    await wait_for_idle(service);
+    expect(agent_completion_judge_fixture.judge).toHaveBeenCalledTimes(1);
+
+    await service.send_message({ text: "第二轮", attachments: [] });
+    await wait_for_idle(service);
+    expect(agent_completion_judge_fixture.judge).toHaveBeenCalledTimes(2);
+  });
 
   it("已受理 steer 的后续生成失败时，整个产品轮次失败并暂停草稿", async () => {
     const { service } = await create_service();
@@ -4471,6 +4635,11 @@ describe("AgentService", () => {
     agent_auto_resume_max_delay: number;
     agent_auto_resume_max_attempts: number;
   };
+  /** 自动继续设置同样随每次读取生效，便于用例在轮次之间调整策略。 */
+  type TestAutoContinueSettings = {
+    agent_auto_continue_enabled: boolean;
+    agent_auto_continue_max_continues: number;
+  };
 
   async function create_service(
     load_resources = true,
@@ -4507,6 +4676,7 @@ describe("AgentService", () => {
     set_personality: (value: string | null) => void;
     set_approval_mode: (value: AgentApprovalMode) => void;
     set_auto_resume_settings: (value: Partial<TestAutoResumeSettings>) => void;
+    set_auto_continue_settings: (value: Partial<TestAutoContinueSettings>) => void;
     session_state: ProjectSessionState;
   }> {
     const session_state = new ProjectSessionState();
@@ -4523,6 +4693,10 @@ describe("AgentService", () => {
       agent_auto_resume_max_delay: 300,
       agent_auto_resume_max_attempts: 0,
     };
+    let auto_continue_settings: TestAutoContinueSettings = {
+      agent_auto_continue_enabled: false,
+      agent_auto_continue_max_continues: 10,
+    };
     const settings = {
       read_setting: () => {
         return {
@@ -4530,6 +4704,7 @@ describe("AgentService", () => {
           agent_personality: personality,
           agent_approval_mode: approval_mode,
           ...auto_resume_settings,
+          ...auto_continue_settings,
           model_selection: {
             translation: "active",
             agent: agent_model_id,
@@ -4651,6 +4826,8 @@ describe("AgentService", () => {
         get_agent_user_skill_dir: () => `${skill_test_fixture.app_root}/user-skills`,
         get_agent_system_prompt_path: () => `${skill_test_fixture.app_root}/builtin/system.md`,
         get_agent_chat_seed_path: () => `${skill_test_fixture.app_root}/builtin/chat_seed.json`,
+        get_agent_completion_judge_prompt_path: () =>
+          `${skill_test_fixture.app_root}/builtin/completion_judge.md`,
       },
       settings,
       userAgent: "LinguaGacha/Test",
@@ -4675,6 +4852,9 @@ describe("AgentService", () => {
       },
       set_auto_resume_settings: (value) => {
         auto_resume_settings = { ...auto_resume_settings, ...value };
+      },
+      set_auto_continue_settings: (value) => {
+        auto_continue_settings = { ...auto_continue_settings, ...value };
       },
       service,
       workspace: effective_workspace,

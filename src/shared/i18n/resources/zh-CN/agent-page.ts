@@ -127,6 +127,10 @@ export const zh_cn_agent_page = {
     retrying: "正在自动重试（第 {attempt} 次）",
     cancel: "取消自动重试",
   },
+  auto_continue: {
+    judging: "正在检查任务是否完成…",
+    continuing: "任务未完成，已自动继续（第 {attempt} 次）",
+  },
   editing: { user: "正在修改你的消息", assistant: "正在修改模型回复", queue: "正在修改排队消息" },
   queue: {
     no_message_text: "无消息正文",

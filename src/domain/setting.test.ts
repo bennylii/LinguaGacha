@@ -140,6 +140,35 @@ describe("设置快照", () => {
     ).toBe(5);
   });
 
+  it("自动继续设置默认关闭，次数按 0 到上限归一且 0 保留为不限", () => {
+    expect(normalize_setting_snapshot({})).toMatchObject({
+      agent_auto_continue_enabled: false,
+      agent_auto_continue_max_continues: 10,
+    });
+    expect(
+      normalize_setting_snapshot({
+        agent_auto_continue_enabled: "bad",
+        agent_auto_continue_max_continues: -3,
+      }),
+    ).toMatchObject({
+      agent_auto_continue_enabled: false,
+      agent_auto_continue_max_continues: 0,
+    });
+    expect(
+      normalize_setting_snapshot({
+        agent_auto_continue_enabled: true,
+        agent_auto_continue_max_continues: 1_200.7,
+      }),
+    ).toMatchObject({
+      agent_auto_continue_enabled: true,
+      agent_auto_continue_max_continues: 1_000,
+    });
+    expect(
+      Setting.from_json({ agent_auto_continue_max_continues: Infinity }).to_snapshot()
+        .agent_auto_continue_max_continues,
+    ).toBe(10);
+  });
+
   it("结果检查旧字段不会进入设置快照", () => {
     const snapshot = normalize_setting_snapshot({
       check_kana_residue: false,

@@ -615,6 +615,7 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
               on_continue={continue_latest_round}
               auto_resume={controls.autoResume}
               on_cancel_auto_resume={cancel_auto_resume}
+              auto_continue={controls.autoContinue}
               on_edit={start_edit}
               render_entry_editor={render_entry_editor}
               on_add_annotation={add_response_annotation}

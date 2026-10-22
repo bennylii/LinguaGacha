@@ -28,6 +28,18 @@ export const de_de_expert_settings_page = {
       description:
         "Obergrenze für aufeinanderfolgende automatische Neuversuche; 0 bedeutet unbegrenzt, Standard 0",
     },
+    agent_auto_continue_enabled: {
+      title: "Automatisches Fortsetzen für Agent",
+      description:
+        "Nach dem erfolgreichen Abschluss eines Durchlaufs öffnet das Backend einen eigenen Prüf-Thread, um zu prüfen, ob die Aufgabe wirklich erledigt ist, und setzt sie sonst automatisch fort; standardmäßig deaktiviert" +
+        "\n" +
+        "Jede Prüfung kostet eine zusätzliche Modellanfrage; eine fehlgeschlagene Prüfung oder ein unlesbares Ergebnis zählt als erledigt, es wird also nichts automatisch fortgesetzt",
+    },
+    agent_auto_continue_max_continues: {
+      title: "Maximale Anzahl automatischer Fortsetzungen",
+      description:
+        "Obergrenze für aufeinanderfolgende automatische Fortsetzungen in einem Durchlauf; 0 bedeutet unbegrenzt, Standard 10",
+    },
     preceding_lines_threshold: {
       title: "Schwellenwert für vorhergehende Zeilen",
       description:
@@ -71,6 +83,8 @@ export const de_de_expert_settings_page = {
       "Die maximale Wartezeit muss eine ganze Zahl von 1 bis 86400 Sekunden sein …",
     agent_auto_resume_max_attempts_invalid:
       "Die maximale Anzahl Neuversuche muss eine ganze Zahl von 0 bis 1000 sein …",
+    agent_auto_continue_max_continues_invalid:
+      "Die maximale Anzahl automatischer Fortsetzungen muss eine ganze Zahl von 0 bis 1000 sein …",
     preceding_lines_threshold_invalid:
       "Der Schwellenwert für vorhergehende Zeilen muss eine Zahl innerhalb des gültigen Bereichs sein …",
   },

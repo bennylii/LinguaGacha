@@ -1380,6 +1380,7 @@ function build_state(overrides: Partial<AgentPageState> = {}): AgentPageState {
     context: { tokens: null, compactable: false, limits: null },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     autoResume: null,
+    autoContinue: null,
     transport: "ready",
     command: null,
     input: {

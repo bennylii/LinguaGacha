@@ -37,6 +37,7 @@ import type {
   AgentToolEntry,
   AgentTokenSpeedSnapshot,
   AgentAutoResumeSnapshot,
+  AgentAutoContinueSnapshot,
   AgentUsageSnapshot,
   AgentWriteApprovalDecision,
 } from "@shared/agent";
@@ -81,6 +82,7 @@ export type AgentControlsSlice = Readonly<{
   context: AgentContextSnapshot;
   usage: AgentUsageSnapshot;
   autoResume: AgentAutoResumeSnapshot | null;
+  autoContinue: AgentAutoContinueSnapshot | null;
   transport: AgentTransportState;
   command: AgentCommand;
 }>;
@@ -133,6 +135,7 @@ const EMPTY_CONTROLS: AgentControlsSlice = {
   context: { tokens: null, compactable: false, limits: null },
   usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   autoResume: null,
+  autoContinue: null,
   transport: "restoring",
   command: null,
 };
@@ -350,6 +353,9 @@ export class AgentChatStore {
       next.autoResume?.attempt === this.controls.autoResume?.attempt &&
       next.autoResume?.maxAttempts === this.controls.autoResume?.maxAttempts &&
       next.autoResume?.retryAt === this.controls.autoResume?.retryAt &&
+      next.autoContinue?.roundId === this.controls.autoContinue?.roundId &&
+      next.autoContinue?.attempt === this.controls.autoContinue?.attempt &&
+      next.autoContinue?.phase === this.controls.autoContinue?.phase &&
       next.transport === this.controls.transport &&
       next.command === this.controls.command
     ) {
@@ -450,6 +456,7 @@ export class AgentChatStore {
         context: snapshot.context,
         usage: snapshot.usage,
         autoResume: snapshot.autoResume,
+        autoContinue: snapshot.autoContinue,
       };
       this.sync_countdown();
       this.emit("queue");
@@ -532,6 +539,9 @@ export class AgentChatStore {
         break;
       case "auto_resume":
         this.set_controls({ autoResume: change.autoResume });
+        break;
+      case "auto_continue":
+        this.set_controls({ autoContinue: change.autoContinue });
         break;
       case "input_queue":
         this.queue = { inputQueue: change.inputQueue };
@@ -894,6 +904,7 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
   const doing = normalize_doing(record["doing"]);
   const token_speed = normalize_token_speed(record["tokenSpeed"]);
   const auto_resume = normalize_auto_resume(record["autoResume"]);
+  const auto_continue = normalize_auto_continue(record["autoContinue"]);
   const context = normalize_context(record["context"]);
   const usage = normalize_usage(record["usage"]);
   if (
@@ -903,7 +914,8 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
     context === null ||
     usage === null ||
     token_speed === undefined ||
-    auto_resume === undefined
+    auto_resume === undefined ||
+    auto_continue === undefined
   ) {
     throw new TypeError("Agent snapshot is invalid.");
   }
@@ -920,6 +932,7 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
     usage,
     tokenSpeed: token_speed,
     autoResume: auto_resume,
+    autoContinue: auto_continue,
   };
 }
 
@@ -971,6 +984,12 @@ function normalize_agent_change(value: unknown): AgentChatChange | null {
     case "auto_resume": {
       const auto_resume = normalize_auto_resume(record["autoResume"]);
       return auto_resume === undefined ? null : { type: "auto_resume", autoResume: auto_resume };
+    }
+    case "auto_continue": {
+      const auto_continue = normalize_auto_continue(record["autoContinue"]);
+      return auto_continue === undefined
+        ? null
+        : { type: "auto_continue", autoContinue: auto_continue };
     }
     case "context": {
       const context = normalize_context(record["context"]);
@@ -1027,6 +1046,25 @@ function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null |
   )
     return undefined;
   return { roundId: round_id, attempt, maxAttempts: max_attempts, retryAt: retry_at };
+}
+
+/** 自动继续状态只接受轮次身份、正次与两个已知相位，非法事件由 `revision` 缺口恢复。 */
+function normalize_auto_continue(value: unknown): AgentAutoContinueSnapshot | null | undefined {
+  if (value === null) return null;
+  if (!is_json_record(value)) return undefined;
+  const round_id = value["roundId"];
+  const attempt = value["attempt"];
+  const phase = value["phase"];
+  if (
+    typeof round_id !== "string" ||
+    round_id === "" ||
+    typeof attempt !== "number" ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    (phase !== "judging" && phase !== "continuing")
+  )
+    return undefined;
+  return { roundId: round_id, attempt, phase };
 }
 
 /** 累计用量必须完整且非负，非法事件由 `revision` 缺口恢复。 */

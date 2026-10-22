@@ -129,6 +129,10 @@ export const ko_kr_agent_page = {
     retrying: "자동 재시도 중 ({attempt}회)",
     cancel: "자동 재시도 취소",
   },
+  auto_continue: {
+    judging: "작업 완료 여부를 확인하는 중…",
+    continuing: "작업이 완료되지 않아 자동으로 이어서 진행했습니다 ({attempt}회)",
+  },
   editing: {
     user: "내 메시지 수정 중",
     assistant: "모델 응답 수정 중",

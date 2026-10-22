@@ -25,6 +25,18 @@ export const ja_jp_expert_settings_page = {
       title: "最大再試行回数",
       description: "連続する自動再試行の上限です。0 は無制限を意味します。既定は 0 です",
     },
+    agent_auto_continue_enabled: {
+      title: "Agent の自動続行",
+      description:
+        "ラウンドが正常に終了した後、バックエンドが独立した判定スレッドでタスクが本当に完了したかを確認し、完了していなければ自動的に続行します。既定では無効です" +
+        "\n" +
+        "判定ごとにモデルリクエストが 1 回追加されます。判定に失敗した場合や結果を読み取れない場合は完了とみなされ、自動続行は行われません",
+    },
+    agent_auto_continue_max_continues: {
+      title: "最大自動続行回数",
+      description:
+        "1 つのラウンド内における連続する自動続行の上限です。0 は無制限を意味します。既定は 10 です",
+    },
     preceding_lines_threshold: {
       title: "参照する前文の最大行数",
       description: "各翻訳タスクに添付できる前文の最大行数です。既定では無効です",
@@ -67,6 +79,8 @@ export const ja_jp_expert_settings_page = {
       "再試行間隔の上限は 1 から 86400 までの整数秒で入力してください …",
     agent_auto_resume_max_attempts_invalid:
       "最大再試行回数は 0 から 1000 までの整数で入力してください …",
+    agent_auto_continue_max_continues_invalid:
+      "最大自動続行回数は 0 から 1000 までの整数で入力してください …",
     preceding_lines_threshold_invalid: "前文の最大行数には有効な範囲の数値を入力してください …",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_expert_settings_page>;

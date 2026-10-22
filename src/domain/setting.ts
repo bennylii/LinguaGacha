@@ -41,6 +41,10 @@ export const AGENT_AUTO_RESUME_DEFAULT_ENABLED = true;
 export const AGENT_AUTO_RESUME_DEFAULT_INITIAL_DELAY_SECONDS = 5;
 export const AGENT_AUTO_RESUME_DEFAULT_MAX_DELAY_SECONDS = 300;
 export const AGENT_AUTO_RESUME_DEFAULT_MAX_ATTEMPTS = 0;
+/** Agent 自动继续的次数边界，0 表示不限次数。 */
+export const AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT = 1_000;
+export const AGENT_AUTO_CONTINUE_DEFAULT_ENABLED = false;
+export const AGENT_AUTO_CONTINUE_DEFAULT_MAX_CONTINUES = 10;
 /** 出站请求解析路由所需的最小代理策略。 */
 export interface NetworkProxyPolicy {
   mode: NetworkProxyMode;
@@ -59,6 +63,8 @@ export const SETTING_SNAPSHOT_SCHEMA = Type.Object(
     agent_auto_resume_initial_delay: Type.Number(), // 首次自动重试前的等待秒数。
     agent_auto_resume_max_delay: Type.Number(), // 指数退避封顶的等待秒数。
     agent_auto_resume_max_attempts: Type.Number(), // 自动重试次数上限，0 表示不限。
+    agent_auto_continue_enabled: Type.Boolean(), // 轮次成功结束后是否自动判定并发送继续。
+    agent_auto_continue_max_continues: Type.Number(), // 单轮任务内自动继续次数上限，0 表示不限。
     app_language: Type.Enum(APP_LANGUAGE_DEFINITIONS.map(({ code }) => code)), // 界面与日志文案的应用语言。
     source_language: Type.String(), // 源语言允许 `ALL`，由具体过滤器进一步收窄。
     target_language: Type.String(), // 译文目标语言，参与提示词和工程设置镜像。
@@ -108,6 +114,8 @@ export const DEFAULT_SETTING: SettingSnapshot & JsonRecord = {
   agent_auto_resume_initial_delay: AGENT_AUTO_RESUME_DEFAULT_INITIAL_DELAY_SECONDS,
   agent_auto_resume_max_delay: AGENT_AUTO_RESUME_DEFAULT_MAX_DELAY_SECONDS,
   agent_auto_resume_max_attempts: AGENT_AUTO_RESUME_DEFAULT_MAX_ATTEMPTS,
+  agent_auto_continue_enabled: AGENT_AUTO_CONTINUE_DEFAULT_ENABLED,
+  agent_auto_continue_max_continues: AGENT_AUTO_CONTINUE_DEFAULT_MAX_CONTINUES,
   app_language: "ZH",
   source_language: "JA",
   target_language: "ZH",
@@ -248,6 +256,9 @@ export class Setting {
     if (key === "agent_auto_resume_max_delay") return normalize_agent_auto_resume_max_delay(value);
     if (key === "agent_auto_resume_max_attempts")
       return normalize_agent_auto_resume_max_attempts(value);
+    if (key === "agent_auto_continue_enabled") return normalize_agent_auto_continue_enabled(value);
+    if (key === "agent_auto_continue_max_continues")
+      return normalize_agent_auto_continue_max_continues(value);
     if (key === "agent_personality") return typeof value === "string" ? value : null;
     if (key === "agent_skills") return normalize_agent_skill_settings(value);
     if (key === "app_language") {
@@ -329,6 +340,21 @@ export function normalize_agent_auto_resume_max_attempts(value: unknown): number
     AGENT_AUTO_RESUME_DEFAULT_MAX_ATTEMPTS,
     0,
     AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
+  );
+}
+
+/** 自动继续开关只接受布尔值，缺失或旧配置非法时保持关闭。 */
+export function normalize_agent_auto_continue_enabled(value: unknown): boolean {
+  return read_json_boolean(value, AGENT_AUTO_CONTINUE_DEFAULT_ENABLED);
+}
+
+/** 0 表示不限次数，其余值收窄到 1 至上限。 */
+export function normalize_agent_auto_continue_max_continues(value: unknown): number {
+  return normalize_bounded_integer_setting(
+    value,
+    AGENT_AUTO_CONTINUE_DEFAULT_MAX_CONTINUES,
+    0,
+    AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
   );
 }
 

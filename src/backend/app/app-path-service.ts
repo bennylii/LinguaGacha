@@ -198,6 +198,13 @@ export class AppPathService {
   }
 
   /**
+   * 返回内置的 Agent 完成度判定指令路径，判定线程与主会话共用资源目录。
+   */
+  public get_agent_completion_judge_prompt_path(): string {
+    return this.get_builtin_path("completion_judge.md");
+  }
+
+  /**
    * 返回内置 Agent skill 根目录，供启动期协议加载统一使用。
    */
   public get_agent_builtin_skill_dir(): string {

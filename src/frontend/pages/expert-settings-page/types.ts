@@ -9,6 +9,8 @@ export type ExpertSettingsSnapshot = Pick<
   | "agent_auto_resume_initial_delay"
   | "agent_auto_resume_max_delay"
   | "agent_auto_resume_max_attempts"
+  | "agent_auto_continue_enabled"
+  | "agent_auto_continue_max_continues"
   | "preceding_lines_threshold"
   | "clean_ruby"
   | "deduplication_in_bilingual"
@@ -24,6 +26,8 @@ export function build_expert_settings_snapshot(
     agent_auto_resume_initial_delay: settings_snapshot.agent_auto_resume_initial_delay,
     agent_auto_resume_max_delay: settings_snapshot.agent_auto_resume_max_delay,
     agent_auto_resume_max_attempts: settings_snapshot.agent_auto_resume_max_attempts,
+    agent_auto_continue_enabled: settings_snapshot.agent_auto_continue_enabled,
+    agent_auto_continue_max_continues: settings_snapshot.agent_auto_continue_max_continues,
     preceding_lines_threshold: settings_snapshot.preceding_lines_threshold,
     clean_ruby: settings_snapshot.clean_ruby,
     deduplication_in_bilingual: settings_snapshot.deduplication_in_bilingual,

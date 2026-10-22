@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AgentAssistantMessageParts,
+  AgentAutoContinueSnapshot,
   AgentAutoResumeSnapshot,
   AgentEntry,
   AgentEntryStatus,
@@ -106,6 +107,7 @@ describe("AgentTimeline", () => {
     follow_reset_revision = 0,
     skills: readonly AgentSkillSnapshot[] = [],
     auto_resume: AgentAutoResumeSnapshot | null = null,
+    auto_continue: AgentAutoContinueSnapshot | null = null,
   ): Promise<HTMLDivElement> {
     if (container === null) {
       container = document.createElement("div");
@@ -127,6 +129,7 @@ describe("AgentTimeline", () => {
               on_continue={on_continue}
               auto_resume={auto_resume}
               on_cancel_auto_resume={on_cancel_auto_resume}
+              auto_continue={auto_continue}
               on_edit={on_edit}
               on_add_annotation={on_add_annotation}
               revision_disabled={false}
@@ -388,6 +391,44 @@ describe("AgentTimeline", () => {
       { roundId: "user-latest", attempt: 1, maxAttempts: 5, retryAt: 5_000 },
     );
     expect(view.querySelectorAll(".agent-auto-resume-entry")).toHaveLength(1);
+  });
+
+  it("自动继续状态区分判定与继续两个相位", async () => {
+    const judging = await render_timeline(
+      [user_entry("user-1", "任务", "success", 0, 1_000)],
+      0,
+      [],
+      null,
+      { roundId: "user-1", attempt: 1, phase: "judging" },
+    );
+    expect(judging.querySelector(".agent-auto-continue-entry")?.textContent).toContain(
+      "agent_page.auto_continue.judging",
+    );
+
+    const continuing = await render_timeline(
+      [user_entry("user-1", "任务", "success", 0, 1_000)],
+      0,
+      [],
+      null,
+      { roundId: "user-1", attempt: 2, phase: "continuing" },
+    );
+    expect(continuing.querySelector(".agent-auto-continue-entry")?.textContent).toContain(
+      "agent_page.auto_continue.continuing:2",
+    );
+  });
+
+  it("自动继续状态只挂在对应轮次上", async () => {
+    const view = await render_timeline(
+      [
+        user_entry("user-old", "旧任务", "success", 0, 1_000),
+        user_entry("user-latest", "最新任务", "success", 1_000, 2_000),
+      ],
+      0,
+      [],
+      null,
+      { roundId: "user-latest", attempt: 1, phase: "judging" },
+    );
+    expect(view.querySelectorAll(".agent-auto-continue-entry")).toHaveLength(1);
   });
 
   it("成功轮次只允许修改最终助手回复，状态行不提供回合重试", async () => {

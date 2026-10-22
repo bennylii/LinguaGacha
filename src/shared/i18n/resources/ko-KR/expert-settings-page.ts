@@ -26,6 +26,18 @@ export const ko_kr_expert_settings_page = {
       title: "최대 재시도 횟수",
       description: "연속 자동 재시도의 상한입니다. 0은 무제한을 뜻합니다. 기본값은 0입니다",
     },
+    agent_auto_continue_enabled: {
+      title: "Agent 자동 계속",
+      description:
+        "라운드가 성공적으로 끝난 뒤 백엔드가 별도의 판정 스레드로 작업이 정말 끝났는지 확인하고, 끝나지 않았다면 자동으로 계속합니다. 기본적으로 사용하지 않습니다" +
+        "\n" +
+        "판정마다 모델 요청이 1회 추가됩니다. 판정이 실패하거나 결과를 읽을 수 없으면 완료로 간주하므로 자동으로 계속되지 않습니다",
+    },
+    agent_auto_continue_max_continues: {
+      title: "최대 자동 계속 횟수",
+      description:
+        "한 라운드 안에서 연속으로 자동 계속하는 횟수의 상한입니다. 0은 무제한을 뜻합니다. 기본값은 10입니다",
+    },
     preceding_lines_threshold: {
       title: "참고할 앞선 문맥의 최대 줄 수",
       description:
@@ -70,6 +82,8 @@ export const ko_kr_expert_settings_page = {
       "최대 재시도 간격은 1에서 86400 사이의 정수 초로 입력해 주세요 …",
     agent_auto_resume_max_attempts_invalid:
       "최대 재시도 횟수는 0에서 1000 사이의 정수로 입력해 주세요 …",
+    agent_auto_continue_max_continues_invalid:
+      "최대 자동 계속 횟수는 0에서 1000 사이의 정수로 입력해 주세요 …",
     preceding_lines_threshold_invalid:
       "앞선 문맥의 최대 줄 수에 유효한 범위의 숫자를 입력해 주세요 …",
   },
