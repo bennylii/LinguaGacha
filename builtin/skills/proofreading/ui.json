@@ -1,10 +1,10 @@
 {
   "order": 250,
   "displayDescriptions": {
-    "zh-CN": "逐条结合上下文校对译文，直到末条",
-    "en-US": "Proofread translations item by item with context until the end",
-    "de-DE": "Übersetzungen kontextbewusst Eintrag für Eintrag prüfen",
-    "ja-JP": "文脈を見ながら末尾まで一項目ずつ推敲する",
-    "ko-KR": "문맥을 참고해 마지막 항목까지 하나씩 교정합니다"
+    "zh-CN": "一章一章、一句一句地根据上下文斟酌校对，做到信、达",
+    "en-US": "Proofread chapter by chapter and sentence by sentence with context, aiming for faithfulness and fluency",
+    "de-DE": "Kapitel für Kapitel und Satz für Satz kontextbewusst prüfen – originalgetreu und flüssig",
+    "ja-JP": "章ごと・文ごとに文脈を踏まえて推敲し、忠実さと読みやすさを両立する",
+    "ko-KR": "장 단위, 문장 단위로 문맥을 살펴 다듬어 충실성과 가독성을 함께 확보합니다"
   }
 }
