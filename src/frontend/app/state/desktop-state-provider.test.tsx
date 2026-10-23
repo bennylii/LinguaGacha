@@ -43,7 +43,7 @@ type RuntimeSnapshot = {
   taskProcessedLine: number;
   taskOutputTokens: number;
   taskRequestInFlightCount: number;
-  runtimeOwner: "batch_translation" | "agent" | "model_test" | null;
+  runtimeOwner: "batch_translation" | "agent" | "model_test" | "remote_workspace" | null;
   sourceLanguage: string;
 };
 

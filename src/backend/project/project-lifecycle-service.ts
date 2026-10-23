@@ -60,6 +60,8 @@ import {
   type ProjectDefaultPresetInput,
 } from "./project-default-preset-reader";
 import type { RuntimeOperationGate } from "../runtime-operation-gate";
+import type { RemoteNovelImport, RemoteNovelImportPort } from "../remote/novel-source-service";
+import { REMOTE_SOURCE_META_KEY } from "../remote/remote-source";
 import { ProjectSessionState } from "./project-session-state";
 import type { ProjectWriteStore } from "./project-write-store";
 import {
@@ -92,6 +94,8 @@ export class ProjectLifecycleService {
 
   private readonly default_preset_reader: ProjectDefaultPresetReader; // 隔离默认预设文件读取和非阻断日志
 
+  private readonly remote_import: RemoteNovelImportPort | null; // 小说地址新建时提供下载与暂存；本地工程为 null
+
   /**
    * 初始化项目生命周期依赖，保持公开路由层只负责装配
    */
@@ -107,6 +111,7 @@ export class ProjectLifecycleService {
     private readonly pdf_execution: PDFExecution,
     native_fs: NativeFs = default_native_fs,
     private readonly game_prepare_execution?: GamePrepareExecution,
+    remote_import?: RemoteNovelImportPort,
   ) {
     this.database = database;
     this.runtime_gate = runtime_gate;
@@ -116,6 +121,7 @@ export class ProjectLifecycleService {
     this.cache = cache;
     this.write_store = write_store;
     this.native_fs = native_fs;
+    this.remote_import = remote_import ?? null;
     this.default_preset_reader = new ProjectDefaultPresetReader(
       app_setting_service,
       paths,
@@ -248,6 +254,7 @@ export class ProjectLifecycleService {
 
   /**
    * 新建工程的慢解析、数据库提交与 loaded 切换必须处于同一生命周期租约。
+   * 小说地址新建先下载到暂存再复用同一解析与提交路径。
    */
   private async create_project_commit_under_lease(
     body: JsonRecord,
@@ -256,66 +263,123 @@ export class ProjectLifecycleService {
     const requested_project_path = this.require_body_string(body, "path");
     const project_path = this.resolve_create_project_path(requested_project_path);
     this.assert_no_legacy_create_commit_fields(body);
-    const source_paths = this.normalize_source_paths(body["source_paths"]);
+    const local_source_paths = this.normalize_source_paths(body["source_paths"]);
+    const remote_novel_url = this.read_optional_body_string(body, "remote_novel_url");
+    if (remote_novel_url !== null && local_source_paths.length > 0) {
+      throw new AppErrors.AppError("request.validation_failed", {
+        diagnostic_context: { reason: "mixed_project_source" },
+      });
+    }
     const project_settings = this.read_create_project_settings(body["project_settings"]);
-    // 后端重新解析源文件得到的唯一可信新建草稿。
-    const parsed_draft = await new SourceFileParsePipeline(
-      this.create_format_service(project_settings),
-    ).build_project_draft(source_paths, signal);
-    signal.throwIfAborted();
-    this.assert_create_commit_has_importable_files(parsed_draft);
-    // 将可信草稿转成持久项目事实的唯一计算结果。
-    const prefilter_output = this.compute_create_project_prefilter_output({
-      draft: parsed_draft,
-      settings: project_settings,
-    });
-    const default_preset_input = this.default_preset_reader.read();
-    let snapshot!: ProjectDataSnapshot; // 初始化事务同步产出，失败时数据库入口抛错并清理新文件。
+    let remote_import: RemoteNovelImport | null = null;
+    try {
+      let source_paths = local_source_paths;
+      if (remote_novel_url !== null) {
+        remote_import = await this.prepare_remote_import(remote_novel_url, signal);
+        source_paths = [remote_import.source_path];
+      }
+      // 后端重新解析源文件得到的唯一可信新建草稿。
+      const parsed_draft = await new SourceFileParsePipeline(
+        this.create_format_service(project_settings),
+      ).build_project_draft(source_paths, signal);
+      signal.throwIfAborted();
+      this.assert_create_commit_has_importable_files(parsed_draft);
+      // 将可信草稿转成持久项目事实的唯一计算结果。
+      const prefilter_output = this.compute_create_project_prefilter_output({
+        draft: parsed_draft,
+        settings: project_settings,
+      });
+      const default_preset_input = this.default_preset_reader.read();
+      let snapshot!: ProjectDataSnapshot; // 初始化事务同步产出，失败时数据库入口抛错并清理新文件。
 
-    await this.database.create_project(
-      project_path,
-      this.build_project_name(source_paths, project_path),
-      (writer) => {
-        this.write_default_presets(writer, project_path, default_preset_input);
-        for (const file of parsed_draft.files) {
-          writer.add_asset(
+      await this.database.create_project(
+        project_path,
+        this.build_project_name(source_paths, project_path),
+        (writer) => {
+          this.write_default_presets(writer, project_path, default_preset_input);
+          for (const file of parsed_draft.files) {
+            writer.add_asset(
+              project_path,
+              file.rel_path,
+              file.content,
+              file.file_type,
+              file.pdf_document,
+              file.sort_index,
+            );
+          }
+          writer.set_items(
             project_path,
-            file.rel_path,
-            file.content,
-            file.file_type,
-            file.pdf_document,
-            file.sort_index,
+            build_project_item_persistent_records(prefilter_output.items) as unknown as JsonValue[],
           );
-        }
-        writer.set_items(
-          project_path,
-          build_project_item_persistent_records(prefilter_output.items) as unknown as JsonValue[],
-        );
-        writer.upsert_meta_entries(
-          project_path,
-          this.build_project_settings_meta({
-            project_settings,
-            prefilter_output,
-          }) as unknown as JsonRecord,
-        );
-        writer.upsert_meta_entries(project_path, {
-          translation_prompt_legacy_migrated: true,
-          "migration.asset_file_type_complete": true,
-        });
-        // 预过滤条目已分配身份并通过校验，写库只转换持久字段，提交后缓存可复用同一事实。
-        snapshot = new ProjectDataReader(writer).read_snapshot(
-          project_path,
-          Object.values(prefilter_output.items).sort((left, right) => left.item_id - right.item_id),
-        );
-      },
-    );
+          writer.upsert_meta_entries(
+            project_path,
+            this.build_project_settings_meta({
+              project_settings,
+              prefilter_output,
+            }) as unknown as JsonRecord,
+          );
+          writer.upsert_meta_entries(project_path, {
+            translation_prompt_legacy_migrated: true,
+            "migration.asset_file_type_complete": true,
+          });
+          if (remote_import !== null) {
+            writer.set_meta(
+              project_path,
+              REMOTE_SOURCE_META_KEY,
+              remote_import.binding as unknown as JsonValue,
+            );
+          }
+          // 预过滤条目已分配身份并通过校验，写库只转换持久字段，提交后缓存可复用同一事实。
+          snapshot = new ProjectDataReader(writer).read_snapshot(
+            project_path,
+            Object.values(prefilter_output.items).sort(
+              (left, right) => left.item_id - right.item_id,
+            ),
+          );
+        },
+      );
 
-    const response = await this.activate_project(project_path, snapshot);
-    this.log_create_commit_parse_diagnostics(parsed_draft.failed_files, parsed_draft.warnings);
-    this.default_preset_reader.log_loaded_names(default_preset_input.loaded_names);
-    return parsed_draft.failed_files.length === 0
-      ? response
-      : { ...response, failed_files: parsed_draft.failed_files as unknown as JsonValue };
+      const response = await this.activate_project(project_path, snapshot);
+      this.log_create_commit_parse_diagnostics(parsed_draft.failed_files, parsed_draft.warnings);
+      this.default_preset_reader.log_loaded_names(default_preset_input.loaded_names);
+      if (remote_import !== null) await this.commit_remote_snapshot(remote_import, project_path);
+      return parsed_draft.failed_files.length === 0
+        ? response
+        : { ...response, failed_files: parsed_draft.failed_files as unknown as JsonValue };
+    } finally {
+      await remote_import?.dispose();
+    }
+  }
+
+  /** 小说地址导入依赖唯一的远端端口；未装配说明组合根缺失。 */
+  private async prepare_remote_import(
+    url: string,
+    signal: AbortSignal,
+  ): Promise<RemoteNovelImport> {
+    if (this.remote_import === null) {
+      throw new AppErrors.AppError("runtime.internal_invariant", {
+        diagnostic_context: { reason: "remote_import_port_missing" },
+      });
+    }
+    return await this.remote_import.prepare_import(url, signal);
+  }
+
+  /**
+   * 工程事实已经提交，快照失败只影响下一次同步精度；返回已提交错误让界面重试。
+   */
+  private async commit_remote_snapshot(
+    remote_import: RemoteNovelImport,
+    project_path: string,
+  ): Promise<void> {
+    try {
+      await remote_import.commit_snapshot(project_path);
+    } catch (cause) {
+      throw new AppErrors.AppError("data.committed_sync_failed", {
+        cause,
+        public_details: { committed: true, action: "write_remote_snapshot" },
+        diagnostic_context: { operation: "write_remote_snapshot_after_commit" },
+      });
+    }
   }
 
   /**
@@ -767,6 +831,20 @@ export class ProjectLifecycleService {
       throw new AppErrors.AppError("request.validation_failed");
     }
     return value;
+  }
+
+  /**
+   * 读取可选字符串；字段存在但不是非空字符串时按请求错误处理。
+   */
+  private read_optional_body_string(body: JsonRecord, key: string): string | null {
+    if (!Object.hasOwn(body, key)) return null;
+    const value = body[key];
+    if (typeof value !== "string" || value.trim() === "") {
+      throw new AppErrors.AppError("request.validation_failed", {
+        public_details: { field: key },
+      });
+    }
+    return value.trim();
   }
 
   /**

@@ -209,6 +209,13 @@ function get_button_by_text(container: HTMLElement, text: string): HTMLButtonEle
   return button;
 }
 
+/** 受控输入框走原生 setter，让 React 观察到值变化。 */
+function set_input_value(input: HTMLInputElement, value: string): void {
+  const value_setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  value_setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 /** 通过真实拖放入口提交宿主路径，让页面自行完成摘要与选择。 */
 async function drop_paths(target: HTMLElement, paths: string[]): Promise<void> {
   const files = paths.map((path) => new File([], path));
@@ -370,6 +377,127 @@ describe("ProjectPage", () => {
       path: "E:\\Source\\demo_20260428_120000.lg",
       name: "demo_20260428_120000",
     });
+  });
+
+  it("检测小说地址后按远程来源提交创建请求", async () => {
+    const novel_url = "https://n.novelia.cc/novel/kakuyomu/123456";
+    desktop_runtime_fixture.current = create_desktop_runtime_fixture({
+      project_fixed_path: "E:\\Projects",
+    });
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/novel/preview") {
+        return {
+          preview: {
+            origin: "https://n.novelia.cc",
+            kind: "web",
+            title: "测试小说",
+            title_jp: "テスト小説",
+            title_zh: null,
+            chapter_count: 12,
+            filename: "テスト小説.txt",
+          },
+        };
+      }
+      if (path === "/api/session/project/create") {
+        return { project: { path: "E:\\Projects\\テスト小説.lg", loaded: true } };
+      }
+      if (path === "/api/settings/recent-projects/add") {
+        return { settings: { recent_projects: [] } };
+      }
+
+      return {};
+    });
+    await mount_page();
+    const page_container = container!;
+
+    await act(async () => {
+      get_button_by_text(page_container, "小说地址").click();
+    });
+    const novel_input = page_container.querySelector<HTMLInputElement>("input");
+    if (novel_input === null) throw new Error("未找到小说地址输入框。");
+
+    await act(async () => {
+      set_input_value(novel_input, novel_url);
+    });
+    await act(async () => {
+      get_button_by_text(page_container, "检测").click();
+    });
+
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/novel/preview", { url: novel_url });
+    expect(page_container.textContent).toContain("测试小说");
+    expect(page_container.textContent).toContain("12 章");
+
+    await act(async () => {
+      get_button_by_text(page_container, "创建工程").click();
+    });
+
+    expect(api_fetch_mock).toHaveBeenCalledWith(
+      "/api/session/project/create",
+      expect.objectContaining({
+        remote_novel_url: novel_url,
+        path: "E:\\Projects\\テスト小説.lg",
+      }),
+    );
+  });
+
+  it("来源模式切换会清空另一种模式的候选", async () => {
+    const novel_url = "https://n.novelia.cc/novel/kakuyomu/123456";
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/novel/preview") {
+        return {
+          preview: {
+            origin: "https://n.novelia.cc",
+            kind: "web",
+            title: "切换前的小说",
+            title_jp: "",
+            title_zh: null,
+            chapter_count: 3,
+            filename: "切換前.txt",
+          },
+        };
+      }
+      if (path === "/api/session/source-files/summary") {
+        return { source_file_count: 1, format_hit_counts: { txt: 1 } };
+      }
+
+      return {};
+    });
+    await mount_page();
+    const page_container = container!;
+
+    await act(async () => {
+      get_button_by_text(page_container, "选择文件").click();
+    });
+    expect(page_container.textContent).toContain("已选择 1 个源文件");
+
+    await act(async () => {
+      get_button_by_text(page_container, "小说地址").click();
+    });
+    expect(page_container.textContent).not.toContain("已选择 1 个源文件");
+
+    const novel_input = page_container.querySelector<HTMLInputElement>("input");
+    if (novel_input === null) throw new Error("未找到小说地址输入框。");
+    await act(async () => {
+      set_input_value(novel_input, novel_url);
+    });
+    await act(async () => {
+      get_button_by_text(page_container, "检测").click();
+    });
+    expect(page_container.textContent).toContain("切换前的小说");
+
+    await act(async () => {
+      get_button_by_text(page_container, "本地文件").click();
+    });
+    expect(page_container.textContent).not.toContain("切换前的小说");
+    expect(page_container.textContent).not.toContain("已选择 1 个源文件");
+
+    await act(async () => {
+      get_button_by_text(page_container, "小说地址").click();
+    });
+    expect(page_container.textContent).not.toContain("切换前的小说");
+    expect((page_container.querySelector<HTMLInputElement>("input")?.value ?? null) === "").toBe(
+      true,
+    );
   });
 
   it("来源摘要全部失败时展示具体文件原因，重新选择仍可恢复", async () => {

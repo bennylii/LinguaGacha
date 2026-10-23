@@ -18,6 +18,7 @@ import { ko_kr_preset_editor } from "./preset-editor";
 import { ko_kr_project_page } from "./project-page";
 import { ko_kr_proofreading_page } from "./proofreading-page";
 import { ko_kr_quality_rule_editor } from "./quality-rule-editor";
+import { ko_kr_remote_page } from "./remote-page";
 import { ko_kr_task_progress } from "./task-progress";
 import { ko_kr_text_preserve_page } from "./text-preserve-page";
 import { ko_kr_text_replacement_page } from "./text-replacement-page";
@@ -46,6 +47,7 @@ export const ko_kr_messages = {
   project_page: ko_kr_project_page,
   proofreading_page: ko_kr_proofreading_page,
   quality_rule_editor: ko_kr_quality_rule_editor,
+  remote_page: ko_kr_remote_page,
   task_progress: ko_kr_task_progress,
   text_preserve_page: ko_kr_text_preserve_page,
   text_replacement_page: ko_kr_text_replacement_page,

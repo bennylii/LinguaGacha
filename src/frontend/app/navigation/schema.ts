@@ -5,6 +5,7 @@ import {
   BookA,
   BookOpenCheck,
   Boxes,
+  CloudDownload,
   FlaskConical,
   GraduationCap,
   Grid2x2Check,
@@ -48,6 +49,16 @@ export const NAVIGATION_GROUPS: NavigationGroup[] = [
         id: "workbench",
         icon: ListTree,
         title_key: "workbench_page.title",
+      },
+    ],
+  },
+  {
+    id: "remote",
+    items: [
+      {
+        id: "remote",
+        icon: CloudDownload,
+        title_key: "remote_page.title",
       },
     ],
   },

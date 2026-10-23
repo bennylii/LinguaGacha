@@ -60,6 +60,23 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.postJson("/api/logs/detail", (body) => context.readLogDetail(body));
   context.postJson("/api/diagnostics/renderer-error", (body) => context.recordRendererError(body));
 
+  // 窗口实例清单与切换：注册表由每个进程的后端维护，聚焦通过目标实例的 /api/app/focus 完成。
+  context.postJson("/api/app/instances", async () => ({
+    instances: (await services.instances.list()) as unknown as JsonValue,
+  }));
+  context.postJson("/api/app/instances/focus", async (body) => {
+    await services.instances.focus(require_instance_pid(body));
+    return {};
+  });
+  context.postJson("/api/app/instances/open", async (body) => {
+    const project_path = require_body_path(body);
+    return { result: (await services.instances.open(project_path)) as unknown as JsonValue };
+  });
+  context.postJson("/api/app/focus", async () => {
+    await services.instances.focus_self();
+    return {};
+  });
+
   const lifecycle = services.project.lifecycle;
   context.postJson("/api/session/project/manifest", () => services.project.readManifest());
   context.postJson("/api/session/project/snapshot", () => lifecycle.get_project_snapshot());
@@ -68,11 +85,74 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.postJson("/api/session/source-files/summary", (body) =>
     lifecycle.summarize_source_files(body),
   );
-  context.postJson("/api/session/project/open", (body) => lifecycle.load_project(body));
+  context.postJson("/api/session/project/open", async (body) => {
+    // 同一个 .lg 只能由一个进程写入；已由其他窗口打开时聚焦它并拒绝本次加载。
+    const project_path = typeof body["path"] === "string" ? body["path"].trim() : "";
+    if (project_path !== "") {
+      const owner = await services.instances.find_project_owner(project_path);
+      if (owner !== null && !owner.current) {
+        await services.instances.focus(owner.pid);
+        throw new AppError("project.already_open", {
+          public_details: { path: owner.project_path, pid: owner.pid },
+        });
+      }
+    }
+    return lifecycle.load_project(body);
+  });
   context.postJson("/api/session/project/create", (body) => lifecycle.create_project_commit(body));
   context.postJson("/api/session/project/open-preview", (body) =>
     lifecycle.get_open_alignment_preview(body),
   );
+
+  const remote = services.remote;
+  const require_remote_url = (body: JsonRecord): string => {
+    const url = body["url"];
+    if (typeof url !== "string" || url.trim() === "") {
+      throw new AppError("request.validation_failed", { public_details: { field: "url" } });
+    }
+    return url;
+  };
+  context.postJson("/api/remote/novel/preview", async (body) => ({
+    preview: (await remote.sources.preview(require_remote_url(body))) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/novel/sync/preview", async () => ({
+    preview: (await remote.sources.preview_sync()) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/novel/align/preview", (body) => ({
+    preview: remote.sources.read_align_preview(body) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/novel/sync", async (body) => ({
+    result: (await remote.sources.apply_sync_request(body)) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/workspace/start", async (body) => ({
+    remote_workspace: (await remote.workspace.start(body)) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/workspace/cancel", async () => ({
+    remote_workspace: (await remote.workspace.cancel()) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/workspace/snapshot", () => ({
+    remote_workspace: remote.workspace.get_snapshot() as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/source/read", async () => ({
+    source: (await remote.sources.read_bound_source()) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/auth/status", () => ({
+    auth: remote.auth.snapshot() as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/auth/import", (body) => ({
+    auth: remote.auth.import(body) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/auth/clear", (body) => ({
+    auth: remote.auth.clear(body) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/auth/bridge", async (body) => {
+    const enabled = body["enabled"];
+    if (typeof enabled !== "boolean") {
+      throw new AppError("request.validation_failed", { public_details: { field: "enabled" } });
+    }
+    await services.app.updateSettings({ novelia_bridge_enabled: enabled });
+    return { auth: remote.auth.snapshot() as unknown as JsonValue };
+  });
 
   context.app.get("/api/events/stream", () => context.createEventStreamResponse());
   context.postJson("/api/runtime/snapshot", () => services.runtime.getSnapshot());
@@ -258,4 +338,22 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.postJson("/api/batch-translation/start", (body) => batch_translation.start(body));
   context.postJson("/api/batch-translation/stop", () => batch_translation.stop());
   context.postJson("/api/batch-translation/snapshot", () => batch_translation.get_snapshot());
+}
+
+/** 实例焦点只接受正整数 pid，防止把注册表查询变成任意键读取。 */
+function require_instance_pid(body: JsonRecord): number {
+  const pid = body["pid"];
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) {
+    throw new AppError("request.validation_failed", { public_details: { field: "pid" } });
+  }
+  return pid;
+}
+
+/** 新窗口打开入口要求非空工程路径，实际存在性由注册表服务校验。 */
+function require_body_path(body: JsonRecord): string {
+  const project_path = body["path"];
+  if (typeof project_path !== "string" || project_path.trim() === "") {
+    throw new AppError("request.validation_failed", { public_details: { field: "path" } });
+  }
+  return project_path.trim();
 }

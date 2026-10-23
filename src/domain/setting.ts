@@ -73,6 +73,7 @@ export const SETTING_SNAPSHOT_SCHEMA = Type.Object(
     output_folder_open_on_finish: Type.Boolean(), // 译文生成成功后是否打开输出目录。
     network_proxy_mode: Type.Enum(NETWORK_PROXY_MODES), // 出站请求的代理模式。
     network_proxy_address: Type.String(), // 自定义代理模式使用的 `主机:端口`。
+    novelia_bridge_enabled: Type.Boolean(), // 是否监听本机端口接收 ntr-toolbox 推送的站点凭据。
     request_timeout: Type.Number(), // 等待模型回复的超时时间，单位为秒。
     preceding_lines_threshold: Type.Number(), // 单个翻译任务最多携带的参考上文行数。
     clean_ruby: Type.Boolean(), // 翻译文本的注音清理开关。
@@ -124,6 +125,7 @@ export const DEFAULT_SETTING: SettingSnapshot & JsonRecord = {
   output_folder_open_on_finish: false,
   network_proxy_mode: "system",
   network_proxy_address: DEFAULT_NETWORK_PROXY_ADDRESS,
+  novelia_bridge_enabled: true,
   request_timeout: 180,
   preceding_lines_threshold: 0,
   clean_ruby: false,

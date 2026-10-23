@@ -32,11 +32,77 @@
 }
 
 .topbar__content {
+  justify-content: space-between;
+  gap: 12px;
   padding: 0 14px;
 }
 
 .topbar__left {
   gap: 4px;
+}
+
+.topbar__right {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.topbar__project-trigger {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 280px;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--ui-radius-button);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: var(--ui-font-size-13);
+}
+
+.topbar__project-trigger:hover {
+  background: var(--muted);
+}
+
+.topbar__project-trigger:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.topbar__project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar__project-menu {
+  min-width: 240px;
+}
+
+.topbar__project-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.topbar__project-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar__project-item-path {
+  overflow: hidden;
+  max-width: 320px;
+  color: var(--muted-foreground);
+  font-size: var(--ui-font-size-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topbar__menu-button {
