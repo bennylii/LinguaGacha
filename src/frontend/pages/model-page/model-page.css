@@ -91,15 +91,18 @@
   opacity: 0.9;
 }
 
-.model-page__drag-handle {
-  touch-action: none;
+.model-page__drag-slot {
   position: absolute;
   top: 50%;
   left: 0;
   z-index: 2;
+  transform: translateY(-50%);
+}
+
+.model-page__drag-handle {
+  touch-action: none;
   cursor: grab;
   color: color-mix(in srgb, var(--foreground) 72%, transparent);
-  transform: translateY(-50%);
 }
 
 .model-page__drag-handle:hover {
@@ -196,6 +199,13 @@
 
 .model-page__field {
   min-width: 128px;
+}
+
+.model-page__request-url {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .model-page__field--md {
@@ -299,18 +309,23 @@
 
 .model-page__selector-list {
   height: 384px;
+  overflow-y: auto;
 }
 
 .model-page__selector-options {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 0;
 }
 
 .model-page__selector-item {
   width: 100%;
   justify-content: flex-start;
+}
+
+.model-page__selector-item[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--primary) 58%, var(--border));
+  background: color-mix(in srgb, var(--primary) 18%, var(--popover));
 }
 
 .model-page__selector-loading {

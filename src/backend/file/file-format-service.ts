@@ -1,7 +1,7 @@
-import { create_wolf_adapter } from "./wolfrpg/wolf-format";
-import { wolf_default_status } from "./wolfrpg/item";
-import { prepare_wolf_source } from "./wolfrpg/prepare";
-import { collect_wolf_files } from "./wolfrpg/source";
+import type { GodotPackOrder } from "../../shared/godot";
+import { apply_godot_pack_order, godot_pack_preview } from "./godot/source";
+import { GAME_ENGINES, prepare_game_source } from "./shared/game/engines";
+import { write_game_backup } from "./shared/game/backup";
 import { GameFormat } from "./shared/game/format";
 import { build_source_file_parse_failure } from "./source-file-parse-failure-reporter";
 import {
@@ -10,13 +10,7 @@ import {
   assert_source_identities,
   type DiscoveredSource,
 } from "./source-discovery";
-import { prepare_rpgmaker_source } from "./rpgmaker-mv-mz/prepare";
 import type { GamePrepareExecution } from "./shared/game/prepare-worker";
-import { rpgmaker_default_status } from "./rpgmaker-mv-mz/item";
-import { rgss_default_status } from "./rpgmaker-rgss/item";
-import { create_rpgmaker_rgss_adapter } from "./rpgmaker-rgss/rpgmaker-format";
-import { collect_rgss_files } from "./rpgmaker-rgss/source";
-import { prepare_rgss_source } from "./rpgmaker-rgss/prepare";
 import { is_game_file_type, type GameFileType } from "../../shared/project-source-formats";
 import { format_local_timestamp } from "../../shared/utils/format-local-timestamp";
 import { normalize_project_asset_path } from "../../shared/project/project-asset-paths";
@@ -25,8 +19,6 @@ import {
   GAME_WORKSPACE_DIRECTORY,
   assert_regular_path,
 } from "./source-file-paths";
-import { create_rpgmaker_mv_mz_adapter } from "./rpgmaker-mv-mz/rpgmaker-format";
-import { collect_rpgmaker_files } from "./rpgmaker-mv-mz/source";
 import type { PDFExecution } from "./pdf/pdf-worker";
 import { PDFFormat } from "./pdf/pdf-format";
 import path from "node:path";
@@ -61,15 +53,11 @@ import {
   type ProjectSourceFileSummary,
 } from "../../shared/project-source-formats";
 
-/**
- * Backend 公开文件格式门面；具体格式逻辑按稳定格式处理器拆分
- */
+/** 文件格式门面负责来源准备，并按固定配置分发解析和写回。 */
 export class FileFormatService {
   /** 文件重置由格式决定翻译资格，工程服务不解释私有定位。 */
   public static default_status(item: Pick<Item, "file_type" | "extra_field">): ItemStatus {
-    if (item.file_type === "RPGMAKER_MV_MZ") return rpgmaker_default_status(item);
-    if (item.file_type === "RPGMAKER_RGSS") return rgss_default_status(item);
-    if (item.file_type === "WOLFRPG") return wolf_default_status(item);
+    if (is_game_file_type(item.file_type)) return GAME_ENGINES[item.file_type].default_status(item);
     return "NONE";
   }
 
@@ -99,11 +87,12 @@ export class FileFormatService {
     private readonly game_prepare_execution?: GamePrepareExecution,
   ) {
     this.native_fs = native_fs;
-    this.games = {
-      RPGMAKER_MV_MZ: new GameFormat(create_rpgmaker_mv_mz_adapter(config), native_fs),
-      RPGMAKER_RGSS: new GameFormat(create_rpgmaker_rgss_adapter(), native_fs),
-      WOLFRPG: new GameFormat(create_wolf_adapter(), native_fs),
-    };
+    this.games = Object.fromEntries(
+      Object.entries(GAME_ENGINES).map(([type, engine]) => [
+        type,
+        new GameFormat(engine.create_adapter(config), native_fs),
+      ]),
+    ) as Record<GameFileType, GameFormat>;
     this.txt = new TXTFormat(config);
     this.md = new MDV2Format();
     this.ass = new ASSFormat(config);
@@ -217,14 +206,19 @@ export class FileFormatService {
   public async collect_source_file_entries(
     source_paths: string[],
     signal?: AbortSignal,
+    orders?: readonly GodotPackOrder[],
   ): Promise<DiscoveredSource[]> {
-    return discover_sources(source_paths, this.native_fs, signal);
+    return this.apply_godot_orders(
+      await discover_sources(source_paths, this.native_fs, signal),
+      orders,
+    );
   }
 
   /** 导入确认后的目标路径固定；识别错误也保留在同一批次中。 */
   public async discover_import_sources(
     entries: readonly ProjectSourceFileEntry[],
     signal?: AbortSignal,
+    orders?: readonly GodotPackOrder[],
   ): Promise<DiscoveredSource[]> {
     const result: DiscoveredSource[] = [];
     for (const entry of entries) {
@@ -236,6 +230,29 @@ export class FileFormatService {
       });
     }
     assert_source_identities(result, this.native_fs);
+    return this.apply_godot_orders(result, orders);
+  }
+
+  /** 正式请求的全部顺序先校验，任何错误都早于准备写入。 */
+  private apply_godot_orders(
+    entries: DiscoveredSource[],
+    orders?: readonly GodotPackOrder[],
+  ): DiscoveredSource[] {
+    if (!orders) return entries;
+    const remaining = new Set(orders);
+    const result = entries.map((entry) => {
+      const source = entry.source;
+      if (source.kind !== "game" || source.file_type !== "GODOT") return entry;
+      const order = orders.find(
+        (order) =>
+          this.native_fs.to_identity_path(order.game_root) ===
+          this.native_fs.to_identity_path(source.game.root),
+      );
+      if (!order) return entry;
+      remaining.delete(order);
+      return { ...entry, source: { ...source, game: apply_godot_pack_order(source.game, order) } };
+    });
+    if (remaining.size) throw new AppError("request.validation_failed");
     return result;
   }
 
@@ -314,7 +331,7 @@ export class FileFormatService {
     return result;
   }
 
-  /** 正式导入先准备游戏目录，再固化容器，后续解析使用保存的原稿。 */
+  /** 正式导入准备游戏并固化容器，备份成功后才返回原稿。 */
   public async prepare_source(entry: DiscoveredSource, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const { source, rel_path } = entry;
@@ -325,38 +342,22 @@ export class FileFormatService {
       assert_regular_path(workspace, this.native_fs);
       if (this.native_fs.exists(workspace))
         throw new Error("Unfinished game operation; recovery files: " + workspace);
-    }
-    if (source.kind === "wolfrpg") {
-      await prepare_wolf_source(source.game, this.native_fs, this.game_prepare_execution, signal);
-      return this.games.WOLFRPG.prepare_source(
-        collect_wolf_files(source.game, this.native_fs),
+      await prepare_game_source(source, this.native_fs, this.game_prepare_execution, signal);
+      const format = this.games[source.file_type];
+      const files = GAME_ENGINES[source.file_type].collect(source, this.native_fs, signal);
+      const container = await format.create_container(
+        files.data,
         rel_path,
         source.game.root,
         signal,
       );
-    }
-    if (source.kind === "rgss") {
-      await prepare_rgss_source(source.game, this.native_fs, this.game_prepare_execution, signal);
-      return this.games.RPGMAKER_RGSS.prepare_source(
-        collect_rgss_files(source.game, this.native_fs),
-        rel_path,
+      await write_game_backup(
         source.game.root,
-        signal,
-      );
-    }
-    if (source.kind === "mv_mz") {
-      await prepare_rpgmaker_source(
-        source.game,
+        new Map([...files.data, ...files.fonts]),
         this.native_fs,
-        this.game_prepare_execution,
         signal,
       );
-      return this.games.RPGMAKER_MV_MZ.prepare_source(
-        collect_rpgmaker_files(source.game, this.native_fs),
-        rel_path,
-        source.game.root,
-        signal,
-      );
+      return container;
     }
     return { content: this.native_fs.read_file(entry.source_path), warnings: [] };
   }
@@ -377,23 +378,28 @@ export class FileFormatService {
     ) as ProjectSourceFormatHitCounts;
 
     for (const source_file of source_files) {
+      const source = source_file.source;
       const format_id =
-        source_file.source.kind === "wolfrpg"
-          ? "wolfrpg"
-          : source_file.source.kind === "mv_mz"
-            ? "rpgmaker_mv_mz"
-            : source_file.source.kind === "rgss"
-              ? "rpgmaker_rgss"
-              : source_file.source.kind === "file"
-                ? source_file.source.format
-                : undefined;
+        source.kind === "game"
+          ? PROJECT_SOURCE_FORMATS.find(
+              (format) => format.source_kind === "game" && format.file_type === source.file_type,
+            )?.id
+          : source.kind === "file"
+            ? source.format
+            : undefined;
       if (format_id !== undefined) {
         format_hit_counts[format_id] += 1;
       }
     }
 
+    const godot_packs = source_files.flatMap((entry) =>
+      entry.source.kind === "game" && entry.source.file_type === "GODOT"
+        ? [godot_pack_preview(entry.source.game)]
+        : [],
+    );
     return {
       ...(failed_files.length ? { failed_files } : {}),
+      ...(godot_packs.length ? { godot_packs } : {}),
       source_file_count: source_files.length,
       format_hit_counts,
     };

@@ -66,8 +66,6 @@ export const SETTING_SNAPSHOT_SCHEMA = Type.Object(
     agent_auto_continue_enabled: Type.Boolean(), // 轮次成功结束后是否自动判定并发送继续。
     agent_auto_continue_max_continues: Type.Number(), // 单轮任务内自动继续次数上限，0 表示不限。
     app_language: Type.Enum(APP_LANGUAGE_DEFINITIONS.map(({ code }) => code)), // 界面与日志文案的应用语言。
-    source_language: Type.String(), // 源语言允许 `ALL`，由具体过滤器进一步收窄。
-    target_language: Type.String(), // 译文目标语言，参与提示词和工程设置镜像。
     project_save_mode: Type.Enum(PROJECT_SAVE_MODES), // 新建工程的保存位置策略。
     project_fixed_path: Type.String(), // 固定保存模式使用的工程目录。
     output_folder_open_on_finish: Type.Boolean(), // 译文生成成功后是否打开输出目录。
@@ -93,17 +91,6 @@ export const SETTING_SNAPSHOT_SCHEMA = Type.Object(
 );
 export type SettingSnapshot = Static<typeof SETTING_SNAPSHOT_SCHEMA>;
 
-export const PROJECT_SETTING_KEYS = [
-  "source_language",
-  "target_language",
-  "mtool_optimizer_enable",
-  "skip_duplicate_source_text_enable",
-] as const;
-
-export const PROJECT_SETTINGS_SNAPSHOT_SCHEMA = Type.Pick(SETTING_SNAPSHOT_SCHEMA, [
-  ...PROJECT_SETTING_KEYS,
-]);
-export type ProjectSettingsSnapshot = Static<typeof PROJECT_SETTINGS_SNAPSHOT_SCHEMA>;
 export const SETTING_KEYS = Object.keys(
   SETTING_SNAPSHOT_SCHEMA.properties,
 ) as (keyof SettingSnapshot)[];
@@ -118,8 +105,6 @@ export const DEFAULT_SETTING: SettingSnapshot & JsonRecord = {
   agent_auto_continue_enabled: AGENT_AUTO_CONTINUE_DEFAULT_ENABLED,
   agent_auto_continue_max_continues: AGENT_AUTO_CONTINUE_DEFAULT_MAX_CONTINUES,
   app_language: "ZH",
-  source_language: "JA",
-  target_language: "ZH",
   project_save_mode: "MANUAL",
   project_fixed_path: "",
   output_folder_open_on_finish: false,
@@ -402,34 +387,15 @@ export function normalize_setting_snapshot(value: unknown): SettingSnapshot {
   return Object.fromEntries(
     SETTING_KEYS.map((key) => {
       const normalized = Setting.normalize_value(key, record[key] ?? DEFAULT_SETTING[key]);
-      // 落盘文本保留用户输入，公开快照裁剪路径与预设名，语言标识使用大写。
-      const text = Type.IsString(SETTING_SNAPSHOT_SCHEMA.properties[key])
-        ? String(normalized).trim()
-        : normalized;
+      // 落盘文本保留用户输入，公开快照裁剪路径与预设名。
       return [
         key,
-        key === "source_language" || key === "target_language" ? String(text).toUpperCase() : text,
+        Type.IsString(SETTING_SNAPSHOT_SCHEMA.properties[key])
+          ? String(normalized).trim()
+          : normalized,
       ];
     }),
   ) as SettingSnapshot;
-}
-
-/**
- * 项目设置镜像只保留会影响预过滤、提示词和目标语言展示的窄字段
- */
-export function normalize_project_settings_snapshot(
-  value: unknown,
-  fallback: ProjectSettingsSnapshot = DEFAULT_SETTING,
-): ProjectSettingsSnapshot {
-  const record = read_setting_record(value);
-  return Object.fromEntries(
-    PROJECT_SETTING_KEYS.map((key) => [
-      key,
-      PROJECT_SETTINGS_SNAPSHOT_SCHEMA.properties[key].type === "string"
-        ? read_project_string_setting(record[key], String(fallback[key]))
-        : read_json_boolean(record[key], Boolean(fallback[key])),
-    ]),
-  ) as ProjectSettingsSnapshot;
 }
 
 /** 设置读取以合法 JSON 对象为起点，其余输入视为空配置。 */
@@ -437,12 +403,6 @@ function read_setting_record(value: unknown): JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as JsonRecord)
     : {};
-}
-
-/** 空项目设置继承调用方基线，其余值裁剪并使用大写。 */
-function read_project_string_setting(value: JsonValue | undefined, fallback: string): string {
-  const text = String(value ?? "").trim();
-  return text === "" ? fallback : text.toUpperCase();
 }
 
 /** 整数设置按边界收窄，缺失和非有限值沿用基线。 */

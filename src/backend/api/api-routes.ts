@@ -100,9 +100,6 @@ export function register_api_routes(context: ApiRouteContext): void {
     return lifecycle.load_project(body);
   });
   context.postJson("/api/session/project/create", (body) => lifecycle.create_project_commit(body));
-  context.postJson("/api/session/project/open-preview", (body) =>
-    lifecycle.get_open_alignment_preview(body),
-  );
 
   const remote = services.remote;
   const require_remote_url = (body: JsonRecord): string => {
@@ -241,8 +238,8 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.postJson("/api/workbench/files/preview", (body) =>
     project_content.preview_import_files(body),
   );
-  context.postJson("/api/workbench/settings-alignment/apply", (body) =>
-    project_content.align_settings(body),
+  context.postJson("/api/project/settings/update", (body) =>
+    project_content.update_project_settings(body),
   );
   context.postJson("/api/workbench/translation/reset", (body) =>
     project_content.reset_translation(body),

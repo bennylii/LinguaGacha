@@ -201,12 +201,7 @@ describe("GuiBackendBootstrap 集成", () => {
         body: JSON.stringify({
           path: path.join(app_root, "test.lg"),
           source_paths: [source],
-          project_settings: {
-            source_language: "EN",
-            target_language: "ZH",
-            skip_duplicate_source_text_enable: true,
-            mtool_optimizer_enable: false,
-          },
+          languages: { source_language: "EN", target_language: "ZH" },
         }),
       });
       expect(await created.json()).toMatchObject({ ok: true });
@@ -344,12 +339,7 @@ describe("GuiBackendBootstrap 集成", () => {
         body: JSON.stringify({
           path: path.join(app_root, "test.lg"),
           source_paths: [source],
-          project_settings: {
-            source_language: "EN",
-            target_language: "ZH",
-            skip_duplicate_source_text_enable: true,
-            mtool_optimizer_enable: false,
-          },
+          languages: { source_language: "EN", target_language: "ZH" },
         }),
       });
       expect(await project.json()).toMatchObject({ ok: true });
@@ -369,7 +359,7 @@ describe("GuiBackendBootstrap 集成", () => {
         body: JSON.stringify({ path: "work/报告/结果%20%23%201.md" }),
       });
       await expect(open.json()).resolves.toEqual({ ok: true, data: { status: "saved" } });
-      expect(fs.readFileSync(destination)).toEqual(fs.readFileSync(file));
+      expect(fs.readFileSync(destination).equals(fs.readFileSync(file))).toBe(true);
       expect(pick_save_path).toHaveBeenCalledWith("结果 # 1.md");
       const folder = await fetch(started.apiBaseUrl + "/api/agent/workspace/activate-path", {
         method: "POST",

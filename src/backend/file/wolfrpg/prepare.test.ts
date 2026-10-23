@@ -1,3 +1,4 @@
+import { prepare_game_source } from "../shared/game/engines";
 import { expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,8 +9,13 @@ import { wolf_archive_fixture } from "../../../test/wolf-archive-fixture";
 import { FileFormatService } from "../file-format-service";
 import { wolf_crypt_vectors } from "../../../test/wolf-crypt-vectors";
 import { wolf_vector } from "../../../test/wolf-crypt-fixture";
-import { discover_wolf_source } from "./source";
-import { prepare_wolf_source, stage_wolf_source } from "./prepare";
+import { discover_wolf_source, type WolfSource } from "./source";
+import { stage_wolf_source } from "./prepare";
+
+/** 为各准备场景补齐引擎来源身份，统一经过正式目录事务。 */
+function prepare_source(game: WolfSource, fs: NativeFs): Promise<void> {
+  return prepare_game_source({ kind: "game", file_type: "WOLFRPG", game }, fs);
+}
 
 function encrypted_fixture(name: string): Buffer {
   return wolf_vector(wolf_crypt_vectors.wolfx.find((vector) => vector.name === name)!.input);
@@ -33,11 +39,11 @@ it.each(["case", "directory", "nested", "structure"])(
         encrypted_fixture("default"),
       );
     await expect(
-      prepare_wolf_source((await discover_wolf_source(temp.path, native))!, native),
+      prepare_source((await discover_wolf_source(temp.path, native))!, native),
     ).rejects.toThrow();
-    expect(fs.readFileSync(path.join(temp.path, name + ".wolfx"))).toEqual(
-      encrypted_fixture("default"),
-    );
+    expect(
+      fs.readFileSync(path.join(temp.path, name + ".wolfx")).equals(encrypted_fixture("default")),
+    ).toBe(true);
     expect(fs.existsSync(path.join(temp.path, ".tmp"))).toBe(false);
   },
 );
@@ -68,7 +74,7 @@ it("三轮事件依赖从可用文件收集候选，覆盖旧明文并移除原�
     await wolf_archive_fixture(new Map([["C.png.wolfx", encrypted_fixture("chain-c")]])),
   );
   const game = (await discover_wolf_source(temp.path, native))!;
-  await prepare_wolf_source(game, native);
+  await prepare_source(game, native);
   expect(fs.readFileSync(path.join(temp.path, "Data/Picture/C.png"), "utf8")).toBe("final output");
   for (const name of [
     "Data/MapData/A.mps.wolfx",
@@ -111,17 +117,21 @@ it("六类核心及延迟解包的 project 成对还原一次，加密 Game.dat 
     path.join(temp.path, "Data/BasicData/SysDatabase.project.wolfx"),
     encrypted_fixture("protected-project"),
   );
-  await prepare_wolf_source((await discover_wolf_source(temp.path, native))!, native);
+  await prepare_source((await discover_wolf_source(temp.path, native))!, native);
   for (const vector of wolf_crypt_vectors.cores)
-    expect(fs.readFileSync(path.join(temp.path, "Data/BasicData", vector.name))).toEqual(
-      wolf_vector(vector.output),
-    );
+    expect(
+      fs
+        .readFileSync(path.join(temp.path, "Data/BasicData", vector.name))
+        .equals(wolf_vector(vector.output)),
+    ).toBe(true);
   for (const name of ["DataBase", "CDataBase", "SysDatabase"])
-    expect(fs.readFileSync(path.join(temp.path, "Data/BasicData", name + ".project"))).toEqual(
-      wolf_vector(wolf_crypt_vectors.project.output),
-    );
+    expect(
+      fs
+        .readFileSync(path.join(temp.path, "Data/BasicData", name + ".project"))
+        .equals(wolf_vector(wolf_crypt_vectors.project.output)),
+    ).toBe(true);
   const write = vi.spyOn(native, "write_file");
-  await prepare_wolf_source((await discover_wolf_source(temp.path, native))!, native);
+  await prepare_source((await discover_wolf_source(temp.path, native))!, native);
   expect(write).not.toHaveBeenCalled();
 });
 
@@ -143,12 +153,14 @@ it("后出现的事件候选使已解文件产生歧义，整次准备保留原�
     encrypted_fixture("late-map"),
   );
   await expect(
-    prepare_wolf_source((await discover_wolf_source(temp.path, native))!, native),
+    prepare_source((await discover_wolf_source(temp.path, native))!, native),
   ).rejects.toThrow("final candidate validation: Ambiguous WOLFX plaintext");
   expect(fs.existsSync(path.join(temp.path, "Data/MapData/Late.mps"))).toBe(false);
-  expect(fs.readFileSync(path.join(temp.path, "Data/Picture/ambiguous.bin.wolfx"))).toEqual(
-    encrypted_fixture("ambiguous"),
-  );
+  expect(
+    fs
+      .readFileSync(path.join(temp.path, "Data/Picture/ambiguous.bin.wolfx"))
+      .equals(encrypted_fixture("ambiguous")),
+  ).toBe(true);
 });
 
 it("被密文遮蔽的旧明文不能提供自解密候选，无进展时报告路径与阶段", async () => {
@@ -165,7 +177,7 @@ it("被密文遮蔽的旧明文不能提供自解密候选，无进展时报告�
     wolf_common(0x91, [wolf_command(1000, ["/", "chain-key"], [7])]),
   );
   await expect(
-    prepare_wolf_source((await discover_wolf_source(temp.path, native))!, native),
+    prepare_source((await discover_wolf_source(temp.path, native))!, native),
   ).rejects.toThrow("CommonEvent.dat.wolfx: WolfX");
 });
 
@@ -187,13 +199,15 @@ it.each(["same", "conflict", "missing", "output"])(
       if (mode === "conflict") bytes[30]! ^= 1;
       native.write_file_sync(path.join(temp.path, "Data/List.pak"), bytes);
     }
-    const prepare = prepare_wolf_source((await discover_wolf_source(temp.path, native))!, native);
+    const prepare = prepare_source((await discover_wolf_source(temp.path, native))!, native);
     if (mode === "same") {
       await prepare;
-      expect(fs.readFileSync(path.join(temp.path, "Game.wolf"))).toEqual(wolf_vector(vector.input));
-      expect(fs.readFileSync(path.join(temp.path, "Data/List.pak"))).toEqual(
-        wolf_vector(vector.input),
-      );
+      expect(
+        fs.readFileSync(path.join(temp.path, "Game.wolf")).equals(wolf_vector(vector.input)),
+      ).toBe(true);
+      expect(
+        fs.readFileSync(path.join(temp.path, "Data/List.pak")).equals(wolf_vector(vector.input)),
+      ).toBe(true);
       expect(fs.existsSync(path.join(temp.path, "Data.assets"))).toBe(false);
     } else
       await expect(prepare).rejects.toThrow(
@@ -255,8 +269,10 @@ it("归档中的数据提示前缀在暂存时移除，准备结果为引擎可�
   );
   const service = new FileFormatService({ target_language: "ZH" }, async () => null, native);
   await service.prepare_source((await service.collect_source_file_entries([temp.path]))[0]!);
-  expect(fs.readFileSync(path.join(temp.path, "Data/BasicData/Game.dat"))).toEqual(game);
-  expect(fs.readFileSync(path.join(temp.path, "backup_lg/Data/BasicData/Game.dat"))).toEqual(game);
+  expect(fs.readFileSync(path.join(temp.path, "Data/BasicData/Game.dat")).equals(game)).toBe(true);
+  expect(
+    fs.readFileSync(path.join(temp.path, "backup_lg/Data/BasicData/Game.dat")).equals(game),
+  ).toBe(true);
 });
 
 it.each(["unsupported", "core", "map-read", "companion-read"])(
@@ -298,7 +314,7 @@ it.each(["unsupported", "core", "map-read", "companion-read"])(
           ? "Missing WOLF companion"
           : "staged read failure",
     );
-    expect(fs.readFileSync(path.join(root, "Data.wolf"))).toEqual(packed);
+    expect(fs.readFileSync(path.join(root, "Data.wolf")).equals(packed)).toBe(true);
     expect(fs.readFileSync(path.join(root, "Data/BasicData/CommonEvent.dat"), "utf8")).toBe(
       "original loose",
     );

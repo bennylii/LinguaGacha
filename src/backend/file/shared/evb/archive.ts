@@ -16,7 +16,7 @@ import {
   copy_range,
   read_bytes,
   write_bytes,
-  BINARY_CHUNK_BYTES,
+  BINARY_IO_CHUNK_BYTES,
   type BinaryFileHandle,
 } from "../binary";
 
@@ -41,9 +41,14 @@ export async function read_evb(
   if (coff.readUInt32LE() !== 0x4550) return null;
   const end = offset + 24 + coff.readUInt16LE(20) + coff.readUInt16LE(6) * 40;
   assert(end <= Math.min(length, MAX_HEADER_BYTES), "Unsupported PE header size");
-  const pe = read_pe(await read_bytes(handle, 0, end), length);
-  const section = pe.sections.find((s) => s.name === ".enigma1");
-  if (!section) return null;
+  const header = await read_bytes(handle, 0, end);
+  const sections = offset + 24 + coff.readUInt16LE(20);
+  // 非 EVB 引擎可使用自己的 PE 载荷布局，只在确认 EVB 身份后执行完整节校验。
+  let marked = false;
+  for (let at = sections; at < end; at += 40)
+    if (header.toString("ascii", at, at + 8) === ".enigma1") marked = true;
+  if (!marked) return null;
+  const pe = read_pe(header, length);
   const valid: { variant: Variant; members: EVBMember[] }[] = [];
   for (const variant of Object.keys(OFFSETS) as Variant[]) {
     try {
@@ -70,8 +75,8 @@ async function read_members(
   const end = section.raw + section.size;
   let magic = -1;
   const header_end = Math.min(end, section.raw + MAX_HEADER_BYTES);
-  for (let at = section.raw; at < header_end; at += BINARY_CHUNK_BYTES - 3) {
-    const block = await read_bytes(handle, at, Math.min(BINARY_CHUNK_BYTES, header_end - at));
+  for (let at = section.raw; at < header_end; at += BINARY_IO_CHUNK_BYTES - 3) {
+    const block = await read_bytes(handle, at, Math.min(BINARY_IO_CHUNK_BYTES, header_end - at));
     const found = block.indexOf(MAGIC);
     if (found >= 0) {
       magic = at + found;
@@ -86,7 +91,7 @@ async function read_members(
     assert(at >= section.raw && at + size <= end, "EVB tree outside section");
     if (at < window_at || at + size > window_at + window.length) {
       window_at = at;
-      window = await read_bytes(handle, at, Math.min(BINARY_CHUNK_BYTES, end - at));
+      window = await read_bytes(handle, at, Math.min(BINARY_IO_CHUNK_BYTES, end - at));
     }
     return window.subarray(at - window_at, at - window_at + size);
   }

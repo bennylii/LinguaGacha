@@ -11,6 +11,49 @@ import {
 } from "./model-capability";
 
 describe("统一模型能力", () => {
+  it("Vertex 优先使用对应模板，项目资源只用模型身份匹配规格", () => {
+    const vertex = {
+      ...create_catalog_model("fixture-model"),
+      api: "google-vertex",
+      provider: "google-vertex",
+      baseUrl: "https://aiplatform.googleapis.com/v1",
+      reasoning: true,
+      contextWindow: 128_000,
+      maxTokens: 8_000,
+    };
+    const developer = {
+      ...vertex,
+      api: "google-generative-ai",
+      provider: "google",
+      reasoning: false,
+    };
+    const misleading = { ...vertex, id: "longer-project-model", contextWindow: 900_000 };
+    const model = {
+      ...create_model(
+        "Google",
+        "projects/longer-project-model/locations/global/publishers/google/models/fixture-model",
+      ),
+      api_url: "https://aiplatform.googleapis.com/v1",
+    };
+    expect(resolve_model_capability(model, [developer, vertex, misleading])).toMatchObject({
+      reasoning: true,
+      context_window: vertex.contextWindow,
+    });
+    expect(
+      resolve_model_capability(
+        {
+          ...model,
+          api_url: "https://generativelanguage.googleapis.com",
+          model_id: "fixture-model",
+        },
+        [vertex, developer],
+      ),
+    ).toMatchObject({ reasoning: false });
+    expect(resolve_model_capability(model, [developer])).toMatchObject({
+      reasoning: false,
+      context_window: developer.contextWindow,
+    });
+  });
   it("容量聚合后应用产品输出上限，思考能力独立按协议解析", () => {
     const catalog: PiCatalogModel[] = [
       {
@@ -64,7 +107,7 @@ describe("统一模型能力", () => {
   });
 
   it.each(["OpenAI", "OpenAIResponses"] as const)(
-    "%s 豆包提供关闭思考与三个独立思考等级",
+    "%s 豆包提供思考等级并按协议解析请求策略",
     (api_format) => {
       const capability = resolve_capability(api_format, "doubao-seed-evolving");
 
@@ -75,6 +118,36 @@ describe("统一模型能力", () => {
         "MEDIUM",
         "HIGH",
       ]);
+      expect(capability.request).toEqual(
+        api_format === "OpenAIResponses" ? { supports_reasoning_summary: false } : undefined,
+      );
+    },
+  );
+
+  it.each(["OpenAI", "OpenAIResponses"] as const)(
+    "%s DeepSeek V4.1 Flash 在目录缺失或等级受限时提供官方思考等级",
+    (api_format) => {
+      const restricted: PiCatalogModel = {
+        ...create_catalog_model("deepseek-v4.1-flash"),
+        api: "openai-completions",
+        reasoning: false,
+        thinkingLevelMap: { off: null, low: null, medium: "medium", xhigh: "xhigh", max: null },
+        compat: { supportsReasoningEffort: false },
+      };
+      for (const catalog of [[], [restricted]]) {
+        const capability = resolve_model_capability(
+          create_model(api_format, "deepseek-v4.1-flash"),
+          catalog,
+        );
+
+        expect(capability.available_thinking_levels).toEqual([
+          "DEFAULT",
+          "OFF",
+          "LOW",
+          "HIGH",
+          "MAX",
+        ]);
+      }
     },
   );
 

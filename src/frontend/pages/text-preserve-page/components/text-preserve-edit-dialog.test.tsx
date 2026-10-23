@@ -26,38 +26,38 @@ describe("TextPreserveEditDialog", () => {
     container.remove();
   });
 
-  it.each(["quality_rule_editor.fields.rule", "text_preserve_page.fields.note"])(
-    "点击 %s 正文与标题时保持换行设置",
-    async (label) => {
-      await act(async () => {
-        root.render(
-          <TextPreserveEditDialog
-            open
-            mode="edit"
-            entry={{ src: "hero", info: "主角" }}
-            saving={false}
-            readonly={false}
-            invalid={false}
-            on_change={vi.fn()}
-            on_save={vi.fn(async () => undefined)}
-            on_close={vi.fn(async () => undefined)}
-          />,
-        );
-      });
+  it("点击各字段正文与标题时保持换行设置", async () => {
+    await act(async () => {
+      root.render(
+        <TextPreserveEditDialog
+          open
+          mode="edit"
+          entry={{ src: "hero", info: "主角" }}
+          saving={false}
+          readonly={false}
+          invalid={false}
+          on_change={vi.fn()}
+          on_save={vi.fn(async () => undefined)}
+          on_close={vi.fn(async () => undefined)}
+        />,
+      );
+    });
 
-      const content = document.querySelector<HTMLElement>(`.cm-content[aria-label="${label}"]`)!;
-      const section = content.closest(".text-preserve-page__dialog-section")!;
+    const sections = document.querySelectorAll<HTMLElement>(".text-preserve-page__dialog-section");
+    expect(sections.length).toBeGreaterThan(0);
+    for (const section of sections) {
+      const content = section.querySelector<HTMLElement>(".cm-line")!;
       const wrap_action = section.querySelector<HTMLButtonElement>("button[aria-pressed]")!;
       const initial_wrap_state = wrap_action.getAttribute("aria-pressed");
 
-      await act(async () => content.querySelector<HTMLElement>(".cm-line")!.click());
+      await act(async () => content.click());
       expect(wrap_action.getAttribute("aria-pressed")).toBe(initial_wrap_state);
       await act(async () =>
         section.querySelector<HTMLElement>(".text-preserve-page__dialog-section-title")!.click(),
       );
       expect(wrap_action.getAttribute("aria-pressed")).toBe(initial_wrap_state);
-    },
-  );
+    }
+  });
 
   it("标记规则校验错误，并在只读时保留字段但禁用保存", async () => {
     const on_save = vi.fn(async () => undefined);
@@ -84,12 +84,33 @@ describe("TextPreserveEditDialog", () => {
     expect(rule?.getAttribute("contenteditable")).toBe("false");
     expect(rule?.getAttribute("aria-invalid")).toBe("true");
     expect(find_button("app.action.save")?.disabled).toBe(true);
+    await act(async () => press_save_in(rule!));
+    expect(on_save).not.toHaveBeenCalled();
+  });
+  it("编辑器内的 Ctrl+S 冒泡到弹窗并提交保存", async () => {
+    const on_save = vi.fn(async () => undefined);
+
     await act(async () => {
-      window.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true }),
+      root.render(
+        <TextPreserveEditDialog
+          open
+          mode="edit"
+          entry={{ src: "hero", info: "主角" }}
+          saving={false}
+          readonly={false}
+          invalid={false}
+          on_change={vi.fn()}
+          on_save={on_save}
+          on_close={vi.fn(async () => undefined)}
+        />,
       );
     });
-    expect(on_save).not.toHaveBeenCalled();
+
+    const rule = document.querySelector<HTMLElement>(
+      '.cm-content[aria-label="quality_rule_editor.fields.rule"]',
+    )!;
+    await act(async () => press_save_in(rule));
+    expect(on_save).toHaveBeenCalledOnce();
   });
   it("校验失败后将焦点定位到规则编辑器", async () => {
     // 复用同一编辑器实例，观察校验状态变化后的焦点。
@@ -117,6 +138,11 @@ describe("TextPreserveEditDialog", () => {
     expect(rule?.getAttribute("aria-invalid")).toBe("true");
   });
 });
+
+/** 在编辑器内按 Ctrl+S，经弹窗内冒泡验证快捷键链路。 */
+function press_save_in(target: HTMLElement): void {
+  target.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true }));
+}
 
 /** 按可见动作文字查找按钮，允许按钮同时展示快捷键提示。 */
 function find_button(text: string): HTMLButtonElement | undefined {

@@ -15,9 +15,10 @@ import { resolve_one_shot_pi_request, resolve_pi_model } from "./llm-pi";
 import { resolve_model_capability, type PiCatalogModel } from "./model-capability";
 import { read_builtin_pi_models } from "./pi-model-catalog";
 import { DEFAULT_MODEL_AGENT_CONFIG } from "../../domain/model-agent";
+import { build_model_request_url } from "../../domain/model-endpoint";
 
 const catalog = read_builtin_pi_models();
-/** 以固定目录构造请求能力，断言直接观察 Pi 适配结果。 */
+/** 通过内置目录验证能力解析与真实适配器的请求契约。 */
 const create_pi_request = (
   snapshot: Parameters<typeof resolve_one_shot_pi_request>[0],
   messages: Parameters<typeof resolve_one_shot_pi_request>[1],
@@ -30,7 +31,7 @@ const create_pi_request = (
     resolve_model_capability(
       {
         api_format: snapshot.api_format,
-        api_url: snapshot.base_url,
+        api_url: snapshot.endpoint.base_url,
         model_id: snapshot.model_id,
         agent: DEFAULT_MODEL_AGENT_CONFIG,
       },
@@ -42,9 +43,130 @@ const TEST_USER_AGENT = "LinguaGacha/Test";
 const TEST_REQUEST_IDENTITY = { user_agent: TEST_USER_AGENT, session_id: "test-session" };
 
 describe("pi-ai 请求适配", () => {
-  it("DeepSeek 中转的 Agent 请求继承目录输出字段与 assistant 历史要求", async () => {
+  it.each([
+    "gemini-2.5-flash",
+    "projects/gemini-4-project/locations/global/publishers/google/models/gemini-2.5-flash",
+  ])("Vertex 项目名不影响真实适配器的型号判断：%s", async (model_id) => {
     const configured = create_model({
-      model_id: "vendor/deepseek-flash:fast",
+      api_format: "Google",
+      api_url: "https://aiplatform.googleapis.com/v1/projects/gemini-4-project/locations/global",
+      model_id,
+      thinking: { level: "HIGH" },
+    });
+    const capability = resolve_model_capability(ConfiguredModel.from_json(configured, "fixture"), [
+      {
+        id: "gemini-2.5-flash",
+        api: "google-vertex",
+        provider: "google-vertex",
+        baseUrl: "https://aiplatform.googleapis.com/v1",
+        reasoning: true,
+        contextWindow: 1_000_000,
+        maxTokens: 65_536,
+      },
+    ]);
+    const request = resolve_one_shot_pi_request(
+      read_model_request_snapshot(configured, TEST_REQUEST_IDENTITY),
+      [{ role: "user", content: "ping" }],
+      new AbortController().signal,
+      capability,
+    );
+    const payload = await capture_payload(request);
+    expect(payload).toHaveProperty("config.thinkingConfig.thinkingBudget", expect.any(Number));
+    expect(payload).not.toHaveProperty("config.thinkingConfig.thinkingLevel");
+    expect(request.model).toMatchObject({ id: "gemini-2.5-flash", baseUrl: configured["api_url"] });
+  });
+  it.each([
+    ["https://aiplatform.googleapis.com", "publishers/google/models/gemini-fixture"],
+    [
+      "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/demo/locations/us-central1/publishers/google",
+      "projects/demo/locations/us-central1/publishers/google/models/gemini-fixture",
+    ],
+  ])("真实 Vertex adapter 的地址、Key、流输出与预览一致：%s", async (api_url, resource) => {
+    const original_fetch = globalThis.fetch;
+    const process_fetch = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          `data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "translated" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1, totalTokenCount: 3 } })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    globalThis.fetch = process_fetch;
+    try {
+      const configured = create_model({
+        api_format: "Google",
+        api_url,
+        model_id: "gemini-fixture",
+        api_key: "vertex-key",
+      });
+      const snapshot = read_model_request_snapshot(configured, TEST_REQUEST_IDENTITY);
+      const request = create_pi_request(
+        snapshot,
+        [{ role: "user", content: "ping" }],
+        new AbortController().signal,
+      );
+      const result = await request.stream(request.model, request.context, request.options).result();
+      expect(result).toMatchObject({
+        stopReason: "stop",
+        content: [{ type: "text", text: "translated" }],
+        usage: { input: 2, output: 1 },
+      });
+      expect(request.model).toMatchObject({
+        api: "google-vertex",
+        provider: "google-vertex",
+        id: "gemini-fixture",
+      });
+      expect(process_fetch).toHaveBeenCalledOnce();
+      const http = new Request(...process_fetch.mock.calls[0]!);
+      expect(http.url).toBe(build_model_request_url(api_url, "Google", "gemini-fixture"));
+      expect(http.url).toContain(`/${resource}:streamGenerateContent`);
+      expect(http.headers.get("x-goog-api-key")).toBe("vertex-key");
+      expect(http.headers.get("user-agent")).toBe(TEST_USER_AGENT);
+    } finally {
+      globalThis.fetch = original_fetch;
+    }
+  });
+
+  it("真实 Vertex adapter 的在途请求响应应用取消信号", async () => {
+    const original_fetch = globalThis.fetch;
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    globalThis.fetch = async (input, init) => {
+      const http = new Request(input, init);
+      started();
+      return await new Promise<Response>((_resolve, reject) => {
+        http.signal.addEventListener("abort", () => reject(http.signal.reason), { once: true });
+      });
+    };
+    try {
+      const snapshot = read_model_request_snapshot(
+        create_model({
+          api_format: "Google",
+          api_url: "https://aiplatform.googleapis.com",
+          model_id: "gemini-fixture",
+          api_key: "vertex-key",
+        }),
+        TEST_REQUEST_IDENTITY,
+      );
+      const request = create_pi_request(
+        snapshot,
+        [{ role: "user", content: "ping" }],
+        controller.signal,
+      );
+      const completion = request.stream(request.model, request.context, request.options).result();
+      await ready;
+      controller.abort();
+      expect(await completion).toMatchObject({ stopReason: "aborted" });
+    } finally {
+      globalThis.fetch = original_fetch;
+    }
+  });
+  it("DeepSeek 别名中转的 Agent 请求保留输出字段与 assistant 历史要求", async () => {
+    const model_id = "vendor/deepseek-v4.1-flash:fast";
+    const configured = create_model({
+      model_id,
       api_url: "https://relay.example/v1",
       thinking: { level: "HIGH" },
     });
@@ -89,7 +211,7 @@ describe("pi-ai 请求适配", () => {
       )
       .result();
     expect(payload).toMatchObject({
-      model: "vendor/deepseek-flash:fast",
+      model: model_id,
       max_tokens: capability.agent_limits.max_output_tokens,
       thinking: { type: "enabled" },
       reasoning_effort: "high",
@@ -102,41 +224,35 @@ describe("pi-ai 请求适配", () => {
     expect(payload).not.toHaveProperty("max_completion_tokens");
     expect(payload).not.toHaveProperty("store");
   });
-  it.each(["OpenAI", "OpenAIResponses"] as const)(
-    "%s DeepSeek Flash 保留新请求 ID 并发送各可用思考等级",
-    async (api_format) => {
-      const capability = resolve_model_capability(
-        ConfiguredModel.from_json({ api_format, model_id: "deepseek-flash" }, "test-model"),
-        catalog,
-      );
-      for (const [level, effort] of [
-        ["OFF", "none"],
-        ["LOW", "low"],
-        ["HIGH", "high"],
-        ["MAX", "max"],
-      ] as const) {
-        const request = resolve_request({
-          api_format,
-          api_url: "https://api.deepseek.com",
-          model_id: "deepseek-flash",
-          thinking: { level },
-        });
-        const payload = await capture_payload(request);
+  it.each([
+    ["OpenAI", "deepseek-flash", "https://api.deepseek.com"],
+    ["OpenAIResponses", "deepseek-flash", "https://api.deepseek.com"],
+    ["OpenAI", "deepseek-v4.1-flash", "https://relay.example/v1"],
+    ["OpenAIResponses", "deepseek-v4.1-flash", "https://relay.example/v1"],
+  ] as const)("%s %s 保留请求 ID 并发送各可用思考等级", async (api_format, model_id, api_url) => {
+    for (const [level, effort] of [
+      ["OFF", "none"],
+      ["LOW", "low"],
+      ["HIGH", "high"],
+      ["MAX", "max"],
+    ] as const) {
+      const request = resolve_request({
+        api_format,
+        api_url,
+        model_id,
+        thinking: { level },
+      });
+      const payload = await capture_payload(request);
 
-        expect(request.model).toMatchObject({
-          contextWindow: capability.context_window,
-          maxTokens: capability.max_tokens,
-        });
-        expect(payload).toHaveProperty("model", "deepseek-flash");
-        if (api_format === "OpenAIResponses") {
-          expect(payload).toHaveProperty("reasoning.effort", effort);
-        } else {
-          expect(payload).toHaveProperty("thinking.type", level === "OFF" ? "disabled" : "enabled");
-          expect(payload["reasoning_effort"]).toBe(level === "OFF" ? undefined : effort);
-        }
+      expect(payload).toHaveProperty("model", model_id);
+      if (api_format === "OpenAIResponses") {
+        expect(payload).toHaveProperty("reasoning.effort", effort);
+      } else {
+        expect(payload).toHaveProperty("thinking.type", level === "OFF" ? "disabled" : "enabled");
+        expect(payload["reasoning_effort"]).toBe(level === "OFF" ? undefined : effort);
       }
-    },
-  );
+    }
+  });
 
   it.each(["OpenAI", "OpenAIResponses"] as const)(
     "%s GLM-5.3 由 Pi 目录与适配器生成各可用等级的请求",
@@ -157,29 +273,34 @@ describe("pi-ai 请求适配", () => {
     },
   );
 
-  it.each(["OpenAI", "OpenAIResponses"] as const)(
-    "%s 豆包把关闭思考发送为 minimal，并保留开启等级",
-    async (api_format) => {
-      for (const [level, effort] of [
-        ["OFF", "minimal"],
-        ["LOW", "low"],
-        ["MEDIUM", "medium"],
-        ["HIGH", "high"],
-      ] as const) {
-        const request = resolve_request({
-          api_format,
-          model_id: "doubao-seed-evolving",
-          thinking: { level },
-        });
-        const payload = await capture_payload(request);
+  it.each([
+    ["OpenAI", "https://ark.cn-beijing.volces.com/api/v3"],
+    ["OpenAIResponses", "https://ark.cn-beijing.volces.com/api/v3"],
+    ["OpenAIResponses", "https://relay.example/v1"],
+  ] as const)("%s 豆包经 %s 保留思考等级并清理自动摘要参数", async (api_format, api_url) => {
+    for (const [level, effort] of [
+      ["OFF", "minimal"],
+      ["LOW", "low"],
+      ["MEDIUM", "medium"],
+      ["HIGH", "high"],
+    ] as const) {
+      const request = resolve_request({
+        api_format,
+        api_url,
+        model_id: "vendor/doubao-seed-2-1-lite-260915:fast",
+        thinking: { level },
+      });
+      const payload = await capture_payload(request);
 
-        expect(payload).toHaveProperty(
-          api_format === "OpenAI" ? "reasoning_effort" : "reasoning.effort",
-          effort,
-        );
-      }
-    },
-  );
+      expect(payload).toHaveProperty(
+        api_format === "OpenAI" ? "reasoning_effort" : "reasoning.effort",
+        effort,
+      );
+      expect(payload).not.toHaveProperty("reasoning.summary");
+      if (api_format === "OpenAIResponses" && level !== "OFF")
+        expect(payload).toHaveProperty("include", ["reasoning.encrypted_content"]);
+    }
+  });
 
   it.each([
     ["OpenAI", "openai", "openai-completions"],

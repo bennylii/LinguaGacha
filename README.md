@@ -21,75 +21,83 @@
 - 如您的项目涉及任何商业行为或者商业收益，在使用 [LinguaGacha](https://github.com/neavo/LinguaGacha) 前，请先与作者联系以获得授权！
 
 ## 功能优势 📌
+- 最优的翻译质量，最快的翻译速度
+  - 完美保留各种 `字幕` `电子书` 的样式效果
+  - 自动生成术语表，保证专有名词在整部作品中的统一
+  - 十秒钟一份字幕，一分钟一本小说，五分钟一部游戏
 - 内置 `AGENT` 模式，通过对话自动完成各种任务　`👈👈 独家绝技`
-- 一键生成术语表，保证角色姓名等专有名词在整部作品中的译名统一
-- 最优的翻译质量，最快的翻译速度，十秒钟一份字幕，一分钟一本小说，五分钟一部游戏
-- 同类应用中最强的样式与代码保留能力，显著减少后期工作量，是制作内嵌汉化的最佳选择
-  - `.md` `.ass` `.epub` 格式几乎可以保留所有原有样式
-  - 大部分的 `WOLF`、`RenPy`、`RPGMaker`、`Kirikiri` 引擎游戏无需人工处理，即翻即玩
+  - 无需任何技术知识，游戏即翻即玩
+  - 主流引擎覆盖 - `RenPy` `Godot` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
 
 ## 基本流程 🛸
 - 从 [发布页](https://github.com/neavo/LinguaGacha/releases) 下载应用
   - Windows:
     - 根据 CPU 类型下载 `*_Windows_x64.zip` 或 `*_Windows_arm64.zip`
     - 解压后双击 `app.exe` 启动
-  - macOS:
+  - <details>
+    <summary>macOS:</summary>
     - 根据 CPU 类型下载 `*_macOS_x64.dmg` 或 `*_macOS_arm64.dmg`
     - 拖拽到应用程序文件夹，先不要启动
     - 打开终端输入 `sudo xattr -rd com.apple.quarantine /Applications/LinguaGacha.app` 然后回车
     - 输入系统密码，关闭终端，可以正常运行了
-  - Linux:
+    </details>
+  - <details>
+    <summary>Linux:</summary>
     - 根据 CPU 类型下载 `*_Linux_x64.AppImage` 或 `*_Linux_arm64.AppImage`
     - 添加执行权限 `chmod +x LinguaGacha*.AppImage`
     - 运行 `./LinguaGacha*.AppImage`
+    </details>
 - 获取一个可靠的 AI 大模型接口，推荐：
   - [ [DeepSeek](https://github.com/neavo/LinguaGacha/wiki/DeepSeek) ]，无显卡要求
-- 准备要翻译的文本
-  - `字幕`、`电子书` 等一般不需要预处理
-  - `游戏文本` 需要根据游戏引擎选择合适的工具进行提取
 - 启动应用
   - 将 `待翻译的文件` 拖到页面上创建项目
-  - 在 `基础设置` 中设置原文语言、译文语言等必要信息
-  - 在 `AGENT` 中选择模型，依次点击界面上预设指令完成以下步骤：
+  - 在 `基础设置` 页面设置原文语言、译文语言等必要信息
+  - 在 `AGENT` 页面选择模型，依次点击界面上预设指令完成以下步骤：
     - `术语提取`　`👈👈 可选但推荐，对质量很重要`
     - `全文翻译`
     - `自动审校`　`👈👈 可选但推荐，对质量很重要`
-  - 在 `AGENT` 中点击生成译文
+  - 在 `AGENT` 或 `工作台` 页面点击生成译文
 
 ## 使用教程 📝
-- 综合
-  - [基础教程](https://github.com/neavo/LinguaGacha/wiki/BasicTutorial)　`👈👈 手把手教学，有手就行，新手必看`
-  - [高质量翻译 RenPy 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)
-  - [高质量翻译 RPGMaker 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)
-  - [高质量翻译 WOLF RPG 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)
+- 入门
+  - [基础教程](https://github.com/neavo/LinguaGacha/wiki/BasicTutorial)　`👈 手把手教学，有手就行，新手必看`
+  - [文件格式支持](https://github.com/neavo/LinguaGacha/wiki/SupportedFileFormat)
+- 模型设置
+  - [模型管理](https://github.com/neavo/LinguaGacha/wiki/ModelManagement)　　[DeepSeek](https://github.com/neavo/LinguaGacha/wiki/DeepSeek)
 - 功能说明
-  - [命令行模式](https://github.com/neavo/LinguaGacha/wiki/CLIMode)
-  - [术语表](https://github.com/neavo/LinguaGacha/wiki/Glossary)　　[文本保护](https://github.com/neavo/LinguaGacha/wiki/TextPreserve)　　[文本替换](https://github.com/neavo/LinguaGacha/wiki/Replacement)　　
-  - [MTool 优化器](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizer)
-- 你可以在 [Wiki](https://github.com/neavo/LinguaGacha/wiki) 找到各项功能的更详细介绍，也欢迎在 [讨论区](https://github.com/neavo/LinguaGacha/discussions) 投稿你的使用心得
+  - [AGENT](https://github.com/neavo/LinguaGacha/wiki/Agent)　　[校对](https://github.com/neavo/LinguaGacha/wiki/Proofreading)
+  - [术语表](https://github.com/neavo/LinguaGacha/wiki/Glossary)　　[文本保护](https://github.com/neavo/LinguaGacha/wiki/TextPreserve)　　[文本替换](https://github.com/neavo/LinguaGacha/wiki/Replacement)
+  - [MTool 优化器](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizer)　　[命令行模式](https://github.com/neavo/LinguaGacha/wiki/CLIMode)
+- 引擎实践
+  - [高质量翻译 RenPy 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)
+  - [高质量翻译 Godot 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)
+  - [高质量翻译 WOLFRPG 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)
+  - [高质量翻译 RPGMAKER 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)
+- 社区经验
+  - [无复杂加密 kirikiri 引擎机翻笔记](https://github.com/neavo/LinguaGacha/discussions/181)
+- 你可以在 [Wiki](https://github.com/neavo/LinguaGacha/wiki) 找到各项功能的更详细介绍
+- 也欢迎在 [讨论区](https://github.com/neavo/LinguaGacha/discussions) 投稿你的使用心得
 
 ## 文本格式 🏷️
-- 字幕 `.srt .ass .ssa .vtt .lrc`
-- 电子书 `.txt .pdf .epub`
-- Markdown `.md`
-- [RenPy](https://www.renpy.org) 导出游戏文本 `.rpy`
-- [MTool](https://mtool.app) 导出游戏文本 `.json`
-- [SExtractor](https://github.com/satan53x/SExtractor) 导出游戏文本 `.txt .json`
-- [VNTextPatch](https://github.com/arcusmaximus/VNTranslationTools) 导出游戏文本 `.json`
-- 原生 `WOLF RPG 3` 游戏文件，支持导入游戏目录或 `.exe`
-- 原生 `RPG Maker MV/MZ` 游戏文件，支持导入游戏目录或 `.exe`
-- 原生 `RPG Maker XP/VX/VXAce` 游戏文件，支持导入游戏目录或 `.exe`
-- 即将停止支持的文件格式：
-  - [Translator++](https://dreamsavior.net/translator-plusplus) 项目文件 `.trans`
-  - [SExtractor](https://github.com/satan53x/SExtractor)、[Translator++](https://dreamsavior.net/translator-plusplus)、[WOLF 官方翻译工具](https://silversecond.booth.pm/items/5151747) 导出游戏文本 `.xlsx`
-- 具体示例可见 [Wiki - 支持的文件格式](https://github.com/neavo/LinguaGacha/wiki/SupportedFileFormat)，更多格式将持续添加，你也可以在 [ISSUES](https://github.com/neavo/LinguaGacha/issues) 中提出你的需求
+| 类型 | 格式 | 说明 |
+|:---|:---|:---|
+| 字幕 | `.srt` `.ass` `.ssa` `.vtt` `.lrc` | - |
+| 电子书 | `.txt` `.pdf` `.epub` | - |
+| Markdown | `.md` | - |
+| `KV-JSON` 游戏文本 | `.json` | 来源 [[MTool](https://mtool.app)] [[SExtractor](https://github.com/satan53x/SExtractor)] |
+| `Message-JSON` 游戏文本 | `.json` | 来源 [[SExtractor](https://github.com/satan53x/SExtractor)] [[VNTextPatch](https://github.com/arcusmaximus/VNTranslationTools)] |
+| `RenPy` 游戏文本 | `.rpy` | 教程 [[高质量翻译 RenPy 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)] |
+| `Godot 4` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 Godot 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)] |
+| `WOLFRPG 3` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 WOLFRPG 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)] |
+| `RPGMAKER MV/MZ` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 RPGMAKER 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)] |
+| `RPGMAKER XP/VX/VXAce` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 RPGMAKER 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)] |
+| `.xlsx` 游戏文本 | `.xlsx` | 来源 [SExtractor](https://github.com/satan53x/SExtractor) [Translator++](https://dreamsavior.net/translator-plusplus) [WOLF 官方翻译工具](https://silversecond.booth.pm/items/5151747)　`👈 即将停止支持` |
+| `.trans` 项目文件 | `.trans` | 来源 [Translator++](https://dreamsavior.net/translator-plusplus)　`👈 即将停止支持` |
 
 ## 近期更新 📅
-- 20261018 v0.129.0
-  - 新增 `原生 WOLF RPG 3` 支持 [#992](../../issues/992) [#994](../../issues/994)
-  - 新增 `百宝箱 - 修改游戏字体` 工具 [#995](../../issues/995)
-  - 优化了原生游戏相关的 AGENT 流程
-  - 修复与改进 [#990](../../issues/990)
+- 20261021 v0.130.1
+  - 原生 `Godot 4` 加密游戏支持 [#1011](../../issues/1011)
+  - 修复与改进 [#1013](../../issues/1013) [#1014](../../issues/1014) [#1015](../../issues/1015)
 
 ## 开发指南 🛠️
 - 安装 [ [Go](https://go.dev) ] 和 [ [`Node.js`](https://nodejs.org) ]

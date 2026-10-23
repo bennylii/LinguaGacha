@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
+import { googleVertexApi } from "@earendil-works/pi-ai/api/google-vertex.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type { OpenAICompletionsOptions } from "@earendil-works/pi-ai/api/openai-completions";
@@ -16,7 +17,7 @@ import type { AnthropicOptions } from "@earendil-works/pi-ai/api/anthropic-messa
 
 import { AppError } from "../../shared/error";
 import { resolve_one_shot_generation_options, type ModelRequestSnapshot } from "./llm-request";
-import { apply_one_shot_request_overrides } from "./llm-payload";
+import { apply_request_overrides } from "./llm-payload";
 import type { LLMMessage } from "./llm-types";
 import { resolve_pi_thinking_level, type ResolvedModelCapability } from "./model-capability";
 
@@ -25,8 +26,9 @@ export type PiApi =
   | "openai-completions"
   | "openai-responses"
   | "anthropic-messages"
-  | "google-generative-ai";
-type PiProvider = "openai" | "openai-compatible" | "anthropic" | "google";
+  | "google-generative-ai"
+  | "google-vertex";
+type PiProvider = "openai" | "openai-compatible" | "anthropic" | "google" | "google-vertex";
 const ANTHROPIC_FALLBACK_MAX_TOKENS = 64_000; // 缺少模型规格时仍满足 Messages API 必填上限
 
 /** 共用选项沿用 Pi 正式类型，协议专属字段只在对应请求分支写入。 */
@@ -60,7 +62,7 @@ export function resolve_pi_model(
   stream: ProviderStreams["stream"];
   streamSimple: ProviderStreams["streamSimple"];
 } {
-  const api = resolve_pi_api(snapshot.api_format);
+  const api = resolve_pi_api(snapshot.endpoint.api);
   const thinking_level = resolve_pi_thinking_level(
     snapshot.thinking_level,
     capability.available_thinking_levels,
@@ -77,11 +79,11 @@ export function resolve_pi_model(
   )
     Reflect.deleteProperty(compat, "supportsMidConvoEffort"); // SDK 缺省即关闭
   const model: PiModel<PiApi> = {
-    id: snapshot.model_id,
+    id: snapshot.endpoint.model_id,
     name: settings.name,
     provider: api.provider,
     api: api.api,
-    baseUrl: snapshot.base_url,
+    baseUrl: snapshot.endpoint.base_url,
     reasoning: capability.reasoning,
     ...(capability.thinking_level_map === undefined
       ? {}
@@ -154,7 +156,11 @@ export function resolve_one_shot_pi_request(
       : {}),
     ...(snapshot.api_format === "Anthropic" ? { interleavedThinking: false } : {}),
     onPayload: (payload, active_model) =>
-      apply_one_shot_request_overrides(snapshot, payload, signal, active_model.compat),
+      apply_request_overrides(snapshot, payload, {
+        compat: active_model.compat,
+        request: capability.request,
+        one_shot_signal: signal,
+      }),
   };
   // Google / Anthropic 由 `streamSimple` 转换思考等级，OpenAI 直接调用以保留自动输出上限语义。
   const provider_stream =
@@ -170,23 +176,26 @@ export function resolve_one_shot_pi_request(
   };
 }
 
-/** 产品 API 枚举只在这里绑定 Pi provider 身份与惰性 adapter。 */
-function resolve_pi_api(api_format: ModelRequestSnapshot["api_format"]): {
+/** 已解析的接口身份只在这里绑定 Pi provider 与惰性适配器。 */
+function resolve_pi_api(api: ModelRequestSnapshot["endpoint"]["api"]): {
   provider: PiProvider;
   api: PiApi;
   stream: ProviderStreams["stream"];
   streamSimple: ProviderStreams["streamSimple"];
 } {
-  if (api_format === "SakuraLLM") {
+  if (api === "google-vertex") {
+    return { provider: "google-vertex", api: "google-vertex", ...googleVertexApi() };
+  }
+  if (api === "SakuraLLM") {
     return { provider: "openai-compatible", api: "openai-completions", ...openAICompletionsApi() };
   }
-  if (api_format === "Anthropic") {
+  if (api === "Anthropic") {
     return { provider: "anthropic", api: "anthropic-messages", ...anthropicMessagesApi() };
   }
-  if (api_format === "Google") {
+  if (api === "google-generative-ai") {
     return { provider: "google", api: "google-generative-ai", ...googleGenerativeAIApi() };
   }
-  if (api_format === "OpenAIResponses") {
+  if (api === "OpenAIResponses") {
     return { provider: "openai", api: "openai-responses", ...openAIResponsesApi() };
   }
   return { provider: "openai", api: "openai-completions", ...openAICompletionsApi() };

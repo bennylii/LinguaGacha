@@ -6,6 +6,7 @@ import { type JSX, useEffect, useMemo, useState } from "react";
 import { Check, LoaderCircle, Minus } from "lucide-react";
 
 import { useI18n } from "@frontend/app/locale/locale-context";
+import { Card } from "@frontend/shadcn/card";
 import {
   PROOFREADING_OUTCOME_GROUP_LABEL_KEY_BY_CODE,
   PROOFREADING_STATUS_LABEL_KEY_BY_CODE,
@@ -19,7 +20,6 @@ import {
 import { Badge } from "@frontend/shadcn/badge";
 import { AppButton } from "@frontend/widgets/app-button";
 import { Input } from "@frontend/shadcn/input";
-import { ScrollArea } from "@frontend/shadcn/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@frontend/shadcn/tooltip";
 import { AppPageDialog } from "@frontend/widgets/app-page-dialog";
 
@@ -229,37 +229,20 @@ export function ProofreadingFilterDialog(props: ProofreadingFilterDialogProps): 
       open={props.open}
       title={t("proofreading_page.action.filter")}
       size="lg"
-      dismissBehavior={submitting ? "blocked" : "default"}
+      submitting={submitting}
       onClose={props.on_close}
       contentClassName="h-[720px] max-h-[calc(100vh-32px)] sm:max-w-[960px]"
       bodyClassName="overflow-hidden p-0"
-      footer={
-        <>
-          <AppButton
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={submitting}
-            onClick={props.on_close}
-          >
-            {t("app.action.cancel")}
-          </AppButton>
-          <AppButton
-            type="button"
-            size="sm"
-            disabled={submitting}
-            onClick={() => {
-              void handle_confirm();
-            }}
-          >
-            {t("app.action.confirm")}
-          </AppButton>
-        </>
-      }
+      primaryAction={{
+        label: t("app.action.confirm"),
+        shortcut: "submit",
+        onSelect: handle_confirm,
+      }}
     >
       <div className="proofreading-page__filter-dialog-scroll">
         <div className="proofreading-page__filter-layout">
-          <section
+          <Card
+            variant="group"
             className="proofreading-page__filter-section proofreading-page__filter-section--compact-toggles"
             aria-busy={props.loading}
           >
@@ -314,9 +297,10 @@ export function ProofreadingFilterDialog(props: ProofreadingFilterDialogProps): 
                 </div>
               );
             })}
-          </section>
+          </Card>
 
-          <section
+          <Card
+            variant="group"
             className="proofreading-page__filter-section"
             aria-labelledby="proofreading-filter-group-glossary"
           >
@@ -350,7 +334,7 @@ export function ProofreadingFilterDialog(props: ProofreadingFilterDialogProps): 
               }}
             />
 
-            <ScrollArea className="proofreading-page__filter-list">
+            <div className="proofreading-page__filter-list">
               <div className="proofreading-page__filter-list-body">
                 {visible_term_entries.length > 0 ? (
                   <>
@@ -391,8 +375,8 @@ export function ProofreadingFilterDialog(props: ProofreadingFilterDialogProps): 
                   </div>
                 )}
               </div>
-            </ScrollArea>
-          </section>
+            </div>
+          </Card>
         </div>
       </div>
     </AppPageDialog>

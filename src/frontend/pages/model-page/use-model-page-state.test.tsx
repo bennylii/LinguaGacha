@@ -317,7 +317,7 @@ describe("useModelPageState", () => {
     const update = create_deferred<ReturnType<typeof create_snapshot>>();
     api_fetch_mock.mockReturnValue(update.promise);
 
-    let request!: Promise<void>;
+    let request!: Promise<boolean>;
     await act(async () => {
       request = latest_state!.update_model_patch("custom", {
         agent: { context_window: 300_000 },
@@ -342,8 +342,8 @@ describe("useModelPageState", () => {
       body.patch?.name === "第一次" ? first.promise : second.promise,
     );
 
-    let first_update!: Promise<void>;
-    let second_update!: Promise<void>;
+    let first_update!: Promise<boolean>;
+    let second_update!: Promise<boolean>;
     await act(async () => {
       first_update = latest_state!.update_model_patch("custom", { name: "第一次" });
       second_update = latest_state!.update_model_patch("custom", { name: "第二次" });
@@ -352,10 +352,36 @@ describe("useModelPageState", () => {
     expect(latest_state?.snapshot.models[1]?.name).toBe("第二次");
 
     second.resolve(create_snapshot("服务端第二次"));
-    await act(async () => second_update);
+    await act(async () => expect(second_update).resolves.toBe(true));
     first.resolve(create_snapshot("服务端第一次"));
-    await act(async () => first_update);
+    await act(async () => expect(first_update).resolves.toBe(false));
 
     expect(latest_state?.snapshot.models[1]?.name).toBe("服务端第二次");
+  });
+
+  it("保存结果区分成功与失败，失败只通知一次并回读快照", async () => {
+    api_fetch_mock.mockResolvedValue(create_snapshot());
+    await render_hook();
+    api_fetch_mock.mockResolvedValueOnce(create_snapshot("已保存"));
+    let result = false;
+    await act(async () => {
+      result = await latest_state!.update_model_patch("custom", { model_id: "next-model" });
+    });
+    expect(result).toBe(true);
+    expect(api_fetch_mock).toHaveBeenLastCalledWith("/api/models/update", {
+      model_id: "custom",
+      patch: { model_id: "next-model" },
+    });
+
+    api_fetch_mock.mockRejectedValueOnce(new Error("save failed"));
+    await act(async () => {
+      result = await latest_state!.update_model_patch("custom", { model_id: "broken" });
+    });
+    expect(result).toBe(false);
+    expect(push_toast).toHaveBeenCalledExactlyOnceWith(
+      "app.feedback.save_failed",
+      expect.any(Error),
+    );
+    expect(api_fetch_mock).toHaveBeenLastCalledWith("/api/models/snapshot", {});
   });
 });

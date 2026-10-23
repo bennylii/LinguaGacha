@@ -2,13 +2,11 @@ import type { JSX } from "react";
 import { CaseSensitive } from "lucide-react";
 
 import { useI18n } from "@frontend/app/locale/locale-context";
-import { useActionShortcut } from "@frontend/widgets/interactions/use-action-shortcut";
+import { Card } from "@frontend/shadcn/card";
 import type { GlossaryDialogMode, GlossaryEntryDraft } from "@frontend/pages/glossary-page/types";
-import { AppButton } from "@frontend/widgets/app-button";
 import { BooleanSegmentedToggle } from "@frontend/widgets/boolean-segmented-toggle";
 import { AppEditor } from "@frontend/widgets/app-editor/app-editor";
 import { AppPageDialog } from "@frontend/widgets/app-page-dialog";
-import { ShortcutKbd } from "@frontend/widgets/interactions/shortcut-kbd";
 
 type GlossaryEditDialogProps = {
   open: boolean;
@@ -26,53 +24,25 @@ export function GlossaryEditDialog(props: GlossaryEditDialogProps): JSX.Element 
   const disabled = props.readonly || props.saving; // 编辑与保存共用只读、提交中的锁定条件。
   const title = props.mode === "create" ? t("app.action.create") : t("app.action.edit");
 
-  useActionShortcut({
-    action: "save",
-    enabled: props.open && !disabled,
-    on_trigger: () => {
-      void props.on_save();
-    },
-  });
-
   return (
     <AppPageDialog
       open={props.open}
       title={title}
       size="viewport"
-      dismissBehavior={props.saving ? "blocked" : "escape-only"}
+      dismissBehavior="escape-only"
+      submitting={props.saving}
       onClose={props.on_close}
       bodyClassName="overflow-hidden p-0"
-      footer={
-        <>
-          <AppButton
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={props.saving}
-            onClick={() => {
-              void props.on_close();
-            }}
-          >
-            {t("app.action.cancel")}
-            <ShortcutKbd action="cancel" />
-          </AppButton>
-          <AppButton
-            type="button"
-            size="sm"
-            disabled={disabled}
-            onClick={() => {
-              void props.on_save();
-            }}
-          >
-            {t("app.action.save")}
-            <ShortcutKbd action="save" className="bg-background/18 text-primary-foreground" />
-          </AppButton>
-        </>
-      }
+      primaryAction={{
+        label: t("app.action.save"),
+        shortcut: "save",
+        disabled: props.readonly,
+        onSelect: props.on_save,
+      }}
     >
       <div className="glossary-page__dialog-scroll">
         <div className="glossary-page__dialog-form">
-          <div className="glossary-page__dialog-main-panel">
+          <Card variant="group" render={<div />} className="glossary-page__dialog-main-panel">
             <div className="glossary-page__dialog-main-panel-content">
               <div className="glossary-page__dialog-section">
                 <span className="glossary-page__dialog-section-title font-medium">
@@ -122,10 +92,10 @@ export function GlossaryEditDialog(props: GlossaryEditDialogProps): JSX.Element 
                 />
               </div>
             </div>
-          </div>
+          </Card>
 
           <div className="glossary-page__dialog-rule-grid">
-            <div className="glossary-page__dialog-rule-item">
+            <Card variant="group" render={<div />} className="glossary-page__dialog-rule-item">
               <div className="glossary-page__dialog-rule-copy">
                 <span className="glossary-page__rule-badge-wrap" aria-hidden="true">
                   <span
@@ -149,7 +119,7 @@ export function GlossaryEditDialog(props: GlossaryEditDialogProps): JSX.Element 
                   });
                 }}
               />
-            </div>
+            </Card>
           </div>
         </div>
       </div>

@@ -33,6 +33,7 @@ export const ITEM_FILE_TYPES = [
   "TRANS",
   "RPGMAKER_MV_MZ",
   "RPGMAKER_RGSS",
+  "GODOT",
   "KVJSON",
   "MESSAGEJSON",
 ] as const;
@@ -131,8 +132,8 @@ export function build_project_item_public_record(item: Item): ProjectItemPublicR
   const { id, row, ...fields } = item;
   return {
     ...fields,
-    name_src: structuredClone(fields.name_src),
-    name_dst: structuredClone(fields.name_dst),
+    name_src: normalize_item_name_field(fields.name_src),
+    name_dst: normalize_item_name_field(fields.name_dst),
     item_id: id ?? 0,
     row_number: row,
   };
@@ -231,8 +232,8 @@ function build_project_item_persistent_record(
   const { item_id, row_number, ...fields } = public_record;
   return {
     ...fields,
-    name_src: structuredClone(fields.name_src),
-    name_dst: structuredClone(fields.name_dst),
+    name_src: normalize_item_name_field(fields.name_src),
+    name_dst: normalize_item_name_field(fields.name_dst),
     id: item_id,
     row: row_number,
   };

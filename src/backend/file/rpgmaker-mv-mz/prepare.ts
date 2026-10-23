@@ -1,45 +1,17 @@
+import { is_json_record } from "../../../domain/json";
 import { restore_evb_launcher } from "../shared/evb/pe";
 import path from "node:path";
 import type { NativeFs } from "../../../native/native-fs";
-import { is_json_record } from "../../../domain/json";
-import { prepare_game_directory, type GamePreparation } from "../shared/game/prepare";
+import type { GamePreparation } from "../shared/game/prepare";
 import {
   assert_regular_path,
   collect_existing_files,
   validate_game_path,
 } from "../source-file-paths";
 import { read_evb, extract_evb_member } from "../shared/evb/archive";
-import type { GamePrepareExecution, GamePrepareTask } from "../shared/game/prepare-worker";
 import { read_evb_game, type RPGMakerSource } from "./source";
 import { RPGMakerJsonCodec } from "./json-codec";
 import { decrypt_media, MEDIA_EXTENSIONS } from "./media";
-
-/** 正式导入复核身份，转换全部完成后才允许修改游戏目录。 */
-export async function prepare_rpgmaker_source(
-  game: RPGMakerSource,
-  fs: NativeFs,
-  execute?: GamePrepareExecution,
-  signal?: AbortSignal,
-): Promise<string> {
-  signal?.throwIfAborted();
-  if (!game.executable) {
-    const system: unknown = JSON.parse(
-      new TextDecoder().decode(fs.read_file(path.join(game.data_root, "data/System.json"))),
-    );
-    if (!is_json_record(system)) throw new Error("Invalid MV/MZ System.json");
-    if (!system["hasEncryptedImages"] && !system["hasEncryptedAudio"]) return game.root;
-  }
-  await prepare_game_directory(
-    game.root,
-    fs,
-    (staging) => {
-      const task: GamePrepareTask = { kind: "mv_mz", game, staging };
-      return execute ? execute(task, signal) : stage_rpgmaker_source(task, fs, signal);
-    },
-    signal,
-  );
-  return game.root;
-}
 
 /** worker 只拥有暂存目录，来源目录中的文件始终只读。 */
 export async function stage_rpgmaker_source(
@@ -50,6 +22,7 @@ export async function stage_rpgmaker_source(
   signal?.throwIfAborted();
   const { root, data_root, executable } = game;
   const writes = new Set<string>();
+  const removes = new Set<string>();
   assert_regular_path(root, fs);
   if (executable) {
     assert_regular_path(executable, fs);
@@ -79,7 +52,7 @@ export async function stage_rpgmaker_source(
       await handle.close();
     }
   }
-  await stage_media(game, staging, writes, fs, signal);
+  await stage_media(game, staging, writes, removes, fs, signal);
   const prefix = path.relative(root, data_root).replaceAll("\\", "/");
   const resolve = (name: string) => path.join(writes.has(name) ? staging : root, name);
   const internal = (name: string) => [prefix, name].filter(Boolean).join("/");
@@ -91,7 +64,7 @@ export async function stage_rpgmaker_source(
     )
   )
     throw new Error("Prepared game is missing MV/MZ engine files");
-  return { writes: [...writes] };
+  return { writes: [...writes], removes: [...removes] };
 }
 
 /** 包内资源覆盖散装资源，原生媒体按整类成功结果关闭配置。 */
@@ -99,6 +72,7 @@ async function stage_media(
   game: RPGMakerSource,
   staging: string,
   writes: Set<string>,
+  removes: Set<string>,
   fs: NativeFs,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -116,11 +90,18 @@ async function stage_media(
   const key = system["encryptionKey"];
   if (typeof key !== "string" || !/^[a-f0-9]{32}$/iu.test(key))
     throw new Error("Invalid RPG Maker encryption key");
-  const files = new Set<string>(writes);
+  const existing = new Set<string>();
   for (const directory of [images ? "img" : null, audio ? "audio" : null]) {
     if (directory)
-      collect_existing_files(root, [prefix, directory].filter(Boolean).join("/"), files, fs);
+      collect_existing_files(
+        root,
+        [prefix, directory].filter(Boolean).join("/"),
+        existing,
+        fs,
+        signal,
+      );
   }
+  const files = new Set([...writes, ...existing]);
   const outputs = new Set<string>();
   for (const name of files) {
     signal?.throwIfAborted();
@@ -145,7 +126,10 @@ async function stage_media(
       signal,
     );
     writes.add(output);
+    writes.delete(name); // 已消费的包内密文只留在暂存区，随事务工作区清理。
+    if (existing.has(name)) removes.add(name); // 正式目录密文由目录事务删除并负责恢复。
   }
+  // 固化原稿采用关闭加密后的配置，避免译文生成重新开启加密。
   if (images) system["hasEncryptedImages"] = false;
   if (audio) system["hasEncryptedAudio"] = false;
   await fs.write_file(path.join(staging, system_name), codec.stringify(system));

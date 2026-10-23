@@ -1,10 +1,13 @@
+import { apply_godot_pack_order, godot_pack_preview, read_godot_pack_orders } from "./godot/source";
 import path from "node:path";
+import { GAME_FONT_INPUT_EXTENSIONS } from "../../shared/game-font";
 import { default_native_fs, type NativeFs } from "../../native/native-fs";
 import type { JsonRecord } from "../../domain/json";
 import { AppError, read_error_message } from "../../shared/error";
 import type { RuntimeOperationGate } from "../runtime-operation-gate";
 import { read_font_family_names } from "./shared/game/font-name";
-import { replace_game_font, type GameFont, type GameFontSource } from "./shared/game/font-replace";
+import { GAME_ENGINES, type GameSource } from "./shared/game/engines";
+import { replace_game_font, type GameFont } from "./shared/game/font-replace";
 import type { GamePrepareExecution } from "./shared/game/prepare-worker";
 import { discover_source } from "./source-discovery";
 
@@ -23,8 +26,8 @@ export class GameFontService {
   public async inspect(body: JsonRecord): Promise<JsonRecord> {
     const request = read_request(body);
     this.read_font(request.font_path);
-    await this.read_game(request.game_path);
-    return {};
+    const game = await this.read_game(request.game_path);
+    return { godot_packs: game.file_type === "GODOT" ? [godot_pack_preview(game.game)] : [] };
   }
 
   /** 写入占用覆盖重新识别、解包、替换、回滚和清理的全过程。 */
@@ -32,19 +35,24 @@ export class GameFontService {
     const request = read_request(body);
     return this.gate.run_project_write(async (signal) => {
       const font = this.read_font(request.font_path);
-      await replace_game_font(
-        await this.read_game(request.game_path, signal),
-        font,
-        this.fs,
-        this.execute,
-        signal,
-      );
+      let game = await this.read_game(request.game_path, signal);
+      const orders = read_godot_pack_orders(body["godot_pack_orders"]);
+      if (orders?.length) {
+        if (orders.length !== 1 || game.file_type !== "GODOT")
+          throw new AppError("request.validation_failed");
+        game = { ...game, game: apply_godot_pack_order(game.game, orders[0]!) };
+      }
+      await replace_game_font(game, font, this.fs, this.execute, signal);
       return {};
     });
   }
 
-  /** 内部名称解析失败的文件不能作为字体写入游戏。 */
+  /** 扩展名与内容共同限制输入，使 WOLF 允许覆盖的根目录字体都能被备份识别。 */
   private read_font(font_path: string): GameFont {
+    if (!GAME_FONT_INPUT_EXTENSIONS.includes(path.extname(font_path).slice(1).toLowerCase()))
+      throw new AppError("file.parse_failed", {
+        message: font_path + ": Unsupported font file extension",
+      });
     const bytes = this.fs.read_file(font_path);
     try {
       return {
@@ -61,10 +69,10 @@ export class GameFontService {
   }
 
   /** 沿用导入的游戏识别，只接受字体替换支持的引擎。 */
-  private async read_game(game_path: string, signal?: AbortSignal): Promise<GameFontSource> {
+  private async read_game(game_path: string, signal?: AbortSignal): Promise<GameSource> {
     const { source } = await discover_source(game_path, this.fs, signal);
     if (source.kind === "failure") throw source.error;
-    if (source.kind !== "wolfrpg" && source.kind !== "mv_mz")
+    if (source.kind !== "game" || !GAME_ENGINES[source.file_type].font_outputs)
       throw new AppError("file.invalid_structure", {
         message: "Unsupported game for font replacement: " + game_path,
       });

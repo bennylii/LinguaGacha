@@ -52,10 +52,7 @@ import { AppSidebar } from "@frontend/app/shell/app-sidebar";
 import { AppTitlebar } from "@frontend/app/shell/app-titlebar";
 import { ProjectSwitcher } from "@frontend/app/shell/project-switcher";
 import { format_project_settings_aligned_toast } from "@frontend/app/feedback/project-settings-alignment-feedback";
-import {
-  build_project_prefilter_settings,
-  open_project_in_current_window,
-} from "@frontend/app/project/open-project";
+import { open_project_in_current_window } from "@frontend/app/project/open-project";
 import { AppActionDialog, AppConfirmDialog } from "@frontend/widgets/app-alert-dialog";
 import { LogWindowPage } from "@frontend/pages/log-window-page/page";
 import {
@@ -526,10 +523,7 @@ function AppContent(): JSX.Element {
    * 顶栏切换工程复用打开工程的设置对齐链路，随后由 DesktopState 监听快照变化完成会话加载。
    */
   async function handle_switch_project(project_path: string): Promise<void> {
-    const alignment = await open_project_in_current_window({
-      path: project_path,
-      settings: settings_snapshot,
-    });
+    const alignment = await open_project_in_current_window({ path: project_path });
     set_project_session_status("warming");
     await refresh_project_snapshot();
     const file_name = project_path.split(/[\\/]+/u).at(-1) ?? project_path;
@@ -538,12 +532,12 @@ function AppContent(): JSX.Element {
       name: file_name.replace(/\.[^.]+$/u, ""),
     });
     await Promise.all([refresh_settings(), refresh_batch_translation()]);
-    if (alignment.aligned) {
+    if (alignment !== undefined) {
       push_toast(
         "info",
         format_project_settings_aligned_toast({
-          settings: build_project_prefilter_settings(settings_snapshot),
-          changed_fields: alignment.changed_fields,
+          settings: alignment.settings ?? {},
+          changed_fields: alignment.changed ?? {},
           t,
         }),
       );

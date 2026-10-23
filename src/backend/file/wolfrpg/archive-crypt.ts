@@ -28,22 +28,44 @@ import { crc32 } from "node:zlib";
 import { setImmediate } from "node:timers/promises";
 import { WOLF_MAX_DATA_BYTES } from "./lz4";
 import { aes_ctr, chacha20_xor, expand_aes_key, rng, type WolfAesKeys } from "./crypt";
-import { BINARY_CHUNK_BYTES, read_bytes, type BinaryFileHandle } from "../shared/binary";
+import {
+  BINARY_COMPUTE_STEP_BYTES,
+  BINARY_IO_CHUNK_BYTES,
+  read_bytes,
+  type BinaryFileHandle,
+} from "../shared/binary";
 /** 模式标志随当前归档的密钥保存，分块处理共用同一上下文。 */
 export type WolfKey = Uint8Array & { v35?: boolean; chacha?: boolean };
-// 头部 marker 到密码模式的映射，A0/A1/A2/F1 需要同名配套密钥文件。
-const WOLF_ARCHIVE_MODES = {
-  100: "free-chacha",
-  200: "F1",
-  300: "legacy",
-  314: "legacy",
-  331: "wolf",
-  350: "wolf",
-  1000: "A0",
-  1010: "A1",
-  1020: "A2",
-} as const;
 export type WolfKeyType = "A0" | "A1" | "A2" | "F1";
+/** 旧版模式同时声明密码，避免支持标记与密码表失配。 */
+type WolfArchiveProfile =
+  | Readonly<{ mode: "legacy"; password: Buffer }>
+  | Readonly<{ mode: "wolf" | "free-chacha" | WolfKeyType }>;
+// 固定密码来自上述 UberWolf 提交的 `DEFAULT_CRYPT_MODES`，排除末尾 NUL。
+const WOLF_ARCHIVE_PROFILES = {
+  0: { mode: "legacy", password: Buffer.from("WLFRPrO!p(;s5((8P@((UFWlu$#5(=", "ascii") }, // DXArchive 8 的 v2.225 方案。
+  100: { mode: "free-chacha" },
+  200: { mode: "F1" },
+  300: {
+    mode: "legacy",
+    password: Buffer.from(
+      "0f53e13e8eb54191521655ae34c98f79592f596b95199b1b359a2fdec97c1296c314b50f53e13e8e",
+      "hex",
+    ),
+  },
+  314: {
+    mode: "legacy",
+    password: Buffer.from(
+      "31f90136a3e38d3c7bc37d25ad6328191bf78e6cc4e5e27682ea4fed61dae0445bb6463b06d5ceb67858d07c82",
+      "hex",
+    ),
+  },
+  331: { mode: "wolf" },
+  350: { mode: "wolf" },
+  1000: { mode: "A0" },
+  1010: { mode: "A1" },
+  1020: { mode: "A2" },
+} as const satisfies Readonly<Record<number, WolfArchiveProfile>>;
 // 配套密钥文件首字节到密钥类型的映射。
 const WOLF_KEY_TYPES: Readonly<Record<number, WolfKeyType>> = {
   0xa0: "A0",
@@ -51,20 +73,20 @@ const WOLF_KEY_TYPES: Readonly<Record<number, WolfKeyType>> = {
   0xa2: "A2",
   0xf1: "F1",
 };
-type WolfArchiveVersion = keyof typeof WOLF_ARCHIVE_MODES;
+type WolfArchiveMarker = keyof typeof WOLF_ARCHIVE_PROFILES;
 /** 3.5 与 A2 共用 3.5 的密钥流、轮数和前缀长度规则。 */
 export function is_wolf35(version: number): boolean {
   return (version >= 350 && version < 1000) || version >= 1020;
 }
 /** 无 DX 头返回 null；已识别的未知协议必须失败。 */
-export function classify_wolf_archive(header: Buffer): WolfArchiveVersion | null {
+export function classify_wolf_archive(header: Buffer): WolfArchiveMarker | null {
   if (header.length < 2 || header.readUInt16LE() !== 0x5844) return null;
-  const marker = header.length >= 48 ? header.readUInt16LE(46) : -1;
+  const marker = header.length >= 48 ? header.readUInt16LE(46) : -1; // `Flags` 高 16 位保存加密标记。
   assert(
-    header.length >= 64 && header.readUInt16LE(2) === 8 && marker in WOLF_ARCHIVE_MODES,
+    header.length >= 64 && header.readUInt16LE(2) === 8 && marker in WOLF_ARCHIVE_PROFILES,
     "Unsupported WOLF archive: crypt=" + marker,
   );
-  return marker as WolfArchiveVersion;
+  return marker as WolfArchiveMarker;
 }
 /** 首字节只标识类型，内容由密钥派生校验。 */
 export function classify_wolf_key(header: Buffer): WolfKeyType | null {
@@ -77,6 +99,7 @@ async function pro_key_aes(seeds: Uint8Array, signal?: AbortSignal): Promise<Wol
     seed2 = seeds[1]!,
     counter = 0;
   const data = Array.from({ length: 32 }, () => new Uint32Array(256));
+  /** 第一种递推更新 `seed1`，后续链继续消费其状态。 */
   const next1 = () => {
     const part = seed1 ^ (((seed1 << 11) ^ seed1) >>> 8);
     let state = (Math.imul(1664525, (seed1 << 11) ^ part) + 1013904223) >>> 0;
@@ -91,6 +114,7 @@ async function pro_key_aes(seeds: Uint8Array, signal?: AbortSignal): Promise<Wol
     if ((state & 0xfffff) === 0) state += 256;
     return (seed1 = state >>> 0);
   };
+  /** 第二种递推与第一种共用 `seed1`，调用顺序属于派生协议。 */
   const next2 = () => {
     let state = (Math.imul(1664525, seed1) + 1013904223) >>> 0;
     const shift = (seed1 & 7) + 1;
@@ -102,6 +126,7 @@ async function pro_key_aes(seeds: Uint8Array, signal?: AbortSignal): Promise<Wol
     else if (!(state & 65535)) state ^= 0x55aa55aa;
     return (seed1 = state >>> 0);
   };
+  /** 独立推进 `seed2`，为链混合提供另一条随机序列。 */
   const next3 = () => {
     let state = Math.imul(1566083941, seed2) ^ Math.imul(292331520, seed2);
     state ^= (state >>> 17) ^ ((state ^ (state >>> 17)) << 5);
@@ -113,6 +138,7 @@ async function pro_key_aes(seeds: Uint8Array, signal?: AbortSignal): Promise<Wol
     }
     return (seed2 = state >>> 0);
   };
+  /** 原地改写状态行，跨行保留随机状态和调用计数。 */
   const chain = (row: Uint32Array) => {
     for (let i = 0; i < row.length; i++) {
       const rn = next2();
@@ -227,7 +253,7 @@ export async function derive_archive_key(
     assert(bytes.length >= 0x5cb8, "Truncated WOLF A0 key");
     const random = rng(bytes[4]!);
     for (let i = 20; i < bytes.length; i++) {
-      if (i % BINARY_CHUNK_BYTES === 0) {
+      if (i % BINARY_COMPUTE_STEP_BYTES === 0) {
         await setImmediate();
         signal?.throwIfAborted();
       }
@@ -269,19 +295,6 @@ const SALT_PASSWORD_331 = Uint8Array.from([
   0x60, 0x9b, 0x4a, 0x38, 0x17, 0xf3, 0x69, 0x59, 0xa4, 0xc7, 0x9a, 0x43, 0x63, 0xe6, 0x54, 0xaf,
   0xdb, 0xbb, 0x43, 0x58,
 ]);
-// 3.00 与 3.14 的内置成员密码。
-export const OLD_PASSWORDS: Readonly<Record<number, Buffer>> = {
-  300: Buffer.from([
-    0x0f, 0x53, 0xe1, 0x3e, 0x8e, 0xb5, 0x41, 0x91, 0x52, 0x16, 0x55, 0xae, 0x34, 0xc9, 0x8f, 0x79,
-    0x59, 0x2f, 0x59, 0x6b, 0x95, 0x19, 0x9b, 0x1b, 0x35, 0x9a, 0x2f, 0xde, 0xc9, 0x7c, 0x12, 0x96,
-    0xc3, 0x14, 0xb5, 0x0f, 0x53, 0xe1, 0x3e, 0x8e,
-  ]),
-  314: Buffer.from([
-    0x31, 0xf9, 0x01, 0x36, 0xa3, 0xe3, 0x8d, 0x3c, 0x7b, 0xc3, 0x7d, 0x25, 0xad, 0x63, 0x28, 0x19,
-    0x1b, 0xf7, 0x8e, 0x6c, 0xc4, 0xe5, 0xe2, 0x76, 0x82, 0xea, 0x4f, 0xed, 0x61, 0xda, 0xe0, 0x44,
-    0x5b, 0xb6, 0x46, 0x3b, 0x06, 0xd5, 0xce, 0xb6, 0x78, 0x58, 0xd0, 0x7c, 0x82,
-  ]),
-};
 /** 旧版密钥由交错字节的两个 CRC32 拼成七字节。 */
 export function old_key(source: Uint8Array): Buffer {
   const a: number[] = [],
@@ -472,25 +485,30 @@ export async function open_wolf_archive_crypt(
     );
     assert(size <= WOLF_MAX_DATA_BYTES, "WOLF member exceeds data limit");
     const result = Buffer.alloc(size);
-    for (let at = 0; at < size; at += BINARY_CHUNK_BYTES) {
+    for (let at = 0; at < size; at += BINARY_IO_CHUNK_BYTES) {
       await setImmediate();
       signal?.throwIfAborted();
-      const bytes = await read_bytes(handle, offset + at, Math.min(BINARY_CHUNK_BYTES, size - at));
+      const bytes = await read_bytes(
+        handle,
+        offset + at,
+        Math.min(BINARY_IO_CHUNK_BYTES, size - at),
+      );
       result.set(bytes, at);
     }
     return result;
   };
   const head = await raw(0, HEADER_BYTES);
-  const version = classify_wolf_archive(head);
-  assert(version !== null, "Unsupported WOLF archive header");
-  const mode = WOLF_ARCHIVE_MODES[version];
+  const marker = classify_wolf_archive(head);
+  assert(marker !== null, "Unsupported WOLF archive header");
+  const profile = WOLF_ARCHIVE_PROFILES[marker];
+  const mode = profile.mode;
   const modern = mode === "wolf" || mode === "A1" || mode === "A2";
   const chacha = mode === "free-chacha" || mode === "F1";
   const key_type = mode === "legacy" || mode === "wolf" || mode === "free-chacha" ? null : mode;
   const companion = key_type ? await resolve_key?.(key_type) : undefined;
   assert(!key_type || companion, "Missing WOLF companion key: " + mode);
   const nul = companion?.indexOf(0) ?? -1;
-  const password = mode === "legacy" ? OLD_PASSWORDS[version]! : companion?.subarray(0, nul);
+  const password = profile.mode === "legacy" ? profile.password : companion?.subarray(0, nul);
   const tail = mode === "A1" || mode === "A2" ? companion!.subarray(nul + 1) : undefined;
   assert(!tail || (nul > 0 && tail.length === 4), "Invalid WOLF Pro key tail");
   const stream: WolfKey | null = chacha ? Uint8Array.from(companion ?? FREE_CHACHA_KEY) : null;
@@ -498,14 +516,14 @@ export async function open_wolf_archive_crypt(
   const pw = Uint8Array.from(head.subarray(49, 64));
   if (modern) {
     const random = rng(
-      is_wolf35(version) ? 12 + pw[9]! * pw[10]! + pw[3]! : pw[0]! + pw[7]! * pw[12]!,
+      is_wolf35(marker) ? 12 + pw[9]! * pw[10]! + pw[3]! : pw[0]! + pw[7]! * pw[12]!,
     );
-    for (let i = 0; i < (is_wolf35(version) ? 2 : 4); i++)
+    for (let i = 0; i < (is_wolf35(marker) ? 2 : 4); i++)
       for (let j = 3; j >= 0; j--) {
         const p = 8 + i * 8 + j * 2;
         head.writeUInt16LE(head.readUInt16LE(p) ^ random(), p);
       }
-    if (is_wolf35(version)) {
+    if (is_wolf35(marker)) {
       const r0 = BigInt(random()) << 17n,
         r1 = BigInt(random()) << 31n;
       head.writeBigUInt64LE(head.readBigUInt64LE(24) ^ (r0 | r1 | BigInt(random())), 24);
@@ -537,17 +555,18 @@ export async function open_wolf_archive_crypt(
     "WOLF directory exceeds limit",
   );
   assert((flags & ~3) === 0, "Unsupported WOLF archive flags: " + flags);
-  const outer = modern ? generate_key(pw, true, version, password) : null;
+  const outer = modern ? generate_key(pw, true, marker, password) : null;
   const inner = modern
-    ? generate_key(pw, false, version, undefined, tail)
+    ? generate_key(pw, false, marker, undefined, tail)
     : flags & 1
       ? null
       : (stream ?? old_key(password!));
-  const aes = aes_keys(pw, version, tail);
+  const aes = aes_keys(pw, marker, tail);
   let prefix_size = Math.min(1024, file_size - HEADER_BYTES);
-  if (is_wolf35(version)) {
+  if (is_wolf35(marker)) {
     let state =
       (tail ? tail[0]! * tail[1]! + pw[2]! * pw[4]! + pw[11]! : pw[2]! * pw[4]! + pw[12]!) || 1;
+    /** 3.5 的前缀长度取自该独立 xorshift 序列。 */
     const next = () => {
       state ^= state << 11;
       state ^= state >>> 19;
@@ -563,11 +582,15 @@ export async function open_wolf_archive_crypt(
   const outer_read = async (offset: number, size: number): Promise<Buffer> => {
     const bytes = await raw(offset, size);
     if (outer)
-      for (let at = 0; at < size; at += BINARY_CHUNK_BYTES) {
+      for (let at = 0; at < size; at += BINARY_COMPUTE_STEP_BYTES) {
         await setImmediate();
         signal?.throwIfAborted();
         const start = Math.max(offset + at, HEADER_BYTES),
-          end = Math.min(offset + at + BINARY_CHUNK_BYTES, offset + size, file_size - HEADER_BYTES);
+          end = Math.min(
+            offset + at + BINARY_COMPUTE_STEP_BYTES,
+            offset + size,
+            file_size - HEADER_BYTES,
+          );
         if (start < end) xor(bytes.subarray(start - offset, end - offset), outer, start);
       }
     return bytes;
@@ -580,10 +603,10 @@ export async function open_wolf_archive_crypt(
   if (modern && directory_offset < HEADER_BYTES + prefix_size)
     prefix.copy(directory, 0, directory_offset - HEADER_BYTES);
   if (modern) await aes_ctr(directory, aes, Math.ceil(prefix.length / 16), signal);
-  for (let at = 0; at < directory.length; at += BINARY_CHUNK_BYTES) {
+  for (let at = 0; at < directory.length; at += BINARY_COMPUTE_STEP_BYTES) {
     await setImmediate();
     signal?.throwIfAborted();
-    xor(directory.subarray(at, at + BINARY_CHUNK_BYTES), inner, at);
+    xor(directory.subarray(at, at + BINARY_COMPUTE_STEP_BYTES), inner, at);
   }
   /** 成员读取复用已解密前缀，避免重叠区域重复解密。 */
   const read = async (offset: number, size: number): Promise<Buffer> => {
@@ -595,7 +618,7 @@ export async function open_wolf_archive_crypt(
     return content;
   };
   return {
-    version,
+    version: marker,
     data_offset,
     directory_offset,
     file_table,

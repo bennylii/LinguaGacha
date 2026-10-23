@@ -394,13 +394,16 @@ Portal 浮层遵循固定语义栈：Dialog 与 Sheet 使用 `--ui-layer-overlay
 
 ### Shortcuts
 
-- 操作只在快捷键有效时显示键帽并声明 `aria-keyshortcuts`；组合键以整组键帽展示。菜单和 Tooltip 的键帽靠右排列，多行提示统一对齐。
+- 键位提示在临时禁用、倒计时及提交期间保持稳定，避免布局跳动并保留学习线索。键帽与 `aria-keyshortcuts` 随动作绑定更新。按钮内键帽随按钮整体弱化。组合键整组展示，菜单与 Tooltip 的键帽靠右并按行对齐。
+- **Dialogs:** 含多行输入的弹窗用 `Ctrl+S` / `⌘S` 提交主操作，其它弹窗用回车提交。回车落在按钮、链接或多行输入上时保持原生行为。可关闭的弹窗统一用 `Esc` 关闭。
 
 ### Dialogs
 
 - **Confirmation:** 正文使用“是否确认……”时固定显示“取消 / 确认”，确认按钮使用主题色，不按操作对象改写文案或颜色。
 - **Decision:** 只有存在多个真实处理路径时才使用动作模态窗；标题默认沿用“确认”，只有确有独立标题时才显式提供。所有可关闭的动作模态窗固定显示“取消”，其它按钮直接命名操作结果，破坏性选项可以使用 failure 语义。
 - **Necessity:** 不能提供恢复、替代或其它有效选择的风险提示不得阻断用户，交由当前工作流直接处理并使用既有错误反馈。
+- **Countdown:** 确认倒计时只用于会批量清空译文的重置操作。
+- **List Selection:** 列表选择弹窗中，点击条目只更新临时选择。底栏使用“取消 / 确认”，保存成功后才关闭，失败时保留当前选择。
 
 ### Chips
 
@@ -417,11 +420,11 @@ Portal 浮层遵循固定语义栈：Dialog 与 Sheet 使用 `--ui-layer-overlay
 
 ### Cards / Containers
 
-- **Corner Style:** default、panel、table 和 toolbar 共用 4px 小圆角。
-- **Background:** 各变体由全局 card surface token 混合卡片与背景色，暗色主题保持同一层级顺序。
-- **Shadow Strategy:** 使用 Elevation & Depth 中的低阴影；只有可交互卡片获得 hover、active 与 focus-visible 反馈。
+- **Corner Style:** `default`、`panel`、`table`、`toolbar` 和 `group` 共用 4px 小圆角。
+- **Background:** 独立内容面与嵌入分组使用各自的全局 surface token，暗色主题沿用相同职责。
+- **Shadow Strategy:** 独立内容面使用 Elevation & Depth 中的低阴影，`group` 使用 `--border` 描边且无阴影；只有可交互卡片获得 hover、active 与 focus-visible 反馈。
 - **Border:** 1px 伪元素描边；hover 仅把边框少量混入主色。
-- **Internal Padding:** default 为 16px，panel 为 24px，table 和 toolbar 把 padding 让给内部结构。
+- **Internal Padding:** `default` 与 `group` 的内容插槽为 16px，`panel` 为 24px，`table` 和 `toolbar` 把 padding 让给内部结构。直接传入子内容时由消费方设置布局与间距。
 
 ### Inputs / Fields
 

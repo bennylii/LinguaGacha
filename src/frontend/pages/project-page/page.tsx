@@ -1,3 +1,6 @@
+import { GODOT_PACK_ORDER_REFRESH_ACTION } from "@shared/godot";
+import { useGodotPackOrder } from "@frontend/features/godot-pack-order/use-godot-pack-order";
+import { GodotPackOrderDialog } from "@frontend/features/godot-pack-order/godot-pack-order-dialog";
 import {
   push_error_toast,
   push_toast,
@@ -54,11 +57,15 @@ import type { ProjectStage } from "@frontend/app/state/desktop-project-change-ty
 import {
   format_project_settings_aligned_toast,
   type ProjectSettingsAlignmentChangedFields,
+  type ProjectSettingsAlignmentSettings,
 } from "@frontend/app/feedback/project-settings-alignment-feedback";
+import { open_project_in_current_window } from "@frontend/app/project/open-project";
+import type { ProjectLanguageKey } from "@domain/project-settings";
+import { ProjectLanguageDialog } from "@frontend/pages/project-page/components/project-language-dialog";
 import {
-  build_project_prefilter_settings,
-  open_project_in_current_window,
-} from "@frontend/app/project/open-project";
+  read_project_language_preference,
+  save_project_language_preference,
+} from "@frontend/pages/project-page/project-language-preference";
 import { AppConfirmDialog } from "@frontend/widgets/app-alert-dialog";
 import { open_context_menu_at_click_position } from "@frontend/widgets/app-menu";
 import type { PathDropIssue } from "@frontend/widgets/file-drop-zone/use-path-drop";
@@ -123,6 +130,18 @@ type ProjectCreateCommitPayload = {
   };
   failed_files?: unknown;
 };
+
+/**
+ * 打开工程响应；后端在打开事务内对齐应用级预过滤开关时附带摘要。
+ */
+type ProjectOpenPayload = {
+  settings_alignment?: {
+    settings?: ProjectSettingsAlignmentSettings;
+    changed?: ProjectSettingsAlignmentChangedFields;
+  };
+};
+
+type ProjectLanguageDraft = Record<ProjectLanguageKey, string>;
 
 /**
  * 默认预设设置字段白名单，控制新建成功后的提示内容。
@@ -498,6 +517,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
 
   const { t } = useI18n();
   const [source_mode, set_source_mode] = useState<ProjectSourceMode>("files");
+  const pack_order = useGodotPackOrder();
   const [selected_source, set_selected_source] = useState<SelectedSource | null>(null);
   const [selected_project, set_selected_project] = useState<SelectedProject | null>(null);
   const [novel_url, set_novel_url] = useState("");
@@ -507,6 +527,11 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
   const [is_preview_loading, set_is_preview_loading] = useState(false);
   const [is_creating_project, set_is_creating_project] = useState(false);
   const [is_opening_project, set_is_opening_project] = useState(false);
+  const [is_language_dialog_open, set_is_language_dialog_open] = useState(false);
+  // 新建语言草稿由项目页持有，取消或创建失败后保留本次选择。
+  const [create_languages, set_create_languages] = useState<ProjectLanguageDraft>(
+    read_project_language_preference,
+  );
   const [missing_recent_project, set_missing_recent_project] =
     useState<MissingRecentProjectState>(null);
   const project_loading_toast_id_ref = useRef<string | number | null>(null);
@@ -676,6 +701,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       } else {
         set_selected_source({
           source_paths: normalized_source_paths,
+          godot_packs: payload.godot_packs ?? [],
           source_file_count,
           format_hit_counts: normalize_project_source_format_hit_counts(payload.format_hit_counts),
         });
@@ -777,9 +803,33 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
   }
 
   /**
+   * 点击创建先选择项目语言，确认后才进入保存路径与创建流程。
+   */
+  function open_language_dialog(): void {
+    if (source_selection_disabled) {
+      return;
+    }
+    const source_ready =
+      source_mode === "files" ? selected_source !== null : novel_preview !== null;
+    if (!source_ready) {
+      return;
+    }
+
+    set_is_language_dialog_open(true);
+  }
+
+  /** 确认即保存偏好，再使用同一份语言快照创建工程。 */
+  function confirm_language_dialog(): void {
+    const languages = { ...create_languages }; // 路径选择期间固定本次提交值。
+    save_project_language_preference(languages);
+    set_is_language_dialog_open(false);
+    void handle_create_project(languages);
+  }
+
+  /**
    * 提交新建工程请求，成功后刷新会话、任务和最近工程。
    */
-  async function handle_create_project(): Promise<void> {
+  async function handle_create_project(languages: ProjectLanguageDraft): Promise<void> {
     const source_ready =
       source_mode === "files" ? selected_source !== null : novel_preview !== null;
     if (!source_ready || source_selection_disabled) {
@@ -790,7 +840,11 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
 
     try {
       const loaded_default_preset_names = collect_loaded_default_preset_names(settings_snapshot, t);
-      const source_paths = source_mode === "files" ? (selected_source?.source_paths ?? []) : [];
+      // Godot 多包优先级先于路径选择请求；小说来源没有本地资产包。
+      const godot_pack_orders =
+        source_mode === "files" ? await pack_order.request_order(selected_source!.godot_packs) : [];
+      if (godot_pack_orders === null) return;
+      const source_paths = source_mode === "files" ? selected_source!.source_paths : [];
       const output_path =
         source_mode === "files"
           ? await resolve_project_output_path(source_paths[0]!)
@@ -805,13 +859,14 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
         source_mode === "files"
           ? {
               source_paths,
+              ...(godot_pack_orders.length ? { godot_pack_orders } : {}),
               path: normalized_output_path,
-              project_settings: build_project_prefilter_settings(settings_snapshot),
+              languages,
             }
           : {
               remote_novel_url: novel_url.trim(),
               path: normalized_output_path,
-              project_settings: build_project_prefilter_settings(settings_snapshot),
+              languages,
             };
       await run_project_loading_modal({
         initial_message: t("project_page.create.loading_toast"),
@@ -852,6 +907,13 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       set_novel_url("");
       set_novel_preview(null);
     } catch (error) {
+      if (
+        error instanceof DesktopApiError &&
+        error.details.action === GODOT_PACK_ORDER_REFRESH_ACTION &&
+        selected_source !== null
+      ) {
+        await handle_select_source_paths(selected_source.source_paths);
+      }
       const parse_failure_toast = format_source_file_parse_failure_error_toast(error);
       if (parse_failure_toast !== null) {
         push_error_toast(t("app.feedback.create_failed"), parse_failure_toast);
@@ -865,7 +927,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
   }
 
   /**
-   * 打开既有工程前先执行设置对齐预演，再加载后端会话。
+   * 打开既有工程；后端在同一打开事务内对齐应用级预过滤开关。
    */
   async function handle_open_project(): Promise<void> {
     if (selected_project === null || selected_project.preview === null || is_opening_project) {
@@ -876,18 +938,14 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
 
     try {
       const project_to_open = selected_project;
-      let did_align_project_settings = false;
-      let aligned_changed_fields: ProjectSettingsAlignmentChangedFields = {};
+      let settings_alignment: ProjectOpenPayload["settings_alignment"];
 
       await run_project_loading_modal({
         initial_message: t("project_page.open.loading_toast"),
         task: async () => {
-          const alignment = await open_project_in_current_window({
+          settings_alignment = await open_project_in_current_window({
             path: project_to_open.path,
-            settings: settings_snapshot,
           });
-          did_align_project_settings = alignment.aligned;
-          aligned_changed_fields = alignment.changed_fields;
           set_project_session_status("warming");
           await refresh_project_snapshot();
           await api_fetch<SettingsPayload>("/api/settings/recent-projects/add", {
@@ -897,12 +955,12 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
           await Promise.all([refresh_settings(), refresh_batch_translation()]);
         },
       });
-      if (did_align_project_settings) {
+      if (settings_alignment !== undefined) {
         push_toast(
           "info",
           format_project_settings_aligned_toast({
-            settings: build_project_prefilter_settings(settings_snapshot),
-            changed_fields: aligned_changed_fields,
+            settings: settings_alignment.settings ?? {},
+            changed_fields: settings_alignment.changed ?? {},
             t,
           }),
         );
@@ -1113,6 +1171,19 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
 
   return (
     <>
+      <GodotPackOrderDialog {...pack_order.dialog_props} />
+      <ProjectLanguageDialog
+        open={is_language_dialog_open}
+        languages={create_languages}
+        on_change={(field, next_value) => {
+          set_create_languages((previous) => ({ ...previous, [field]: next_value }));
+        }}
+        on_confirm={confirm_language_dialog}
+        on_close={() => {
+          set_is_language_dialog_open(false);
+        }}
+      />
+
       <AppConfirmDialog
         open={missing_recent_project !== null}
         description={missing_recent_project_description}
@@ -1170,9 +1241,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
                   (source_mode === "files" ? selected_source === null : novel_preview === null) ||
                   source_selection_disabled
                 }
-                on_click={() => {
-                  void handle_create_project();
-                }}
+                on_click={open_language_dialog}
               />
             </CardFooter>
           </Card>
