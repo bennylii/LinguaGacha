@@ -23,6 +23,7 @@ interface Fixture {
   service: RemoteWorkspaceSubmissionService;
   database: ProjectDatabase;
   write_chapter_translation: ReturnType<typeof vi.fn>;
+  read_chapter_task: ReturnType<typeof vi.fn>;
   request_llm: ReturnType<typeof vi.fn>;
 }
 
@@ -34,6 +35,7 @@ async function create_fixture(options: {
   settings?: JsonRecord;
   translation_error?: Error;
   pending_task?: boolean;
+  novel_url?: string;
 }): Promise<Fixture> {
   const database = new ProjectDatabase();
   const lg_path = path.join(temp_dir, "demo.lg");
@@ -41,7 +43,7 @@ async function create_fixture(options: {
   const session_state = new ProjectSessionState();
   await session_state.mark_loaded(lg_path);
   const binding = build_remote_source_binding({
-    ref: parse_novel_url(NOVEL_URL),
+    ref: parse_novel_url(options.novel_url ?? NOVEL_URL),
     title: "テスト小説",
     asset_path: ASSET_PATH,
     remote_hash: sha256_text(ASSET_TEXT),
@@ -116,6 +118,7 @@ async function create_fixture(options: {
     service,
     database,
     write_chapter_translation: client.write_chapter_translation,
+    read_chapter_task: client.read_chapter_task,
     request_llm,
   };
 }
@@ -294,6 +297,51 @@ describe("RemoteWorkspaceSubmissionService", () => {
         "failed",
       ]);
       expect(snapshot.chapters[5]?.state).toBe("pending");
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("文库形态提交：缺失标记按缺失补译且章节任务不带 sync", async () => {
+    const fixture = await create_fixture({
+      novel_url: "https://n.novelia.cc/wenku/12345",
+      workspace: {
+        ...workspace(1),
+        chapters: [
+          { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一章", translated: false },
+        ],
+      },
+      tasks: [task({ old_paragraph_zh: ["站点一", "gpt翻译缺失。"] })],
+      items: [
+        { src: "本文一", dst: "工程一", status: "PROCESSED" },
+        { src: "本文二", dst: "", status: "NONE" },
+      ],
+      settings: {
+        models: [{ id: "model-1", model_id: "test-model" }],
+        model_selection: { translation: "model-1" },
+      },
+    });
+    try {
+      await fixture.service.start({ mode: "missing" });
+      await wait_for_status(fixture.service, "completed");
+
+      // 文库章节来自已上传分卷，读取任务不带 sync 参数（网页为 true）。
+      expect(fixture.read_chapter_task).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        { sync: false },
+        expect.any(AbortSignal),
+      );
+      expect(fixture.write_chapter_translation).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        { glossary_id: "glossary-1", paragraphs_zh: ["站点一", "模型二"] },
+        expect.any(AbortSignal),
+      );
+      expect(fixture.service.get_snapshot()).toMatchObject({
+        status: "completed",
+        totals: { uploaded: 1, existing: 1, translated: 1 },
+      });
     } finally {
       await fixture.database.close();
     }

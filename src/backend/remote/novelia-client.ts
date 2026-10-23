@@ -3,6 +3,7 @@ import {
   NOVELIA_HOSTS,
   REMOTE_NOVEL_MAX_BYTES,
   build_novel_filename,
+  is_missing_remote_translation,
   read_remote_translations,
   sha256_text,
   split_remote_document,
@@ -364,8 +365,14 @@ export class NoveliaClient {
         for (const [index, paragraph] of task.paragraph_jp.entries()) {
           const dst = task.old_paragraph_zh?.[index];
           const row = push_line(paragraph);
-          // 文库章节任务已同时返回原文与旧译，行号按本机拼装顺序记录。
-          if (include_translations && dst !== undefined && dst.trim() !== "") {
+          // 文库章节任务已同时返回原文与旧译，行号按本机拼装顺序记录；
+          // 站点对没有译文的段落返回固定标记，不能当作译文写入工程。
+          if (
+            include_translations &&
+            dst !== undefined &&
+            dst.trim() !== "" &&
+            !is_missing_remote_translation(dst)
+          ) {
             translations.set(row, dst);
           }
         }

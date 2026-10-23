@@ -373,7 +373,8 @@ function read_translated_heading(lines: readonly string[], heading_index: number
   return next;
 }
 
-function is_missing_remote_translation(text: string): boolean {
+/** 站点对缺失译文写出固定标记；带标记的内容不能当作译文使用。 */
+export function is_missing_remote_translation(text: string): boolean {
   return REMOTE_MISSING_TRANSLATION_MARKERS.some((marker) => text.includes(marker));
 }
 

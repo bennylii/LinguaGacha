@@ -395,15 +395,15 @@ describe("NoveliaClient 文库", () => {
     expect(requests).toHaveLength(4);
   });
 
-  it("文库章节任务同时还原旧译行号", async () => {
+  it("文库章节任务同时还原旧译行号并过滤缺失标记", async () => {
     const { client } = create_client((url) => {
       if (url.pathname === "/api/wenku/abc") return json(METADATA);
       if (url.pathname.endsWith("/translate-v2/gpt/v1.txt")) return json(VOLUME_TOC);
       if (url.pathname.endsWith("/chapter-task/001.txt")) {
-        return json({ paragraphJp: ["甲", "", "乙"], oldParagraphZh: ["A", "", "B"] });
+        return json({ paragraphJp: ["甲", "", "乙"], oldParagraphZh: ["A", "gpt翻译缺失。", "B"] });
       }
       if (url.pathname.endsWith("/chapter-task/002.txt")) {
-        return json({ paragraphJp: ["丙"], oldParagraphZh: null });
+        return json({ paragraphJp: ["丙"], oldParagraphZh: ["该章节缺失。"] });
       }
       return json({}, 404);
     }, "token");
@@ -416,6 +416,48 @@ describe("NoveliaClient 文库", () => {
         [11, "B"],
       ]),
     );
+  });
+
+  it("文库章节任务走 GET 卷任务路径且缺失 volume 时拒绝", async () => {
+    const { client, requests } = create_client(() => json({ paragraphJp: ["甲"] }), "token");
+    const task = await client.read_chapter_task(
+      WENKU_REF,
+      { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一卷 001.txt", translated: false },
+      { sync: true },
+    );
+
+    expect(task).toMatchObject({ paragraph_jp: ["甲"] });
+    expect(requests[0]?.init.method).toBe("GET"); // 站点契约：文库章节任务是 GET
+    expect(new URL(requests[0]?.url ?? "").pathname).toBe(
+      "/api/wenku/abc/translate-v2/gpt/v1.txt/chapter-task/001.txt",
+    );
+    expect(new URL(requests[0]?.url ?? "").searchParams.size).toBe(0);
+
+    await expect(
+      client.read_chapter_task(
+        WENKU_REF,
+        { chapter_id: "001.txt", volume_id: null, title: "第一卷 001.txt", translated: false },
+        { sync: true },
+      ),
+    ).rejects.toMatchObject({ code: "remote.fetch_failed" });
+  });
+
+  it("文库上传把 chapter-task 路径替换为 chapter", async () => {
+    const { client, requests } = create_client(() => json({ jp: 1, zh: 1 }), "token");
+    await client.write_chapter_translation(
+      WENKU_REF,
+      { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一卷 001.txt", translated: false },
+      { glossary_id: "g1", paragraphs_zh: ["A"] },
+    );
+
+    expect(new URL(requests[0]?.url ?? "").pathname).toBe(
+      "/api/wenku/abc/translate-v2/gpt/v1.txt/chapter/001.txt",
+    );
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      glossaryId: "g1",
+      paragraphsZh: ["A"],
+      sakuraVersion: "0.9",
+    });
   });
 
   it("工作区读取目录时不下载章节正文", async () => {

@@ -11,6 +11,7 @@ import type { RuntimeOperationGate, RuntimeLease } from "../runtime-operation-ga
 import type { ProjectSessionState } from "../project/project-session-state";
 import type { NoveliaClient, RemoteWorkspaceChapter } from "./novelia-client";
 import {
+  is_missing_remote_translation,
   normalize_match_line,
   parse_novel_url,
   split_remote_document,
@@ -292,7 +293,8 @@ export class RemoteWorkspaceSubmissionService {
     for (let index = 0; index < paragraphs.length; index += 1) {
       if (args.mode === "missing") {
         const from_site = site_old?.[index]?.trim() ?? "";
-        if (from_site !== "") {
+        // 站点旧译可能是“gpt翻译缺失。”这类缺失标记，按缺失处理并交给模型补译。
+        if (from_site !== "" && !is_missing_remote_translation(from_site)) {
           resolved[index] = from_site;
           existing += 1;
           continue;
