@@ -77,6 +77,7 @@ type RemoteSyncPreview = {
     modified: number;
     removed: number;
     inherited: number;
+    remote_inherited: number;
     would_lose: number;
     diverged: boolean;
     requires_alignment: boolean;
@@ -94,6 +95,7 @@ type RemoteAlignRow = {
   old_src: string | null;
   old_dst: string | null;
   old_status: string | null;
+  remote_dst: string | null;
 };
 
 type RemoteAlignPreview = {
@@ -133,6 +135,14 @@ type SyncMode = "add_only" | "auto" | "manual";
 type WorkspaceMode = "missing" | "all";
 
 type RowOverride = { action: "keep" | "retranslate"; src_hash: string };
+
+// 后端不会为人工排除或预过滤跳过的行套用站点译文，界面保持同一口径。
+const REMOTE_TRANSLATION_BLOCKED_STATUSES = new Set([
+  "EXCLUDED",
+  "RULE_SKIPPED",
+  "LANGUAGE_SKIPPED",
+  "DUPLICATED",
+]);
 
 /**
  * 远程小说页：站点凭据、工程绑定与同步、工作区提交集中在一个入口。
@@ -535,6 +545,7 @@ export function RemotePage(): JSX.Element {
                     ["modified", preview.stats.modified],
                     ["removed", preview.stats.removed],
                     ["inherited", preview.stats.inherited],
+                    ["remote_inherited", preview.stats.remote_inherited],
                     ["would_lose", preview.stats.would_lose],
                   ] as const
                 ).map(([key, value]) => (
@@ -613,6 +624,20 @@ export function RemotePage(): JSX.Element {
                     {align.rows.map((row) => {
                       const override = overrides.get(row.row);
                       const decision = override?.action ?? row.decision;
+                      const has_old_dst = row.old_dst !== null;
+                      const remote_dst_allowed =
+                        (row.old_dst === null || row.old_dst === "") &&
+                        !(
+                          row.old_status !== null &&
+                          REMOTE_TRANSLATION_BLOCKED_STATUSES.has(row.old_status)
+                        );
+                      const candidate_remote_dst = remote_dst_allowed ? row.remote_dst : null;
+                      const remote_dst =
+                        typeof candidate_remote_dst === "string" && candidate_remote_dst !== ""
+                          ? candidate_remote_dst
+                          : null;
+                      const has_remote_dst = remote_dst !== null;
+                      const uses_remote = override === undefined && has_remote_dst;
                       return (
                         <li key={row.row} className="remote-page__row-item">
                           <div className="remote-page__row-text">
@@ -623,27 +648,39 @@ export function RemotePage(): JSX.Element {
                             {row.old_dst === null || row.old_dst === "" ? null : (
                               <p className="remote-page__row-dst">{row.old_dst}</p>
                             )}
+                            {has_remote_dst ? (
+                              <p className="remote-page__row-dst">
+                                <span className="remote-page__row-label">
+                                  {t("remote_page.source.remote_dst")}
+                                </span>
+                                {remote_dst}
+                              </p>
+                            ) : null}
                           </div>
-                          {row.old_dst === null ? null : (
+                          {has_old_dst || has_remote_dst ? (
                             <div className="remote-page__row-actions">
+                              {has_old_dst ? (
+                                <AppButton
+                                  type="button"
+                                  size="xs"
+                                  variant={decision === "keep" ? "default" : "outline"}
+                                  onClick={() => set_row_decision(row, "keep")}
+                                >
+                                  {t("remote_page.source.keep")}
+                                </AppButton>
+                              ) : null}
                               <AppButton
                                 type="button"
                                 size="xs"
-                                variant={decision === "keep" ? "default" : "outline"}
-                                onClick={() => set_row_decision(row, "keep")}
-                              >
-                                {t("remote_page.source.keep")}
-                              </AppButton>
-                              <AppButton
-                                type="button"
-                                size="xs"
-                                variant={decision === "retranslate" ? "default" : "outline"}
+                                variant={
+                                  decision === "retranslate" && !uses_remote ? "default" : "outline"
+                                }
                                 onClick={() => set_row_decision(row, "retranslate")}
                               >
                                 {t("remote_page.source.retranslate")}
                               </AppButton>
                             </div>
-                          )}
+                          ) : null}
                         </li>
                       );
                     })}

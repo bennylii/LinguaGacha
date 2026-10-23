@@ -2176,6 +2176,7 @@ describe("ProjectContentService", () => {
           chapter_index: 0,
           decision: "preserve",
           old_item: old_item(0),
+          remote_dst: null,
           similarity: 1,
           review: false,
         },
@@ -2186,6 +2187,7 @@ describe("ProjectContentService", () => {
           chapter_index: 0,
           decision: "retranslate",
           old_item: old_item(1),
+          remote_dst: null,
           similarity: 0.4,
           review: true,
         },
@@ -2196,6 +2198,7 @@ describe("ProjectContentService", () => {
           chapter_index: 0,
           decision: "keep",
           old_item: old_item(2),
+          remote_dst: null,
           similarity: 0.9,
           review: true,
         },
@@ -2206,6 +2209,7 @@ describe("ProjectContentService", () => {
           chapter_index: 0,
           decision: "retranslate",
           old_item: null,
+          remote_dst: null,
           similarity: 0,
           review: false,
         },
@@ -2247,6 +2251,167 @@ describe("ProjectContentService", () => {
         title: "测试小说",
         asset_path: "remote-novel.txt",
       });
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("同步时站点译文补齐空行，工程已有译文与人工重译优先", async () => {
+    const { database, service, lg_path } = await create_service();
+    const source = project_path("remote-novel.txt");
+    fs.writeFileSync(source, "第一行\n第二行\n第三行\n第四行\n第五行\n第六行");
+    const revisions = async (): Promise<ProjectDataSectionRevisions> =>
+      (
+        await database.read(lg_path, (access) =>
+          new ProjectDataReader(access).build_manifest({ loaded: true, projectPath: lg_path }),
+        )
+      ).sectionRevisions as unknown as ProjectDataSectionRevisions;
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      provider_id: "kakuyomu",
+      novel_id: "123456",
+      url: "https://n.novelia.cc/novel/kakuyomu/123456",
+      title: "测试小说",
+      asset_path: "remote-novel.txt",
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+
+    try {
+      const preview = await service.preview_import_files({ source_paths: [source] });
+      await service.import_files({
+        files: preview.files!,
+        conflict_action: "replace",
+        expected_section_revisions: await revisions(),
+      });
+      const old_items = await database.get_all_items(lg_path);
+      await database.transaction(lg_path, (writer) =>
+        writer.set_items(
+          lg_path,
+          old_items.map((item, index) => ({
+            ...item,
+            dst: index === 0 ? "工程一" : index === 2 ? "工程三" : "",
+            status: index === 5 ? ("EXCLUDED" as const) : ("PROCESSED" as const),
+          })),
+        ),
+      );
+      const translated_items = (await database.get_all_items(lg_path)).map((item) => ({
+        id: Number(item["id"]),
+        row: Number(item["row"]),
+        src: String(item["src"] ?? ""),
+        dst: String(item["dst"] ?? ""),
+        name_dst: (item["name_dst"] ?? null) as ItemNameField,
+        status: String(item["status"] ?? "NONE") as ItemStatus,
+        extra_field: (item["extra_field"] ?? "") as JsonValue,
+      }));
+      const old_item = (index: number): RemoteOldItem => {
+        const item = translated_items.find((candidate) => candidate.row === index)!;
+        return {
+          item_id: item.id,
+          row: item.row,
+          src: item.src,
+          dst: item.dst,
+          name_dst: item.name_dst,
+          status: item.status,
+          extra_field: item.extra_field,
+        };
+      };
+      const rows: RemoteRowPlan[] = [
+        {
+          row: 0,
+          src: "第一行",
+          src_hash: "hash-0",
+          chapter_index: 0,
+          decision: "preserve",
+          old_item: old_item(0),
+          remote_dst: "站点一",
+          similarity: 1,
+          review: false,
+        },
+        {
+          row: 1,
+          src: "第二行",
+          src_hash: "hash-1",
+          chapter_index: 0,
+          decision: "preserve",
+          old_item: old_item(1),
+          remote_dst: "站点二",
+          similarity: 1,
+          review: false,
+        },
+        {
+          row: 2,
+          src: "第三行",
+          src_hash: "hash-2",
+          chapter_index: 0,
+          decision: "retranslate",
+          old_item: old_item(2),
+          remote_dst: "站点三",
+          similarity: 0.4,
+          review: true,
+        },
+        {
+          row: 3,
+          src: "第四行",
+          src_hash: "hash-3",
+          chapter_index: 0,
+          decision: "retranslate",
+          old_item: null,
+          remote_dst: "站点四",
+          similarity: 0,
+          review: false,
+        },
+        {
+          row: 4,
+          src: "第五行",
+          src_hash: "hash-4",
+          chapter_index: 0,
+          decision: "retranslate",
+          old_item: null,
+          remote_dst: null,
+          similarity: 0,
+          review: false,
+        },
+        {
+          row: 5,
+          src: "第六行",
+          src_hash: "hash-5",
+          chapter_index: 0,
+          decision: "preserve",
+          old_item: old_item(5),
+          remote_dst: "站点六",
+          similarity: 1,
+          review: false,
+        },
+      ];
+
+      await service.replace_remote_asset({
+        assetPath: "remote-novel.txt",
+        content: "第一行\n第二行\n第三行\n第四行\n第五行\n第六行",
+        binding,
+        rows,
+        overrides: new Map([[2, { action: "retranslate" }]]),
+        expectedSectionRevisions: await revisions(),
+      });
+
+      const saved_items = (await database.get_all_items(lg_path))
+        .map((item) => ({
+          row: Number(item["row"]),
+          dst: item["dst"],
+          status: item["status"],
+        }))
+        .sort((left, right) => left.row - right.row);
+      expect(saved_items).toEqual([
+        { row: 0, dst: "工程一", status: "PROCESSED" },
+        { row: 1, dst: "站点二", status: "PROCESSED" },
+        { row: 2, dst: "", status: "NONE" },
+        { row: 3, dst: "站点四", status: "PROCESSED" },
+        { row: 4, dst: "", status: "NONE" },
+        { row: 5, dst: "", status: "EXCLUDED" },
+      ]);
     } finally {
       await database.close();
     }

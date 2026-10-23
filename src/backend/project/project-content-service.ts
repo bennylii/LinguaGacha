@@ -408,6 +408,21 @@ export class ProjectContentService {
         const previous =
           row.old_item === null ? undefined : snapshot.public_items_by_id.get(row.old_item.item_id);
         const can_reuse = previous !== undefined && decision !== "retranslate";
+        const previous_dst = previous?.dst ?? "";
+        const keeps_previous_dst = can_reuse && previous_dst !== "";
+        // 人工排除与预过滤跳过的条目保持原状态，不因站点有译文而恢复翻译。
+        const protected_previous =
+          previous !== undefined &&
+          (previous.status === "EXCLUDED" ||
+            previous.status === "RULE_SKIPPED" ||
+            previous.status === "LANGUAGE_SKIPPED" ||
+            previous.status === "DUPLICATED");
+        const remote_dst = row.remote_dst ?? "";
+        const use_remote =
+          override === undefined &&
+          remote_dst.trim() !== "" &&
+          !keeps_previous_dst &&
+          !protected_previous;
         let item_id: number;
         if (can_reuse && !used_item_ids.has(previous.item_id)) {
           item_id = previous.item_id;
@@ -417,7 +432,8 @@ export class ProjectContentService {
           item_id = next_item_id;
         }
         used_item_ids.add(item_id);
-        const dst = override?.dst ?? (can_reuse ? previous.dst : "");
+        const dst =
+          override?.dst ?? (keeps_previous_dst ? previous_dst : use_remote ? remote_dst : "");
         next_items.set(item_id, {
           item_id,
           row_number: row.row,
@@ -434,9 +450,11 @@ export class ProjectContentService {
               ? dst === ""
                 ? "NONE"
                 : "PROCESSED"
-              : can_reuse
-                ? previous.status
-                : "NONE",
+              : use_remote
+                ? "PROCESSED"
+                : can_reuse
+                  ? previous.status
+                  : "NONE",
           skip_internal_filter: can_reuse ? previous.skip_internal_filter : false,
         });
       }

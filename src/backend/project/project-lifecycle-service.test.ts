@@ -27,6 +27,8 @@ import {
   DEFAULT_PROJECT_LANGUAGE_SETTINGS,
   type ProjectLanguageSettings,
 } from "../../domain/project-settings";
+import type { RemoteNovelImportPort } from "../remote/novel-source-service";
+import type { RemoteSourceBinding } from "../remote/remote-source";
 
 type TestProjectDatabase = ProjectDatabase & {
   upsert_meta_entries: ReturnType<typeof vi.fn>;
@@ -83,6 +85,85 @@ describe("ProjectLifecycleService", () => {
       });
       expect(fs.readFileSync(path.join(game, "main.gd"), "utf8")).toBe("two");
       expect(await database.get_all_asset_records(project)).toHaveLength(1);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("小说地址新建在简体中文目标下沿用站点译文，其他目标语言只导入源文", async () => {
+    const root = create_temp_dir();
+    const source = write_file(path.join(root, "remote.txt"), "# 第一章\nこんにちは\nさようなら");
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      provider_id: "kakuyomu",
+      novel_id: "123456",
+      url: "https://n.novelia.cc/novel/kakuyomu/123456",
+      title: "测试小说",
+      asset_path: "remote.txt",
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+    const prepare_import = vi.fn(async () => ({
+      source_path: source,
+      binding,
+      content_hash: "hash",
+      text: "# 第一章\nこんにちは\nさようなら",
+      translations: new Map([
+        [1, "你好"],
+        [2, "再见"],
+      ]),
+      commit_snapshot: async () => {},
+      dispose: async () => {},
+    }));
+    const database = new ProjectDatabase();
+    const service = create_service({ database, remote_import: { prepare_import } });
+    try {
+      const zh_project = path.join(root, "zh.lg");
+      await service.create_project_commit({
+        path: zh_project,
+        remote_novel_url: binding.url,
+        languages: { source_language: "JA", target_language: "ZH" },
+      });
+      expect(prepare_import).toHaveBeenLastCalledWith(binding.url, expect.anything(), {
+        translations: true,
+      });
+      const zh_items = (await database.get_all_items(zh_project))
+        .map((item) => ({
+          row: Number(item["row"]),
+          dst: item["dst"],
+          status: item["status"],
+        }))
+        .sort((left, right) => left.row - right.row);
+      expect(zh_items).toEqual([
+        { row: 0, dst: "", status: "NONE" },
+        { row: 1, dst: "你好", status: "PROCESSED" },
+        { row: 2, dst: "再见", status: "PROCESSED" },
+      ]);
+
+      const en_project = path.join(root, "en.lg");
+      await service.create_project_commit({
+        path: en_project,
+        remote_novel_url: binding.url,
+        languages: { source_language: "JA", target_language: "EN" },
+      });
+      expect(prepare_import).toHaveBeenLastCalledWith(binding.url, expect.anything(), {
+        translations: false,
+      });
+      const en_items = (await database.get_all_items(en_project))
+        .map((item) => ({
+          row: Number(item["row"]),
+          dst: item["dst"],
+          status: item["status"],
+        }))
+        .sort((left, right) => left.row - right.row);
+      expect(en_items).toEqual([
+        { row: 0, dst: "", status: "NONE" },
+        { row: 1, dst: "", status: "NONE" },
+        { row: 2, dst: "", status: "NONE" },
+      ]);
     } finally {
       await database.close();
     }
@@ -1030,6 +1111,7 @@ describe("ProjectLifecycleService", () => {
     };
     project_event_handler?: CacheLifecycleHandler;
     task_busy?: boolean;
+    remote_import?: RemoteNovelImportPort;
   }): ProjectLifecycleService {
     const app_root = options.app_root ?? create_temp_dir();
     const project_event_handler = options.project_event_handler ?? vi.fn();
@@ -1054,6 +1136,9 @@ describe("ProjectLifecycleService", () => {
       },
       new ProjectWriteStore(options.database, () => undefined, null),
       create_pdf_execution(),
+      undefined,
+      undefined,
+      options.remote_import,
     );
   }
 

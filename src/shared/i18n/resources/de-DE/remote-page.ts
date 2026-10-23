@@ -38,7 +38,7 @@ export const de_de_remote_page = {
   source: {
     title: "Romanquelle",
     description:
-      "Eine vollständige Synchronisierung lädt den Websitetext neu und behält passende Projektübersetzungen anhand des Inhalts.",
+      "Eine vollständige Synchronisierung lädt den Websitetext neu und behält passende Projektübersetzungen anhand des Inhalts; Zeilen ohne Projektübersetzung übernehmen die GPT-Übersetzung der Website.",
     unbound: "Dieses Projekt ist an keine Roman-URL gebunden. Wähle beim Erstellen „Roman-URL“.",
     novel: "Werk",
     url: "URL",
@@ -58,6 +58,7 @@ export const de_de_remote_page = {
       modified: "Geändert",
       removed: "Entfernt",
       inherited: "Übernommen",
+      remote_inherited: "Von Website",
       would_lose: "Gefährdete Übersetzungen",
     },
     alignment_required:
@@ -86,6 +87,7 @@ export const de_de_remote_page = {
     apply_failed: "Anwenden der Synchronisierung fehlgeschlagen …",
     keep: "Behalten",
     retranslate: "Neu übersetzen",
+    remote_dst: "Website-Übersetzung",
   },
   workspace: {
     title: "Übertragung in den Arbeitsbereich",

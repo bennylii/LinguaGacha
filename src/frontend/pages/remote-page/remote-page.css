@@ -219,6 +219,12 @@
   opacity: 0.8;
 }
 
+.remote-page__row-label {
+  margin-right: 6px;
+  color: var(--muted-foreground);
+  font-size: var(--ui-font-size-11);
+}
+
 .remote-page__row-actions {
   display: flex;
   flex-shrink: 0;

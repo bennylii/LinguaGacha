@@ -86,6 +86,76 @@ describe("NoveliaClient 网页小说", () => {
     expect(file_query.get("translationsMode")).toBe("parallel");
   });
 
+  it("按需下载站点双语导出并还原 GPT 译文", async () => {
+    const source_text = ["作品中文", "############", "# 一", "あ", "い", "# 二", "う"].join("\n");
+    const translated_text = [
+      "作品",
+      "作品中文",
+      "############",
+      "# 一",
+      "# 一中文",
+      "あ",
+      "甲",
+      "い",
+      "乙",
+      "# 二",
+      "# 二中文",
+      "う",
+      "丙",
+    ].join("\n");
+    const { client, requests } = create_client((url) => {
+      if (url.pathname.endsWith("/file")) {
+        const mode = url.searchParams.get("mode");
+        return new Response(null, {
+          status: 302,
+          headers: { location: `/files-temp/web/${mode}.txt?filename=x.txt` },
+        });
+      }
+      if (url.pathname === "/files-temp/web/jp.txt") return text(source_text);
+      if (url.pathname === "/files-temp/web/jp-zh.txt") return text(translated_text);
+      return json(WEB_METADATA);
+    });
+
+    const download = await client.download(WEB_REF, undefined, { translations: true });
+
+    expect(download.translations).toEqual(
+      new Map([
+        [2, "# 一中文"],
+        [3, "甲"],
+        [4, "乙"],
+        [5, "# 二中文"],
+        [6, "丙"],
+      ]),
+    );
+    const translated_query = new URL(
+      requests.find((request) => new URL(request.url).searchParams.get("mode") === "jp-zh")?.url ??
+        "",
+    ).searchParams;
+    expect(translated_query.get("translations")).toBe("gpt");
+    expect(translated_query.get("translationsMode")).toBe("priority");
+    expect(translated_query.get("type")).toBe("txt");
+  });
+
+  it("双语导出失败时仍按仅源文导入", async () => {
+    const { client } = create_client((url) => {
+      if (url.pathname.endsWith("/file")) {
+        const mode = url.searchParams.get("mode");
+        if (mode === "jp-zh") return new Response("failed", { status: 500 });
+        return new Response(null, {
+          status: 302,
+          headers: { location: "/files-temp/web/jp.txt?filename=x.txt" },
+        });
+      }
+      if (url.pathname === "/files-temp/web/jp.txt") return text(WEB_TEXT);
+      return json(WEB_METADATA);
+    });
+
+    const download = await client.download(WEB_REF, undefined, { translations: true });
+
+    expect(download.translations.size).toBe(0);
+    expect(download.text).toBe(WEB_TEXT);
+  });
+
   it("有 token 时携带 Bearer，没有 token 时匿名下载", async () => {
     const authorized = create_client(() => json(WEB_METADATA), "secret-token");
     await authorized.client.read_metadata(WEB_REF);
@@ -323,6 +393,29 @@ describe("NoveliaClient 文库", () => {
     expect(download.text).toContain("甲");
     expect(download.text).toContain("简介");
     expect(requests).toHaveLength(4);
+  });
+
+  it("文库章节任务同时还原旧译行号", async () => {
+    const { client } = create_client((url) => {
+      if (url.pathname === "/api/wenku/abc") return json(METADATA);
+      if (url.pathname.endsWith("/translate-v2/gpt/v1.txt")) return json(VOLUME_TOC);
+      if (url.pathname.endsWith("/chapter-task/001.txt")) {
+        return json({ paragraphJp: ["甲", "", "乙"], oldParagraphZh: ["A", "", "B"] });
+      }
+      if (url.pathname.endsWith("/chapter-task/002.txt")) {
+        return json({ paragraphJp: ["丙"], oldParagraphZh: null });
+      }
+      return json({}, 404);
+    }, "token");
+
+    const download = await client.download(WENKU_REF, undefined, { translations: true });
+
+    expect(download.translations).toEqual(
+      new Map([
+        [9, "A"],
+        [11, "B"],
+      ]),
+    );
   });
 
   it("工作区读取目录时不下载章节正文", async () => {

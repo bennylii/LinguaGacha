@@ -36,7 +36,7 @@ export const ko_kr_remote_page = {
   source: {
     title: "소설 원본",
     description:
-      "전체 동기화는 사이트 텍스트를 다시 내려받고 내용이 일치하는 프로젝트 번역을 유지합니다.",
+      "전체 동기화는 사이트 텍스트를 다시 내려받고 내용이 일치하는 프로젝트 번역을 유지합니다. 프로젝트 번역이 없는 줄은 사이트 GPT 번역을 이어서 사용합니다.",
     unbound:
       "이 프로젝트는 소설 주소에 연결되어 있지 않습니다. 만들 때 「소설 주소」를 선택하세요.",
     novel: "작품",
@@ -57,6 +57,7 @@ export const ko_kr_remote_page = {
       modified: "수정 줄",
       removed: "삭제 줄",
       inherited: "번역 유지",
+      remote_inherited: "사이트 번역",
       would_lose: "손실될 번역",
     },
     alignment_required:
@@ -84,6 +85,7 @@ export const ko_kr_remote_page = {
     apply_failed: "동기화 적용에 실패했습니다 …",
     keep: "기존 번역 유지",
     retranslate: "다시 번역",
+    remote_dst: "사이트 번역",
   },
   workspace: {
     title: "작업 영역 제출",

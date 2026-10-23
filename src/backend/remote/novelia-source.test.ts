@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { split_text_lines_for_items } from "../file/shared/file-format-helpers";
 import type { RemoteOldItem } from "./novelia-source";
 import {
   align_remote_documents,
@@ -8,6 +9,7 @@ import {
   line_similarity,
   normalize_match_line,
   parse_novel_url,
+  read_remote_translations,
   sha256_text,
   split_remote_document,
 } from "./novelia-source";
@@ -123,6 +125,62 @@ describe("split_remote_document", () => {
 
   it("空文本没有章节", () => {
     expect(split_remote_document("")).toMatchObject({ lines: [], chapters: [] });
+  });
+});
+
+describe("read_remote_translations", () => {
+  it("按双语导出的日文行还原每段译文与标题", () => {
+    const source = ["# C1", "a", "", "b", "# C2", "c"].join("\n");
+    const translated = ["# C1", "# 一", "a", "甲", "", "b", "乙", "# C2", "# 二", "c", "丙"].join(
+      "\n",
+    );
+
+    expect(read_remote_translations(source, translated)).toEqual(
+      new Map([
+        [0, "# 一"],
+        [1, "甲"],
+        [3, "乙"],
+        [4, "# 二"],
+        [5, "丙"],
+      ]),
+    );
+  });
+
+  it("缺失译文的章节整章跳过，其余章节仍沿用", () => {
+    const source = ["# C1", "a", "# C2", "b"].join("\n");
+    const translated = ["# C1", "# 一", "a", "gpt翻译缺失。", "# C2", "# 二", "b", "乙"].join("\n");
+
+    expect(read_remote_translations(source, translated)).toEqual(
+      new Map([
+        [2, "# 二"],
+        [3, "乙"],
+      ]),
+    );
+  });
+
+  it("整章缺失标记不写入任何译文", () => {
+    const source = ["# C1", "a"].join("\n");
+    const translated = ["# C1", "# 该章节缺失。"].join("\n");
+
+    expect(read_remote_translations(source, translated)).toEqual(new Map());
+  });
+
+  it("正文行不匹配时放弃整章，避免写错行", () => {
+    const source = ["# C1", "a", "b"].join("\n");
+    const translated = ["# C1", "# 一", "a", "甲", "x", "乙"].join("\n");
+
+    expect(read_remote_translations(source, translated)).toEqual(new Map());
+  });
+
+  it("标题译文与原文相同时不写入", () => {
+    const source = ["# C1", "a"].join("\n");
+    const translated = ["# C1", "# C1", "a", "甲"].join("\n");
+
+    expect(read_remote_translations(source, translated)).toEqual(new Map([[1, "甲"]]));
+  });
+
+  it("没有双语内容时返回空表", () => {
+    expect(read_remote_translations("# C1\na", "")).toEqual(new Map());
   });
 });
 
@@ -354,6 +412,64 @@ describe("align_remote_documents", () => {
     });
     expect(plan.stats.requires_alignment).toBe(false);
   });
+
+  it("站点译文写入行计划，工程已有译文时不重复计数", () => {
+    const previous = ["# C1", "a"].join("\n");
+    const next = ["# C1", "a", "# C2", "b"].join("\n");
+    const plan = align_remote_documents({
+      previous_text: previous,
+      next_text: next,
+      old_items: old_items_from(previous),
+      next_translations: new Map([
+        [0, "# 一"],
+        [1, "甲"],
+        [2, "# 二"],
+        [3, "乙"],
+      ]),
+    });
+    const rows = new Map(plan.rows.map((row) => [row.row, row]));
+
+    expect(rows.get(0)?.remote_dst).toBe("# 一");
+    expect(rows.get(2)?.remote_dst).toBe("# 二");
+    // C1 两行沿用工程译文，只有新增的 C2 两行计入站点沿用。
+    expect(plan.stats.remote_inherited).toBe(2);
+  });
+
+  it("工程译文为空的行也沿用站点译文", () => {
+    const previous = ["# C1", "a"].join("\n");
+    const next = ["# C1", "a", "# C2", "b"].join("\n");
+    const plan = align_remote_documents({
+      previous_text: previous,
+      next_text: next,
+      old_items: old_items_from(previous, { dst: "" }),
+      next_translations: new Map([
+        [0, "# 一"],
+        [1, "甲"],
+        [2, "# 二"],
+        [3, "乙"],
+      ]),
+    });
+
+    expect(plan.stats.remote_inherited).toBe(4);
+  });
+
+  it("人工排除的行不沿用站点译文", () => {
+    const previous = ["# C1", "a"].join("\n");
+    const next = ["# C1", "a", "# C2", "b"].join("\n");
+    const plan = align_remote_documents({
+      previous_text: previous,
+      next_text: next,
+      old_items: old_items_from(previous, { dst: "", status: "EXCLUDED" }),
+      next_translations: new Map([
+        [0, "# 一"],
+        [1, "甲"],
+        [2, "# 二"],
+        [3, "乙"],
+      ]),
+    });
+
+    expect(plan.stats.remote_inherited).toBe(2);
+  });
 });
 
 describe("build_add_only_plan", () => {
@@ -382,6 +498,31 @@ describe("build_add_only_plan", () => {
     expect(result.skipped).toEqual(["C2"]);
     expect(result.text).not.toContain("c changed");
     expect(result.text.endsWith("# C4\nnew\n")).toBe(true);
+  });
+
+  it("追加章节时把站点译文重映射到新行号", () => {
+    const current = ["Book", "", "# C1", "a", "", "extra"].join("\n");
+    const next = ["Book", "", "# C1", "a", "", "# C2", "b"].join("\n");
+    const plan = align_remote_documents({
+      previous_text: current,
+      next_text: next,
+      old_items: old_items_from(current),
+      next_translations: new Map([
+        [5, "# 二"],
+        [6, "乙"],
+      ]),
+    });
+    const result = build_add_only_plan(current, plan);
+    const lines = split_text_lines_for_items(result.text);
+
+    expect(result.translations).toEqual(
+      new Map([
+        [7, "# 二"],
+        [8, "乙"],
+      ]),
+    );
+    expect(lines[7]).toBe("# C2");
+    expect(lines[8]).toBe("b");
   });
 });
 

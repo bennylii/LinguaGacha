@@ -94,6 +94,7 @@ const SYNC_PREVIEW = {
     modified: 1,
     removed: 0,
     inherited: 30,
+    remote_inherited: 3,
     would_lose: 1,
     diverged: false,
     requires_alignment: false,
@@ -220,6 +221,7 @@ describe("RemotePage", () => {
                 old_src: "旧的第十行",
                 old_dst: "旧译文",
                 old_status: "PROCESSED",
+                remote_dst: null,
               },
               {
                 row: 11,
@@ -231,6 +233,31 @@ describe("RemotePage", () => {
                 old_src: "第十一行",
                 old_dst: "第十一行译文",
                 old_status: "PROCESSED",
+                remote_dst: null,
+              },
+              {
+                row: 12,
+                src: "新增的第十二行",
+                src_hash: "hash-c",
+                decision: "retranslate",
+                similarity: 0,
+                review: false,
+                old_src: null,
+                old_dst: null,
+                old_status: null,
+                remote_dst: "站点第十二行译文",
+              },
+              {
+                row: 13,
+                src: "排除的第十三行",
+                src_hash: "hash-d",
+                decision: "preserve",
+                similarity: 1,
+                review: false,
+                old_src: "排除的第十三行",
+                old_dst: "",
+                old_status: "EXCLUDED",
+                remote_dst: "排除行不应展示的站点译文",
               },
             ],
           },
@@ -256,6 +283,7 @@ describe("RemotePage", () => {
     expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/novel/sync/preview", {});
     expect(page.textContent).toContain("有修改");
     expect(page.textContent).toContain("会丢失译文: 1");
+    expect(page.textContent).toContain("站点沿用: 3");
 
     const chapter_button = page.querySelector<HTMLButtonElement>(".remote-page__chapter");
     if (chapter_button === null) throw new Error("未找到章节行。");
@@ -268,6 +296,9 @@ describe("RemotePage", () => {
       chapter_index: 1,
     });
     expect(page.textContent).toContain("旧译文");
+    expect(page.textContent).toContain("站点译文");
+    expect(page.textContent).toContain("站点第十二行译文");
+    expect(page.textContent).not.toContain("排除行不应展示的站点译文");
 
     await act(async () => {
       get_button_by_text(page, "保留旧译").click();

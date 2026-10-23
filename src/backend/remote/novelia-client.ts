@@ -3,6 +3,7 @@ import {
   NOVELIA_HOSTS,
   REMOTE_NOVEL_MAX_BYTES,
   build_novel_filename,
+  read_remote_translations,
   sha256_text,
   split_remote_document,
   type RemoteNovelRef,
@@ -47,6 +48,7 @@ export interface RemoteNovelMetadata {
 export interface RemoteNovelDownload {
   metadata: RemoteNovelMetadata;
   text: string;
+  translations: ReadonlyMap<number, string>; // 站点 GPT 译文，键为原文行号
   filename: string;
   content_hash: string;
   chapter_count: number;
@@ -120,13 +122,31 @@ export class NoveliaClient {
    * 整本下载：网页小说直接使用站点 TXT 导出；文库没有日语单文件导出，
    * 按分卷目录逐章读取原文后在本机拼装成同一份单文件 TXT。
    */
-  public async download(ref: RemoteNovelRef, signal?: AbortSignal): Promise<RemoteNovelDownload> {
+  public async download(
+    ref: RemoteNovelRef,
+    signal?: AbortSignal,
+    options: { translations?: boolean } = {},
+  ): Promise<RemoteNovelDownload> {
     const timeout = this.resolve_deadline(signal, DOWNLOAD_TIMEOUT_MS);
     const metadata = await this.read_metadata(ref, timeout);
-    const text =
-      ref.kind === "web"
-        ? await this.download_web_text(ref, metadata, timeout)
-        : await this.download_wenku_text(ref, metadata, timeout);
+    const include_translations = options.translations === true;
+    let text: string;
+    let translations: ReadonlyMap<number, string>;
+    if (ref.kind === "web") {
+      // 原文与双语导出并行请求，沿用站点译文不会让整本导入耗时翻倍。
+      const [source_text, translated_text] = await Promise.all([
+        this.download_web_text(ref, metadata, timeout),
+        include_translations
+          ? this.download_web_translations(ref, metadata, timeout, signal)
+          : Promise.resolve(""),
+      ]);
+      text = source_text;
+      translations = read_remote_translations(source_text, translated_text);
+    } else {
+      const wenku = await this.download_wenku_text(ref, metadata, timeout, include_translations);
+      text = wenku.text;
+      translations = wenku.translations;
+    }
     const chapter_count = count_chapters(text);
     if (chapter_count === 0) {
       throw new AppError("remote.workspace_empty", {
@@ -137,6 +157,7 @@ export class NoveliaClient {
     return {
       metadata,
       text,
+      translations,
       filename: build_novel_filename(metadata.title),
       content_hash: sha256_text(text),
       chapter_count,
@@ -266,14 +287,50 @@ export class NoveliaClient {
     return read_limited_text(response, REMOTE_NOVEL_MAX_BYTES);
   }
 
+  /**
+   * 站点双语导出包含现有 GPT 译文；这是增强信息，导出失败时按无译文导入，
+   * 不影响源文。调用方取消仍直接传播。
+   */
+  private async download_web_translations(
+    ref: RemoteNovelRef,
+    metadata: RemoteNovelMetadata,
+    signal: AbortSignal,
+    caller_signal: AbortSignal | undefined,
+  ): Promise<string> {
+    const query = new URLSearchParams({
+      mode: "jp-zh",
+      translationsMode: "priority",
+      translations: TRANSLATOR_ID,
+      type: "txt",
+      filename: build_novel_filename(metadata.title),
+    });
+    try {
+      const response = await this.request(
+        ref,
+        `/api/novel/${encodeURIComponent(ref.provider_id)}/${encodeURIComponent(ref.novel_id)}/file?${query.toString()}`,
+        "optional",
+        signal,
+      );
+      await assert_not_html(response);
+      return await read_limited_text(response, REMOTE_NOVEL_MAX_BYTES);
+    } catch {
+      if (caller_signal?.aborted === true) throw caller_signal.reason;
+      return "";
+    }
+  }
+
   private async download_wenku_text(
     ref: RemoteNovelRef,
     metadata: RemoteNovelMetadata,
     signal: AbortSignal,
-  ): Promise<string> {
+    include_translations: boolean,
+  ): Promise<{ text: string; translations: Map<number, string> }> {
     const lines: string[] = [];
+    const translations = new Map<number, string>();
     let total_bytes = 0;
-    const push_line = (line: string): void => {
+    let line_cursor = 0;
+    // 段落偶尔自带换行，行号按拼接后的文本行推进，和源文件解析保持一致。
+    const push_line = (line: string): number => {
       total_bytes += Buffer.byteLength(line, "utf8") + 1;
       if (total_bytes > REMOTE_NOVEL_MAX_BYTES) {
         throw new AppError("remote.fetch_failed", {
@@ -281,7 +338,10 @@ export class NoveliaClient {
           public_details: { max_bytes: REMOTE_NOVEL_MAX_BYTES },
         });
       }
+      const row = line_cursor;
       lines.push(line);
+      line_cursor += line.split("\n").length;
+      return row;
     };
     push_line(metadata.title_jp);
     if (metadata.title_zh !== null && metadata.title_zh !== "") push_line(metadata.title_zh);
@@ -293,7 +353,7 @@ export class NoveliaClient {
     for (const volume of metadata.volumes) {
       const toc = await this.read_wenku_volume_toc(ref, volume.volume_id, signal);
       for (const chapter of toc.chapters) {
-        const paragraphs = await this.read_wenku_chapter(
+        const task = await this.read_wenku_chapter(
           ref,
           volume.volume_id,
           chapter.chapter_id,
@@ -301,11 +361,18 @@ export class NoveliaClient {
         );
         push_line(`# ${build_wenku_chapter_title(volume.title, chapter.chapter_id)}`);
         push_line("");
-        for (const paragraph of paragraphs) push_line(paragraph);
+        for (const [index, paragraph] of task.paragraph_jp.entries()) {
+          const dst = task.old_paragraph_zh?.[index];
+          const row = push_line(paragraph);
+          // 文库章节任务已同时返回原文与旧译，行号按本机拼装顺序记录。
+          if (include_translations && dst !== undefined && dst.trim() !== "") {
+            translations.set(row, dst);
+          }
+        }
         push_line("");
       }
     }
-    return lines.join("\n");
+    return { text: lines.join("\n"), translations };
   }
 
   private async read_wenku_volume_toc(
@@ -340,14 +407,14 @@ export class NoveliaClient {
     volume_id: string,
     chapter_id: string,
     signal: AbortSignal,
-  ): Promise<string[]> {
+  ): Promise<RemoteChapterTask> {
     const root = await this.request_json(
       ref,
       `/api/wenku/${encodeURIComponent(ref.novel_id)}/translate-v2/${TRANSLATOR_ID}/${encodeURIComponent(volume_id)}/chapter-task/${encodeURIComponent(chapter_id)}`,
       "required",
       signal,
     );
-    return require_string_array(root, "paragraphJp", "wenku.chapter");
+    return parse_chapter_task(root);
   }
 
   private parse_web_metadata(root: Record<string, unknown>): RemoteNovelMetadata {

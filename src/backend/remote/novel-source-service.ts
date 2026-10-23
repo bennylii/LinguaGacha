@@ -2,6 +2,7 @@ import path from "node:path";
 
 import type { JsonRecord, JsonValue } from "../../domain/json";
 import type { ItemNameField, ItemStatus } from "../../domain/item";
+import { read_project_language_settings } from "../../domain/project-settings";
 import { NativeFs, default_native_fs } from "../../native/native-fs";
 import { AppError } from "../../shared/error/app-error";
 import type { ProjectWriteResult } from "../../shared/project-event";
@@ -59,6 +60,7 @@ export interface RemoteNovelImport {
   binding: RemoteSourceBinding;
   content_hash: string;
   text: string;
+  translations: ReadonlyMap<number, string>; // 站点 GPT 译文，键为源文行号
   /** 工程创建提交成功后写入上次同步快照。 */
   commit_snapshot: (project_path: string) => Promise<void>;
   /** 删除本次暂存目录；重复调用安全。 */
@@ -67,7 +69,11 @@ export interface RemoteNovelImport {
 
 /** 生命周期只依赖这个端口，测试可注入不触网的导入实现。 */
 export interface RemoteNovelImportPort {
-  prepare_import(url: string, signal?: AbortSignal): Promise<RemoteNovelImport>;
+  prepare_import(
+    url: string,
+    signal?: AbortSignal,
+    options?: { translations?: boolean },
+  ): Promise<RemoteNovelImport>;
 }
 
 export interface RemoteNovelPreview {
@@ -118,6 +124,7 @@ export interface RemoteSyncChapterRow {
   old_src: string | null;
   old_dst: string | null;
   old_status: ItemStatus | null;
+  remote_dst: string | null;
 }
 
 export interface RemoteSyncAlignPreview {
@@ -196,10 +203,14 @@ export class NovelSourceService implements RemoteNovelImportPort {
   }
 
   /** 下载整本到进程私有暂存目录，返回可直接交给源文件解析的路径。 */
-  public async prepare_import(url: string, signal?: AbortSignal): Promise<RemoteNovelImport> {
+  public async prepare_import(
+    url: string,
+    signal?: AbortSignal,
+    options: { translations?: boolean } = {},
+  ): Promise<RemoteNovelImport> {
     const ref = parse_novel_ref(url);
     await this.clean_stale_staging();
-    const download = await this.client.download(ref, signal);
+    const download = await this.client.download(ref, signal, options);
     const staging_root = this.get_staging_root();
     const staging_directory = path.join(staging_root, random_id(16));
     await this.native_fs.make_dir_async(staging_directory);
@@ -231,6 +242,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
       binding,
       content_hash: download.content_hash,
       text: download.text,
+      translations: download.translations,
       commit_snapshot: async (project_path) => {
         await this.snapshots.write(project_path, binding, download.text);
       },
@@ -266,7 +278,13 @@ export class NovelSourceService implements RemoteNovelImportPort {
     const project_path = this.session_state.require_loaded_project_path();
     const binding = await this.require_binding(project_path);
     const ref = parse_novel_ref(binding.url);
-    const download = await this.client.download(ref, signal);
+    const target_language = read_project_language_settings(
+      await this.database.get_all_meta(project_path),
+    ).target_language;
+    const include_translations = target_language === "ZH";
+    const download = await this.client.download(ref, signal, {
+      translations: include_translations,
+    });
     return await this.project_lock.run(project_path, async () => {
       const current = await this.read_remote_context(project_path, binding);
       const snapshot = this.read_matching_snapshot(project_path, binding);
@@ -275,6 +293,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
         previous_text,
         next_text: download.text,
         old_items: current.items,
+        next_translations: include_translations ? download.translations : undefined,
       });
       const created_at = Date.now();
       const id = random_id(16);
@@ -523,6 +542,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
         previous_text: current.text,
         next_text: appended.text,
         old_items: current.items,
+        next_translations: appended.translations,
       });
       return { text: appended.text, plan, skipped_chapters: appended.skipped };
     }
@@ -617,6 +637,7 @@ function to_sync_chapter_row(row: RemoteRowPlan): RemoteSyncChapterRow {
     old_src: row.old_item?.src ?? null,
     old_dst: row.old_item?.dst ?? null,
     old_status: row.old_item?.status ?? null,
+    remote_dst: row.remote_dst,
   };
 }
 

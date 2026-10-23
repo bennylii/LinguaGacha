@@ -30,6 +30,7 @@ interface Fixture {
   database: ProjectDatabase;
   snapshots: RemoteSnapshotStore;
   writer: { requests: RemoteAssetReplaceRequest[] };
+  client: { download: ReturnType<typeof vi.fn> };
   lg_path: string;
 }
 
@@ -38,6 +39,8 @@ async function create_fixture(options: {
   text: string;
   remote_text: string;
   bound?: boolean;
+  translations?: ReadonlyMap<number, string>;
+  target_language?: "ZH" | "EN";
 }): Promise<Fixture> {
   const database = new ProjectDatabase();
   const lg_path = path.join(temp_dir, "demo.lg");
@@ -62,6 +65,7 @@ async function create_fixture(options: {
         volumes: [],
       },
       text: options.remote_text,
+      translations: options.translations ?? new Map(),
       filename: ASSET_PATH,
       content_hash: sha256_text(options.remote_text),
       chapter_count: 2,
@@ -107,9 +111,12 @@ async function create_fixture(options: {
         })),
       );
       database_writer.set_meta(lg_path, REMOTE_SOURCE_META_KEY, binding as unknown as JsonValue);
+      if (options.target_language !== undefined) {
+        database_writer.set_meta(lg_path, "target_language", options.target_language);
+      }
     });
   }
-  return { service, database, snapshots, writer, lg_path };
+  return { service, database, snapshots, writer, client, lg_path };
 }
 
 function create_binding(text: string): RemoteSourceBinding {
@@ -241,6 +248,50 @@ describe("NovelSourceService", () => {
       await expect(
         fixture.service.apply_sync_request({ mode: "auto", stash_id: preview.stash_id }),
       ).rejects.toMatchObject({ code: "remote.stash_expired" });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("目标语言为简体中文时同步预览读取站点译文并写入行计划", async () => {
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      translations: new Map([[4, "站点第三行"]]),
+      target_language: "ZH",
+    });
+    try {
+      const preview = await fixture.service.preview_sync();
+      expect(fixture.client.download).toHaveBeenCalledWith(expect.anything(), undefined, {
+        translations: true,
+      });
+      const align = fixture.service.read_align_preview({
+        stash_id: preview.stash_id,
+        chapter_index: 1,
+      });
+      expect(align.rows.find((row) => row.row === 4)?.remote_dst).toBe("站点第三行");
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("其他目标语言不读取站点译文", async () => {
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      translations: new Map([[4, "站点第三行"]]),
+      target_language: "EN",
+    });
+    try {
+      const preview = await fixture.service.preview_sync();
+      expect(fixture.client.download).toHaveBeenCalledWith(expect.anything(), undefined, {
+        translations: false,
+      });
+      const align = fixture.service.read_align_preview({
+        stash_id: preview.stash_id,
+        chapter_index: 1,
+      });
+      expect(align.rows.find((row) => row.row === 4)?.remote_dst).toBeNull();
     } finally {
       await fixture.database.close();
     }

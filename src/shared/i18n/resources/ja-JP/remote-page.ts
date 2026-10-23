@@ -37,7 +37,7 @@ export const ja_jp_remote_page = {
   source: {
     title: "小説ソース",
     description:
-      "全体同期はサイトのテキストを再取得し、内容に一致するプロジェクト翻訳を保持します。",
+      "全体同期はサイトのテキストを再取得し、内容に一致するプロジェクト翻訳を保持します。プロジェクトに訳がない行はサイトの GPT 訳を引き継ぎます。",
     unbound:
       "このプロジェクトは小説 URL に紐付いていません。作成時に「小説 URL」を選択してください。",
     novel: "作品",
@@ -58,6 +58,7 @@ export const ja_jp_remote_page = {
       modified: "改変行",
       removed: "削除行",
       inherited: "訳文を継承",
+      remote_inherited: "サイト訳を継承",
       would_lose: "失われる訳文",
     },
     alignment_required:
@@ -84,6 +85,7 @@ export const ja_jp_remote_page = {
     apply_failed: "同期の適用に失敗しました …",
     keep: "訳文を保持",
     retranslate: "再翻訳",
+    remote_dst: "サイト訳",
   },
   workspace: {
     title: "ワークスペース送信",

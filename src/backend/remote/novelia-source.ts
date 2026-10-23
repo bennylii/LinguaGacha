@@ -40,6 +40,15 @@ const CHAPTER_HEADING_PATTERN = /^#\s+(.*)$/u;
 const MAX_FILENAME_BASE_LENGTH = 120;
 const DEFAULT_KEEP_THRESHOLD = 0.6;
 const DEFAULT_ALIGN_WINDOW = 50;
+// 人工排除与预过滤跳过的行不因站点有译文而恢复翻译。
+const REMOTE_TRANSLATION_BLOCKED_STATUSES: ReadonlySet<ItemStatus> = new Set([
+  "EXCLUDED",
+  "RULE_SKIPPED",
+  "LANGUAGE_SKIPPED",
+  "DUPLICATED",
+]);
+// 站点导出对缺失译文写固定标记；带标记的内容不能当作译文写入工程。
+const REMOTE_MISSING_TRANSLATION_MARKERS = ["gpt翻译缺失。", "该章节缺失。"] as const;
 
 export type RemoteNovelKind = "web" | "wenku";
 
@@ -95,6 +104,7 @@ export interface RemoteRowPlan {
   chapter_index: number;
   decision: RemoteRowDecision;
   old_item: RemoteOldItem | null;
+  remote_dst: string | null; // 站点已有 GPT 译文；工程可复用译文优先
   similarity: number;
   review: boolean; // 沿用旧译文但源文已变化，界面提示复核
 }
@@ -126,6 +136,7 @@ export interface RemoteAlignmentStats {
   modified: number;
   removed: number;
   inherited: number;
+  remote_inherited: number; // 工程没有可复用译文、将沿用站点译文的行数
   would_lose: number;
   diverged: boolean; // 工程源文与上次远端快照不一致
   requires_alignment: boolean;
@@ -285,6 +296,87 @@ export function split_remote_document(text: string): RemoteDocument {
   return { text, lines, chapters };
 }
 
+/**
+ * 从站点双语整本导出中还原每行译文；键为原文行号。
+ * 导出按“日文行、中文行”交替排列，空段只占一行；任一行对不上就整章放弃，
+ * 避免站点格式变化时把译文写到错误的行。
+ */
+export function read_remote_translations(
+  source_text: string,
+  translated_text: string,
+): Map<number, string> {
+  const translations = new Map<number, string>();
+  if (translated_text === "") return translations;
+  const source = split_remote_document(source_text);
+  const translated_lines = split_text_lines_for_items(translated_text);
+  let cursor = 0;
+  for (const chapter of source.chapters) {
+    if (chapter.kind !== "chapter" || chapter.heading_row === null) continue;
+    const heading = source.lines[chapter.heading_row]?.text ?? "";
+    const heading_index = find_translated_line(translated_lines, cursor, heading);
+    if (heading_index < 0) continue;
+    const heading_translation = read_translated_heading(translated_lines, heading_index);
+    if (heading_translation === null || is_missing_remote_translation(heading_translation)) {
+      cursor = heading_index + 1;
+      continue;
+    }
+    const chapter_translations = new Map<number, string>();
+    let source_row = chapter.heading_row + 1;
+    let translated_row = heading_index + 2; // 跳过日文标题与紧随的中文标题
+    let valid = true;
+    while (source_row < chapter.end_row) {
+      const source_line = source.lines[source_row]?.text ?? "";
+      if (source_line.trim() === "") {
+        if ((translated_lines[translated_row] ?? "").trim() !== "") {
+          valid = false;
+          break;
+        }
+        source_row += 1;
+        translated_row += 1;
+        continue;
+      }
+      const translated_source = translated_lines[translated_row];
+      const translated_dst = translated_lines[translated_row + 1];
+      if (
+        translated_source !== source_line ||
+        translated_dst === undefined ||
+        is_missing_remote_translation(translated_dst)
+      ) {
+        valid = false;
+        break;
+      }
+      if (translated_dst.trim() !== "") chapter_translations.set(source_row, translated_dst);
+      source_row += 1;
+      translated_row += 2;
+    }
+    if (valid) {
+      if (heading_translation !== heading) {
+        translations.set(chapter.heading_row, heading_translation);
+      }
+      for (const [row, dst] of chapter_translations) translations.set(row, dst);
+    }
+    cursor = heading_index + 1;
+  }
+  return translations;
+}
+
+function find_translated_line(lines: readonly string[], from: number, target: string): number {
+  for (let index = from; index < lines.length; index += 1) {
+    if (lines[index] === target) return index;
+  }
+  return -1;
+}
+
+function read_translated_heading(lines: readonly string[], heading_index: number): string | null {
+  const next = lines[heading_index + 1];
+  if (next === undefined || !CHAPTER_HEADING_PATTERN.test(next)) return null;
+  return next;
+}
+
+function is_missing_remote_translation(text: string): boolean {
+  return REMOTE_MISSING_TRANSLATION_MARKERS.some((marker) => text.includes(marker));
+}
+
 /** 对齐只消除排版差异，不改写新原文本身。 */
 export function normalize_match_line(text: string): string {
   return text.normalize("NFKC").replace(/\s+/gu, " ").trim();
@@ -324,6 +416,7 @@ export function align_remote_documents(args: {
   previous_text: string;
   next_text: string;
   old_items: readonly RemoteOldItem[];
+  next_translations?: ReadonlyMap<number, string> | undefined;
   keep_threshold?: number;
   window?: number;
 }): RemoteAlignmentPlan {
@@ -331,6 +424,7 @@ export function align_remote_documents(args: {
   const next = split_remote_document(args.next_text);
   const old_index = build_old_item_index(previous, args.old_items);
   const chapter_pairs = pair_chapters(previous, next);
+  const next_translations = args.next_translations ?? new Map<number, string>();
   const plans_by_new_chapter = new Map<number, RemoteChapterPlan>();
   const rows: RemoteRowPlan[] = [];
   const removed_chapters: RemoteChapterPlan[] = [];
@@ -341,7 +435,7 @@ export function align_remote_documents(args: {
   for (const chapter of next.chapters) {
     const pair = chapter_pairs.by_new_index.get(chapter.index);
     if (pair === undefined) {
-      const added = build_added_chapter_plan(chapter, next);
+      const added = build_added_chapter_plan(chapter, next, next_translations);
       plans_by_new_chapter.set(chapter.index, added.chapter);
       rows.push(...added.rows);
       continue;
@@ -355,6 +449,7 @@ export function align_remote_documents(args: {
       new_chapter: chapter,
       old_index,
       used_item_ids,
+      next_translations,
       keep_threshold,
       window,
       ambiguous: pair.ambiguous,
@@ -371,26 +466,34 @@ export function align_remote_documents(args: {
     .map((chapter) => plans_by_new_chapter.get(chapter.index))
     .filter((chapter): chapter is RemoteChapterPlan => chapter !== undefined)
     .concat(removed_chapters);
-  const stats = summarize_plan(next, chapters, old_index.diverged);
+  const stats = summarize_plan(next, chapters, old_index.diverged, rows);
   return { previous, next, rows, chapters, stats };
 }
 
 /**
  * 仅追加模式把新增章节放到文件末尾；已有内容与已删除章节保持不动，保证零丢失。
+ * 同时把站点译文行号重映射到追加后的文本，供重新对齐时继续沿用。
  */
 export function build_add_only_plan(
   current_text: string,
   plan: RemoteAlignmentPlan,
-): { text: string; appended: string[]; skipped: string[] } {
-  const appended = plan.chapters
+): {
+  text: string;
+  appended: string[];
+  skipped: string[];
+  translations: Map<number, string>;
+} {
+  const appended_chapters = plan.chapters
     .filter((chapter) => chapter.status === "added" && chapter.kind === "chapter")
-    .map((chapter) =>
-      plan.next.lines
+    .map((chapter) => ({
+      chapter,
+      text: plan.next.lines
         .slice(chapter.start_row, chapter.end_row)
         .map((line) => line.text)
         .join("\n"),
-    )
-    .filter((text) => text.trim() !== "");
+    }))
+    .filter((entry) => entry.text.trim() !== "");
+  const appended = appended_chapters.map((entry) => entry.text);
   const skipped = plan.chapters
     .filter(
       (chapter) =>
@@ -399,9 +502,23 @@ export function build_add_only_plan(
     )
     .map((chapter) => chapter.title);
   const base = current_text.replace(/\s+$/u, "");
-  if (appended.length === 0) return { text: current_text, appended: [], skipped };
+  const translations = new Map<number, string>();
+  if (appended.length === 0) return { text: current_text, appended: [], skipped, translations };
   const body = appended.join("\n\n");
-  return { text: base === "" ? body : `${base}\n\n${body}\n`, appended, skipped };
+  const text = base === "" ? body : `${base}\n\n${body}\n`;
+  const base_lines = base === "" ? 0 : split_text_lines_for_items(base).length;
+  let target_start = base === "" ? 0 : base_lines + 1;
+  for (const entry of appended_chapters) {
+    const { chapter } = entry;
+    const line_count = chapter.end_row - chapter.start_row;
+    for (const row of plan.rows) {
+      if (row.remote_dst === null) continue;
+      if (row.row < chapter.start_row || row.row >= chapter.end_row) continue;
+      translations.set(target_start + (row.row - chapter.start_row), row.remote_dst);
+    }
+    target_start += line_count + 1; // 章之间以一个空行分隔
+  }
+  return { text, appended, skipped, translations };
 }
 
 /** 工程条目按 row 建索引；源文不一致时保留按原文回退的队列。 */
@@ -588,6 +705,7 @@ function pair_lines(args: {
   new_chapter: RemoteChapter;
   old_index: ReturnType<typeof build_old_item_index>;
   used_item_ids: Set<number>;
+  next_translations: ReadonlyMap<number, string>;
   keep_threshold: number;
   window: number;
   ambiguous: boolean;
@@ -618,6 +736,7 @@ function pair_lines(args: {
           chapter_index: args.new_chapter.index,
           decision: "retranslate",
           old_item: null,
+          remote_dst: args.next_translations.get(new_line.row) ?? null,
           similarity: 0,
           review: false,
         });
@@ -678,6 +797,7 @@ function pair_lines(args: {
       chapter_index: args.new_chapter.index,
       decision,
       old_item,
+      remote_dst: args.next_translations.get(new_line.row) ?? null,
       similarity,
       review,
     });
@@ -824,6 +944,7 @@ function resolve_old_item(
 function build_added_chapter_plan(
   chapter: RemoteChapter,
   next: RemoteDocument,
+  next_translations: ReadonlyMap<number, string>,
 ): {
   chapter: RemoteChapterPlan;
   rows: RemoteRowPlan[];
@@ -839,6 +960,7 @@ function build_added_chapter_plan(
       chapter_index: chapter.index,
       decision: "retranslate",
       old_item: null,
+      remote_dst: next_translations.get(line.row) ?? null,
       similarity: 0,
       review: false,
     });
@@ -898,12 +1020,14 @@ function summarize_plan(
   next: RemoteDocument,
   chapters: readonly RemoteChapterPlan[],
   diverged: boolean,
+  rows: readonly RemoteRowPlan[],
 ): RemoteAlignmentStats {
   const stats: RemoteAlignmentStats = {
     added: 0,
     modified: 0,
     removed: 0,
     inherited: 0,
+    remote_inherited: 0,
     would_lose: 0,
     diverged,
     requires_alignment: false,
@@ -916,7 +1040,19 @@ function summarize_plan(
     stats.inherited += chapter.inherited;
     stats.would_lose += chapter.would_lose;
   }
+  for (const row of rows) {
+    if (uses_remote_translation(row)) stats.remote_inherited += 1;
+  }
   const total = Math.max(next.lines.length, 1);
   stats.requires_alignment = stats.would_lose > 20 && stats.would_lose / total > 0.05;
   return stats;
+}
+
+/** 站点译文只在工程没有可复用译文、且该行未被人工排除或过滤时生效。 */
+function uses_remote_translation(row: RemoteRowPlan): boolean {
+  if (row.remote_dst === null || row.remote_dst.trim() === "") return false;
+  const previous = row.old_item;
+  if (previous === null) return true;
+  if (previous.dst !== "") return false;
+  return !REMOTE_TRANSLATION_BLOCKED_STATUSES.has(previous.status);
 }

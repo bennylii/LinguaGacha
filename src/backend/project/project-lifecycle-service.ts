@@ -52,6 +52,7 @@ import type { ProjectSourceFileSummary } from "../../shared/project-source-forma
 import type { SourceFileParseFailureRecord } from "../../shared/source-file-parse-failure";
 import type { ProjectWriteResult } from "../../shared/project-event";
 import {
+  apply_remote_translations,
   compute_project_prefilter_write,
   build_translation_extras_from_items,
   type ProjectPrefilterWriteInput,
@@ -342,7 +343,9 @@ export class ProjectLifecycleService {
     try {
       let source_paths = local_source_paths;
       if (remote_novel_url !== null) {
-        remote_import = await this.prepare_remote_import(remote_novel_url, signal);
+        remote_import = await this.prepare_remote_import(remote_novel_url, signal, {
+          translations: project_settings.target_language === "ZH",
+        });
         source_paths = [remote_import.source_path];
       }
       // 后端重新解析源文件得到的唯一可信新建草稿。
@@ -356,10 +359,14 @@ export class ProjectLifecycleService {
       signal.throwIfAborted();
       this.assert_create_commit_has_importable_files(parsed_draft);
       // 将可信草稿转成持久项目事实的唯一计算结果。
-      const prefilter_output = this.compute_create_project_prefilter_output({
-        draft: parsed_draft,
-        settings: project_settings,
-      });
+      const prefilter_output = this.apply_remote_import_translations(
+        this.compute_create_project_prefilter_output({
+          draft: parsed_draft,
+          settings: project_settings,
+        }),
+        remote_import,
+        project_settings,
+      );
       const default_preset_input = this.default_preset_reader.read();
       let snapshot!: ProjectDataSnapshot; // 初始化事务同步产出，失败时数据库入口抛错并清理新文件。
 
@@ -426,13 +433,14 @@ export class ProjectLifecycleService {
   private async prepare_remote_import(
     url: string,
     signal: AbortSignal,
+    options: { translations?: boolean },
   ): Promise<RemoteNovelImport> {
     if (this.remote_import === null) {
       throw new AppErrors.AppError("runtime.internal_invariant", {
         diagnostic_context: { reason: "remote_import_port_missing" },
       });
     }
-    return await this.remote_import.prepare_import(url, signal);
+    return await this.remote_import.prepare_import(url, signal, options);
   }
 
   /**
@@ -590,6 +598,20 @@ export class ProjectLifecycleService {
       },
       ...this.build_prefilter_input(args.settings),
     });
+  }
+
+  /** 站点 GPT 译文是简体中文，只在项目目标语言为简体中文时沿用。 */
+  private apply_remote_import_translations(
+    output: ProjectPrefilterWriteOutput,
+    remote_import: RemoteNovelImport | null,
+    settings: ProjectSettingsSnapshot,
+  ): ProjectPrefilterWriteOutput {
+    if (remote_import === null || settings.target_language !== "ZH") return output;
+    return apply_remote_translations(
+      output,
+      remote_import.translations,
+      remote_import.binding.asset_path,
+    );
   }
 
   /** 预过滤计算只消费源语言与两个应用开关。 */

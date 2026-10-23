@@ -31,7 +31,8 @@ export const zh_cn_remote_page = {
   },
   source: {
     title: "小说源",
-    description: "整本同步会重新下载站点文本，并按内容保留可匹配的工程译文。",
+    description:
+      "整本同步会重新下载站点文本，按内容保留可匹配的工程译文；工程没有译文时沿用站点 GPT 译文。",
     unbound: "当前工程没有绑定小说地址。请在新建工程时选择「小说地址」。",
     novel: "作品",
     url: "地址",
@@ -50,6 +51,7 @@ export const zh_cn_remote_page = {
       modified: "改写行",
       removed: "删除行",
       inherited: "沿用译文",
+      remote_inherited: "站点沿用",
       would_lose: "会丢失译文",
     },
     alignment_required: "改写比例过高，自动模式已禁用；请选择「仅追加」或「手动确认」。",
@@ -75,6 +77,7 @@ export const zh_cn_remote_page = {
     apply_failed: "应用同步失败 …",
     keep: "保留旧译",
     retranslate: "重译",
+    remote_dst: "站点译文",
   },
   workspace: {
     title: "工作区提交",

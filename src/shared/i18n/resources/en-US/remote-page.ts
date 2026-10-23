@@ -37,7 +37,7 @@ export const en_us_remote_page = {
   source: {
     title: "Novel source",
     description:
-      "A full sync re-downloads the site text and keeps matching project translations by content.",
+      "A full sync re-downloads the site text and keeps matching project translations by content; rows without a project translation reuse the site's GPT translation.",
     unbound: "This project is not bound to a novel URL. Choose “Novel URL” when creating it.",
     novel: "Novel",
     url: "URL",
@@ -57,6 +57,7 @@ export const en_us_remote_page = {
       modified: "Modified",
       removed: "Removed",
       inherited: "Inherited",
+      remote_inherited: "From site",
       would_lose: "Translations at risk",
     },
     alignment_required:
@@ -85,6 +86,7 @@ export const en_us_remote_page = {
     apply_failed: "Failed to apply the sync …",
     keep: "Keep",
     retranslate: "Retranslate",
+    remote_dst: "Site translation",
   },
   workspace: {
     title: "Workspace submission",
