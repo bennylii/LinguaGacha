@@ -42,6 +42,8 @@ import type { AppLanguage } from "../../domain/app-language";
 import type { JsonRecord } from "../../domain/json";
 import type { AgentChatChange, AgentChatEvent } from "../../shared/agent";
 import type { AgentWebSearchPort } from "./tools/web-search";
+import type { AgentNovelChaptersPort } from "./tools/novel-chapters";
+import type { AgentNovelChapterImportPort } from "./tools/novel-chapter-import";
 import * as workspace_tools from "./tools/workspace-run";
 import { ProjectSessionState } from "../project/project-session-state";
 import { RuntimeOperationGate } from "../runtime-operation-gate";
@@ -2446,6 +2448,59 @@ describe("AgentService", () => {
     expect(fake_agent_state.tool_names.at(-1)).toContain("web_search");
   });
 
+  it("宿主提供章节端口时注册 novel 工具，端口缺席时不注册", async () => {
+    const novel_chapters = vi.fn<AgentNovelChaptersPort>(async () => ({
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      title: "测试小说",
+      total: 1,
+      offset: 0,
+      chapters: [
+        { index: 1, chapter_id: "c1", volume_id: null, title: "第一章", translated: false },
+      ],
+    }));
+    const { service } = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      novel_chapters,
+    );
+
+    await service.send_message({ text: "列出章节", attachments: [] });
+    await wait_for_idle(service);
+
+    expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapters");
+    expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_chapter_import");
+
+    const with_import = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      novel_chapters,
+      async () => ({
+        imported: true,
+        asset_path: "测试小说 - 第一章.txt",
+        chapter_id: "c1",
+        volume_id: null,
+        title: "第一章",
+        paragraph_count: 1,
+        char_count: 3,
+        translated: false,
+      }),
+    );
+    await with_import.service.send_message({ text: "导入章节", attachments: [] });
+    await wait_for_idle(with_import.service);
+
+    expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapter_import");
+  });
+
   it("预览读取在请求前后校验会话，重置期间的旧响应失效", async () => {
     const { service, workspace } = await create_service(true);
     const chatId = service.get_snapshot().chatId;
@@ -4711,6 +4766,8 @@ describe("AgentService", () => {
       }),
     },
     catalog: PiModelCatalogReader = { read_models: read_builtin_pi_models },
+    novel_chapters?: AgentNovelChaptersPort,
+    novel_chapter_import?: AgentNovelChapterImportPort,
   ): Promise<{
     workspace: AgentWorkspacePort;
     service: AgentService;
@@ -4884,6 +4941,8 @@ describe("AgentService", () => {
       sessionState: session_state,
       runtimeGate: runtime_gate,
       webSearch: web_search,
+      novelChapters: novel_chapters,
+      novelChapterImport: novel_chapter_import,
       workspace: effective_workspace,
       logManager: { append: log_append },
       publish,

@@ -54,6 +54,7 @@ import { NoveliaClient } from "../remote/novelia-client";
 import { NoveliaCredentialStore } from "../remote/novelia-credential-store";
 import { NovelSourceService } from "../remote/novel-source-service";
 import { RemoteAuthService } from "../remote/remote-auth-service";
+import { RemoteChapterService } from "../remote/remote-chapter-service";
 import { RemoteSnapshotStore } from "../remote/remote-snapshot-store";
 import { RemoteWorkspaceSubmissionService } from "../remote/workspace-submission-service";
 import { ProjectFileLock } from "../project/project-file-lock";
@@ -134,6 +135,7 @@ export interface BackendFileServices {
 export interface BackendRemoteServices {
   auth: RemoteAuthService;
   sources: NovelSourceService;
+  chapters: RemoteChapterService;
   workspace: RemoteWorkspaceSubmissionService;
   snapshots: RemoteSnapshotStore;
   projectLock: ProjectFileLock;
@@ -276,9 +278,17 @@ export class BackendServices {
       settings: this.app_setting_service,
       auth_host: options.remoteAuthHost,
     });
+    const refresh_credentials = async (origin: string): Promise<boolean> =>
+      await remote_auth.try_refresh(origin, { force: true });
     this.remote = {
       auth: remote_auth,
       sources: remote_sources,
+      chapters: new RemoteChapterService({
+        sources: remote_sources,
+        client: novelia_client,
+        importer: project_content,
+        refresh_credentials,
+      }),
       workspace: new RemoteWorkspaceSubmissionService({
         database,
         session_state,
@@ -286,8 +296,7 @@ export class BackendServices {
         settings: this.app_setting_service,
         client: novelia_client,
         llm: llm_client,
-        refresh_credentials: async (origin) =>
-          await remote_auth.try_refresh(origin, { force: true }),
+        refresh_credentials,
       }),
       snapshots: remote_snapshots,
       projectLock: project_lock,

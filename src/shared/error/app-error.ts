@@ -228,6 +228,11 @@ export const APP_ERROR_DEFINITIONS = {
     status: 409,
     severity: "expected",
   },
+  "remote.chapter_not_found": {
+    message: "The remote novel chapter was not found.",
+    status: 404,
+    severity: "expected",
+  },
 } as const satisfies Readonly<Record<string, AppErrorDefinition>>;
 
 export type AppErrorCode = keyof typeof APP_ERROR_DEFINITIONS;

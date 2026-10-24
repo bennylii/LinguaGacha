@@ -10,6 +10,7 @@ import type { ProjectDatabase } from "../database/database-operations";
 import type { RuntimeOperationGate, RuntimeLease } from "../runtime-operation-gate";
 import type { ProjectSessionState } from "../project/project-session-state";
 import type { NoveliaClient, RemoteWorkspaceChapter } from "./novelia-client";
+import { call_with_credential_refresh } from "./credential-refresh";
 import {
   is_missing_remote_translation,
   normalize_match_line,
@@ -269,7 +270,7 @@ export class RemoteWorkspaceSubmissionService {
     missing: number;
     message: string | null;
   }> {
-    let task = await this.call_with_credential_refresh(args.ref.origin, () =>
+    let task = await call_with_credential_refresh(this.refresh_credentials, args.ref.origin, () =>
       this.client.read_chapter_task(
         args.ref,
         args.chapter,
@@ -350,7 +351,7 @@ export class RemoteWorkspaceSubmissionService {
     }
     const paragraphs_zh = resolved.map((value) => value ?? "");
     try {
-      await this.call_with_credential_refresh(args.ref.origin, () =>
+      await call_with_credential_refresh(this.refresh_credentials, args.ref.origin, () =>
         this.client.write_chapter_translation(
           args.ref,
           args.chapter,
@@ -361,12 +362,14 @@ export class RemoteWorkspaceSubmissionService {
     } catch (error) {
       if (args.signal.aborted) throw error;
       // 术语表在取任务与上传之间变化时刷新一次；仍失败则记录本章失败。
-      const refreshed = await this.call_with_credential_refresh(args.ref.origin, () =>
-        this.client.read_chapter_task(args.ref, args.chapter, { sync: false }, args.signal),
+      const refreshed = await call_with_credential_refresh(
+        this.refresh_credentials,
+        args.ref.origin,
+        () => this.client.read_chapter_task(args.ref, args.chapter, { sync: false }, args.signal),
       );
       if (refreshed.glossary_id === task.glossary_id) throw error;
       task = refreshed;
-      await this.call_with_credential_refresh(args.ref.origin, () =>
+      await call_with_credential_refresh(this.refresh_credentials, args.ref.origin, () =>
         this.client.write_chapter_translation(
           args.ref,
           args.chapter,
@@ -383,25 +386,6 @@ export class RemoteWorkspaceSubmissionService {
       missing: 0,
       message: null,
     };
-  }
-
-  /**
-   * 站点拒绝凭据时触发一次登录链路的 token 续期，成功则对当前请求重试一次；
-   * 续期不可用或仍被拒绝时保持原错误，交给既有失败统计。
-   */
-  private async call_with_credential_refresh<T>(
-    origin: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    try {
-      return await operation();
-    } catch (error) {
-      if (!(error instanceof AppError) || error.code !== "remote.auth_rejected") throw error;
-      if (this.refresh_credentials === null) throw error;
-      const refreshed = await this.refresh_credentials(origin).catch(() => false);
-      if (!refreshed) throw error;
-      return await operation();
-    }
   }
 
   /**

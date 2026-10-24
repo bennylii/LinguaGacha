@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { JsonValue } from "../../domain/json";
 import type { ItemNameField, ItemStatus } from "../../domain/item";
 import { split_text_lines_for_items } from "../file/shared/file-format-helpers";
+import { AppError } from "../../shared/error/app-error";
 
 /** 站点允许的域名；远端抓取和重定向都只能落在这些主机上。 */
 export const NOVELIA_HOSTS = ["n.novelia.cc", "books.fishhawk.top", "books1.fishhawk.top"] as const;
@@ -224,6 +225,18 @@ export function parse_novel_url(raw: string): RemoteNovelRef {
   throw new Error("invalid novel url");
 }
 
+/** 业务入口的 URL 解析都走这里；原始解析错误归一为 `remote.invalid_url`。 */
+export function parse_novel_ref(url: string): RemoteNovelRef {
+  try {
+    return parse_novel_url(url);
+  } catch (error) {
+    throw new AppError("remote.invalid_url", {
+      cause: error,
+      diagnostic_context: { reason: "novel_url_rejected" },
+    });
+  }
+}
+
 /**
  * 工程资产名来自远端标题；保留可读性，同时消除路径分隔符、控制字符与 Windows 保留名。
  */
@@ -241,6 +254,11 @@ export function build_novel_filename(title: string): string {
     .replace(/[.\s]+$/gu, "");
   const safe_base = WINDOWS_RESERVED_NAMES.has(base.toLowerCase()) ? `_${base}` : base;
   return `${safe_base === "" ? "novel" : safe_base}.txt`;
+}
+
+/** 章节文件名同时携带作品与章节；清理规则与长度预算和整本文件名一致。 */
+export function build_chapter_filename(novel_title: string, chapter_title: string): string {
+  return build_novel_filename(`${novel_title} - ${chapter_title}`);
 }
 
 /** 章节标题与正文都从同一份文本切出，空行保持为可对齐条目。 */

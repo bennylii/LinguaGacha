@@ -24,7 +24,7 @@ import {
   align_remote_documents,
   build_add_only_plan,
   build_novel_filename,
-  parse_novel_url,
+  parse_novel_ref,
   sha256_text,
   split_remote_document,
   type RemoteAlignmentPlan,
@@ -63,6 +63,13 @@ export interface RemoteNovelImport {
   translations: ReadonlyMap<number, string>; // 站点 GPT 译文，键为源文行号
   /** 工程创建提交成功后写入上次同步快照。 */
   commit_snapshot: (project_path: string) => Promise<void>;
+  /** 删除本次暂存目录；重复调用安全。 */
+  dispose: () => Promise<void>;
+}
+
+/** 一份暂存在 `userdata/remote/staging` 的源文件；导入完成后必须 dispose。 */
+export interface StagedTextFile {
+  source_path: string;
   /** 删除本次暂存目录；重复调用安全。 */
   dispose: () => Promise<void>;
 }
@@ -209,16 +216,40 @@ export class NovelSourceService implements RemoteNovelImportPort {
     options: { translations?: boolean } = {},
   ): Promise<RemoteNovelImport> {
     const ref = parse_novel_ref(url);
-    await this.clean_stale_staging();
     const download = await this.client.download(ref, signal, options);
+    const staged = await this.stage_text(download.filename, download.text);
+    const binding = build_remote_source_binding({
+      ref,
+      title: download.metadata.title,
+      asset_path: download.filename,
+      remote_hash: download.content_hash,
+      chapter_count: download.chapter_count,
+      synced_at: new Date().toISOString(),
+    });
+    return {
+      source_path: staged.source_path,
+      binding,
+      content_hash: download.content_hash,
+      text: download.text,
+      translations: download.translations,
+      commit_snapshot: async (project_path) => {
+        await this.snapshots.write(project_path, binding, download.text);
+      },
+      dispose: staged.dispose,
+    };
+  }
+
+  /** 把一段文本暂存为可导入的源文件；调用方用 `dispose` 清理目录。 */
+  public async stage_text(file_name: string, text: string): Promise<StagedTextFile> {
+    await this.clean_stale_staging();
     const staging_root = this.get_staging_root();
     const staging_directory = path.join(staging_root, random_id(16));
     await this.native_fs.make_dir_async(staging_directory);
     // 文件名已由站点客户端按标题清理；再核对一次边界，避免暂存写到目录外。
-    const filename = path.basename(download.filename);
-    if (filename !== download.filename || filename === "") {
+    const filename = path.basename(file_name);
+    if (filename !== file_name || filename === "") {
       throw new AppError("remote.fetch_failed", {
-        diagnostic_context: { reason: "invalid_download_filename" },
+        diagnostic_context: { reason: "invalid_staging_filename" },
       });
     }
     const source_path = path.join(staging_directory, filename);
@@ -227,25 +258,10 @@ export class NovelSourceService implements RemoteNovelImportPort {
         diagnostic_context: { reason: "staging_path_escape" },
       });
     }
-    await this.native_fs.write_file(source_path, download.text);
-    const binding = build_remote_source_binding({
-      ref,
-      title: download.metadata.title,
-      asset_path: filename,
-      remote_hash: download.content_hash,
-      chapter_count: download.chapter_count,
-      synced_at: new Date().toISOString(),
-    });
+    await this.native_fs.write_file(source_path, text);
     let disposed = false;
     return {
       source_path,
-      binding,
-      content_hash: download.content_hash,
-      text: download.text,
-      translations: download.translations,
-      commit_snapshot: async (project_path) => {
-        await this.snapshots.write(project_path, binding, download.text);
-      },
       dispose: async () => {
         if (disposed) return;
         disposed = true;
@@ -591,17 +607,6 @@ export class NovelSourceService implements RemoteNovelImportPort {
     } catch {
       // 清理失败不会改变已提交事实，下次启动仍会按时间重试。
     }
-  }
-}
-
-function parse_novel_ref(url: string): RemoteNovelRef {
-  try {
-    return parse_novel_url(url);
-  } catch (error) {
-    throw new AppError("remote.invalid_url", {
-      cause: error,
-      diagnostic_context: { reason: "novel_url_rejected" },
-    });
   }
 }
 

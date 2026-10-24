@@ -170,6 +170,9 @@ export class GuiBackendBootstrap {
         sessionState: services.state.session,
         runtimeGate: services.state.runtimeGate,
         webSearch: web_search.search,
+        novelChapters: (request, signal) => services.remote.chapters.list_chapters(request, signal),
+        novelChapterImport: (request, signal) =>
+          services.remote.chapters.import_chapter(request, signal),
         workspace,
         logManager: resources.logManager,
         publish: (topic, payload) => event_stream.publish(topic, payload),
