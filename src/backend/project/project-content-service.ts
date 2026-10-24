@@ -1,4 +1,5 @@
 import type { GodotPackOrder } from "../../shared/godot";
+import path from "node:path";
 import { godot_pack_preview, read_godot_pack_orders } from "../file/godot/source";
 import { build_source_file_parse_failure } from "../file/source-file-parse-failure-reporter";
 import type { GamePrepareExecution } from "../file/shared/game/prepare-worker";
@@ -6,7 +7,11 @@ import { assert_source_file_paths } from "../file/source-file-paths";
 import { normalize_project_asset_path } from "../../shared/project/project-asset-paths";
 import type { SourceFileParseWarning } from "../file/file-format-types";
 import type { WorkbenchImportFilesPreview } from "../../shared/workbench/workbench-command-planner";
-import { get_section_revision, ProjectDataReader } from "./project-data-reader";
+import {
+  build_section_revisions_from_meta,
+  get_section_revision,
+  ProjectDataReader,
+} from "./project-data-reader";
 import { resolve_text_rule_type, type TextFileContext } from "../../shared/text/text-rule-type";
 import {
   normalize_batch_translation_progress,
@@ -194,7 +199,50 @@ export class ProjectContentService {
    */
   public async import_files(request: JsonRecord): Promise<ProjectWriteResult> {
     const project_path = this.session_state.require_loaded_project_path();
-    return this.runtime_gate.run_project_write(async (signal) => {
+    return this.runtime_gate.run_project_write((signal) =>
+      this.import_files_in_write(project_path, request, signal),
+    );
+  }
+
+  /**
+   * Agent 工具在自身运行租约内导入一段暂存文本。
+   * 目标名按工程现有资产分配唯一名称，绝不覆盖已有文件；暂存文件生命周期由调用方负责。
+   */
+  public async import_source_file_under_agent(
+    request: { source_path: string; file_name: string },
+    signal?: AbortSignal,
+  ): Promise<{ asset_path: string; write: ProjectWriteResult }> {
+    const project_path = this.session_state.require_loaded_project_path();
+    return await this.runtime_gate.run_agent_project_write(async (combined) => {
+      const snapshot = await this.read_project_write_snapshot(project_path);
+      const asset_path = allocate_import_asset_path(request.file_name, snapshot.asset_records);
+      // Agent 写租约已排除其它写入，读到的修订就是提交时的事实。
+      const revisions = build_section_revisions_from_meta(
+        await this.database.get_all_meta(project_path),
+      );
+      const write = await this.import_files_in_write(
+        project_path,
+        {
+          files: [{ source_path: request.source_path, target_rel_path: asset_path }],
+          conflict_action: "skip",
+          expected_section_revisions: {
+            files: revisions.files ?? 0,
+            items: revisions.items ?? 0,
+          },
+        },
+        combined,
+      );
+      return { asset_path, write };
+    }, signal);
+  }
+
+  /** 导入核心：HTTP 入口与 Agent 工具共用同一条解析、预过滤与事务路径。 */
+  private async import_files_in_write(
+    project_path: string,
+    request: JsonRecord,
+    signal: AbortSignal,
+  ): Promise<ProjectWriteResult> {
+    {
       this.assert_no_legacy_fields(request, PROJECT_DERIVED_FIELDS);
       const conflict_action = this.normalize_import_conflict_action(request["conflict_action"]);
       const file_commands = this.normalize_import_file_commands(request["files"]);
@@ -367,7 +415,7 @@ export class ProjectContentService {
       return parse_result.failed_files.length === 0
         ? write_result
         : { ...write_result, failed_files: parse_result.failed_files };
-    });
+    }
   }
 
   /**
@@ -1187,5 +1235,30 @@ export class ProjectContentService {
     return Array.isArray(value)
       ? value.map((item) => String(item)).filter((item) => item !== "")
       : [];
+  }
+}
+
+/**
+ * Agent 导入只新增不覆盖：目标名与现有资产做大小写不敏感比较，冲突时追加序号。
+ */
+function allocate_import_asset_path(
+  file_name: string,
+  asset_records: readonly ProjectAssetRecord[],
+): string {
+  const safe_name = path.basename(file_name);
+  if (safe_name === "" || safe_name !== file_name || safe_name === "." || safe_name === "..") {
+    throw new AppErrors.AppError("request.validation_failed", {
+      diagnostic_context: { reason: "invalid_import_file_name", file_name },
+    });
+  }
+  const existing = new Set(
+    asset_records.map((record) => normalize_project_asset_path(record.path).toLowerCase()),
+  );
+  const candidate = normalize_project_asset_path(safe_name);
+  if (!existing.has(candidate.toLowerCase())) return candidate;
+  const parsed = path.parse(candidate);
+  for (let suffix = 2; ; suffix += 1) {
+    const renamed = `${parsed.name}_${suffix}${parsed.ext}`;
+    if (!existing.has(renamed.toLowerCase())) return renamed;
   }
 }

@@ -2052,6 +2052,63 @@ describe("ProjectContentService", () => {
     await database.close();
   });
 
+  it("Agent 租约内导入暂存文本并自动避开同名文件", async () => {
+    const { database, service, runtime_gate, lg_path } = await create_service();
+    const source = project_path("章节.txt");
+    fs.writeFileSync(source, "一行\n二行\n");
+    const lease = runtime_gate.begin_runtime("agent");
+    try {
+      const first = await service.import_source_file_under_agent({
+        source_path: source,
+        file_name: "测试小说 - 第一章.txt",
+      });
+      expect(first.asset_path).toBe("测试小说 - 第一章.txt");
+      const second = await service.import_source_file_under_agent({
+        source_path: source,
+        file_name: "测试小说 - 第一章.txt",
+      });
+      expect(second.asset_path).toBe("测试小说 - 第一章_2.txt");
+      expect((await database.get_all_asset_records(lg_path)).map((record) => record.path)).toEqual([
+        "测试小说 - 第一章.txt",
+        "测试小说 - 第一章_2.txt",
+      ]);
+      expect(await database.get_item_count(lg_path)).toBe(4);
+    } finally {
+      runtime_gate.finish_runtime(lease);
+    }
+    await database.close();
+  });
+
+  it("Agent 导入只在 Agent 租约内可用且拒绝越界文件名", async () => {
+    const { database, service, runtime_gate } = await create_service();
+    const source = project_path("x.txt");
+    fs.writeFileSync(source, "内容");
+
+    await expect(
+      service.import_source_file_under_agent({ source_path: source, file_name: "x.txt" }),
+    ).rejects.toThrow(expect.objectContaining({ code: "runtime.busy" }));
+    const lease = runtime_gate.begin_runtime("batch_translation");
+    try {
+      await expect(
+        service.import_source_file_under_agent({ source_path: source, file_name: "x.txt" }),
+      ).rejects.toThrow(expect.objectContaining({ code: "runtime.busy" }));
+    } finally {
+      runtime_gate.finish_runtime(lease);
+    }
+    const agent_lease = runtime_gate.begin_runtime("agent");
+    try {
+      await expect(
+        service.import_source_file_under_agent({
+          source_path: source,
+          file_name: "../escape.txt",
+        }),
+      ).rejects.toThrow(expect.objectContaining({ code: "request.validation_failed" }));
+    } finally {
+      runtime_gate.finish_runtime(agent_lease);
+    }
+    await database.close();
+  });
+
   it("工作台 write 中途失败时仍释放文件 guard", async () => {
     const { database, service, lg_path } = await create_service();
     await database.transaction(lg_path, (writer) =>
