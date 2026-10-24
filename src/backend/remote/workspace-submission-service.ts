@@ -67,6 +67,8 @@ export interface RemoteWorkspaceSubmissionServiceOptions {
   settings: Pick<AppSettingService, "read_setting">;
   client: NoveliaClient;
   llm: LLMClientPort;
+  /** 收到认证拒绝时触发登录链路的 token 续期；CLI 缺席。 */
+  refresh_credentials?: ((origin: string) => Promise<boolean>) | undefined;
 }
 
 interface AssetItem {
@@ -94,6 +96,7 @@ export class RemoteWorkspaceSubmissionService {
   private readonly settings: Pick<AppSettingService, "read_setting">;
   private readonly client: NoveliaClient;
   private readonly llm: LLMClientPort;
+  private readonly refresh_credentials: ((origin: string) => Promise<boolean>) | null;
   private readonly listeners = new Set<(snapshot: RemoteWorkspaceSnapshot) => void>();
   private snapshot: RemoteWorkspaceSnapshot = create_idle_snapshot();
   private running: RunningSubmission | null = null;
@@ -105,6 +108,7 @@ export class RemoteWorkspaceSubmissionService {
     this.settings = options.settings;
     this.client = options.client;
     this.llm = options.llm;
+    this.refresh_credentials = options.refresh_credentials ?? null;
   }
 
   public get_snapshot(): RemoteWorkspaceSnapshot {
@@ -265,11 +269,13 @@ export class RemoteWorkspaceSubmissionService {
     missing: number;
     message: string | null;
   }> {
-    let task = await this.client.read_chapter_task(
-      args.ref,
-      args.chapter,
-      { sync: this.should_sync_chapter(args.ref) },
-      args.signal,
+    let task = await this.call_with_credential_refresh(args.ref.origin, () =>
+      this.client.read_chapter_task(
+        args.ref,
+        args.chapter,
+        { sync: this.should_sync_chapter(args.ref) },
+        args.signal,
+      ),
     );
     const paragraphs = task.paragraph_jp;
     if (paragraphs.length === 0) {
@@ -344,28 +350,29 @@ export class RemoteWorkspaceSubmissionService {
     }
     const paragraphs_zh = resolved.map((value) => value ?? "");
     try {
-      await this.client.write_chapter_translation(
-        args.ref,
-        args.chapter,
-        { glossary_id: task.glossary_id, paragraphs_zh },
-        args.signal,
+      await this.call_with_credential_refresh(args.ref.origin, () =>
+        this.client.write_chapter_translation(
+          args.ref,
+          args.chapter,
+          { glossary_id: task.glossary_id, paragraphs_zh },
+          args.signal,
+        ),
       );
     } catch (error) {
       if (args.signal.aborted) throw error;
       // 术语表在取任务与上传之间变化时刷新一次；仍失败则记录本章失败。
-      const refreshed = await this.client.read_chapter_task(
-        args.ref,
-        args.chapter,
-        { sync: false },
-        args.signal,
+      const refreshed = await this.call_with_credential_refresh(args.ref.origin, () =>
+        this.client.read_chapter_task(args.ref, args.chapter, { sync: false }, args.signal),
       );
       if (refreshed.glossary_id === task.glossary_id) throw error;
       task = refreshed;
-      await this.client.write_chapter_translation(
-        args.ref,
-        args.chapter,
-        { glossary_id: task.glossary_id, paragraphs_zh },
-        args.signal,
+      await this.call_with_credential_refresh(args.ref.origin, () =>
+        this.client.write_chapter_translation(
+          args.ref,
+          args.chapter,
+          { glossary_id: task.glossary_id, paragraphs_zh },
+          args.signal,
+        ),
       );
     }
     return {
@@ -376,6 +383,25 @@ export class RemoteWorkspaceSubmissionService {
       missing: 0,
       message: null,
     };
+  }
+
+  /**
+   * 站点拒绝凭据时触发一次登录链路的 token 续期，成功则对当前请求重试一次；
+   * 续期不可用或仍被拒绝时保持原错误，交给既有失败统计。
+   */
+  private async call_with_credential_refresh<T>(
+    origin: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "remote.auth_rejected") throw error;
+      if (this.refresh_credentials === null) throw error;
+      const refreshed = await this.refresh_credentials(origin).catch(() => false);
+      if (!refreshed) throw error;
+      return await operation();
+    }
   }
 
   /**

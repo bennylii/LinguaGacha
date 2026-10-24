@@ -4,13 +4,20 @@ export const zh_cn_remote_page = {
   load_failed: "读取远程状态失败 …",
   auth: {
     title: "站点连接",
-    description: "通过 ntr-toolbox 桥接或手动粘贴同步 n.novelia.cc 凭据；token 只显示末位。",
+    description:
+      "在内嵌窗口登录 n.novelia.cc，或通过 ntr-toolbox 桥接、手动粘贴同步凭据；token 只显示末位。",
     origin: "站点地址",
     token: "站点 token 或 Cookie",
     token_placeholder: "粘贴 token、Cookie 串或 localStorage 中的 auth JSON",
     import: "导入凭据",
     imported: "凭据已保存",
     import_failed: "导入凭据失败 …",
+    login: "登录站点",
+    login_cancel: "取消登录",
+    login_running: "登录窗口已打开；完成后凭据会自动保存并续期。",
+    login_succeeded: "登录成功，凭据已保存",
+    login_failed: "登录失败 …",
+    expired: "已过期，请重新登录",
     clear: "清除当前站点",
     clear_all: "清除全部",
     clear_failed: "清除凭据失败 …",
@@ -19,6 +26,7 @@ export const zh_cn_remote_page = {
     source: {
       bridge: "桥接",
       manual: "手动",
+      login: "登录",
     },
     bridge: {
       running: "桥接监听中",

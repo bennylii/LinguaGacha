@@ -4,7 +4,11 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { NoveliaCredentialStore, extract_novelia_token } from "./novelia-credential-store";
+import {
+  NoveliaCredentialStore,
+  decode_novelia_token_payload,
+  extract_novelia_token,
+} from "./novelia-credential-store";
 
 function create_store(root: string): NoveliaCredentialStore {
   return new NoveliaCredentialStore({
@@ -150,5 +154,82 @@ describe("NoveliaCredentialStore", () => {
     expect(store.read_token("https://n.novelia.cc")).toBe("good");
     expect(store.read_token("https://evil.example")).toBeNull();
     expect(store.list()).toHaveLength(1);
+  });
+
+  it("登录凭据保存 Cookie 并支持过期标记与恢复", () => {
+    using root = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-novelia-auth-"));
+    const store = create_store(root.path);
+    const status = store.save_token({
+      origin: "https://n.novelia.cc",
+      raw_token: "login-token-value",
+      cookie: "refresh-session=abc; theme=dark",
+      source: "login",
+    });
+
+    expect(status).toMatchObject({ source: "login", expired: false, token_tail: "alue" });
+    expect(store.read_credential("https://n.novelia.cc")).toEqual({
+      token: "login-token-value",
+      cookie: "refresh-session=abc; theme=dark",
+    });
+
+    store.mark_expired("https://n.novelia.cc", true);
+    expect(store.list()[0]).toMatchObject({ expired: true });
+    // 重复标记不产生多余写入，读取结果保持稳定。
+    store.mark_expired("https://n.novelia.cc", true);
+    expect(store.read_credential("https://n.novelia.cc")).toMatchObject({
+      token: "login-token-value",
+    });
+
+    store.save_token({
+      origin: "https://n.novelia.cc",
+      raw_token: "login-token-value",
+      source: "login",
+    });
+    expect(store.list()[0]).toMatchObject({ expired: false });
+    // 未提供 cookie 的重新保存会清掉旧 Cookie 串。
+    expect(store.read_credential("https://n.novelia.cc")).toEqual({
+      token: "login-token-value",
+      cookie: "",
+    });
+  });
+
+  it("手动凭据没有 Cookie 且不受过期标记影响", () => {
+    using root = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-novelia-auth-"));
+    const store = create_store(root.path);
+    store.save_token({
+      origin: "https://n.novelia.cc",
+      raw_token: "manual-token",
+      source: "manual",
+    });
+    expect(store.read_credential("https://n.novelia.cc")).toEqual({
+      token: "manual-token",
+      cookie: "",
+    });
+    expect(store.list()[0]).toMatchObject({ expired: false });
+  });
+});
+
+describe("decode_novelia_token_payload", () => {
+  /** 构造一个仅用于解码测试的最小 JWT。 */
+  function encode_payload(payload: Record<string, unknown>): string {
+    return ["header", Buffer.from(JSON.stringify(payload)).toString("base64url"), "signature"].join(
+      ".",
+    );
+  }
+
+  it("解出 sub、iat 与 exp", () => {
+    const payload = decode_novelia_token_payload(
+      encode_payload({ sub: "user", iat: 1_700_000_000, exp: 1_700_007_200, role: "Member" }),
+    );
+    expect(payload).toEqual({ sub: "user", iat: 1_700_000_000, exp: 1_700_007_200 });
+  });
+
+  it("结构或字段不完整时返回 null", () => {
+    expect(decode_novelia_token_payload("not-a-jwt")).toBeNull();
+    expect(decode_novelia_token_payload("a.b.c")).toBeNull();
+    expect(
+      decode_novelia_token_payload(encode_payload({ sub: "user", iat: "x", exp: 1 })),
+    ).toBeNull();
+    expect(decode_novelia_token_payload(encode_payload({ iat: 1, exp: 2 }))).toBeNull();
   });
 });

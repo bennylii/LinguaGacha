@@ -1,5 +1,6 @@
 import type { PDFHostOperation } from "./pdf";
 import type { AgentImageHostOperation } from "./agent-image";
+import type { RemoteAuthRefreshOperation, RemoteLoginWindowOperation } from "./remote-auth-host";
 import type { LogError, LogErrorContext } from "./error";
 import type { LocaleKey } from "./i18n";
 import type { NetworkProxyPolicy } from "../domain/setting";
@@ -21,6 +22,8 @@ export type BackendRuntimeResult<T = unknown> =
 export type BackendRuntimeHostOperation =
   | PDFHostOperation
   | AgentImageHostOperation
+  | RemoteLoginWindowOperation
+  | RemoteAuthRefreshOperation
   | { kind: "resolve_proxy"; url: string }
   | { kind: "open_directory"; path: string }
   | { kind: "pick_save_path"; defaultName: string }

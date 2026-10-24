@@ -9,7 +9,7 @@ const WENKU_REF = parse_novel_url("https://n.novelia.cc/wenku/abc");
 
 type Handler = (url: URL, init: RequestInit) => Response | Promise<Response>;
 
-function create_client(handler: Handler, token: string | null = null) {
+function create_client(handler: Handler, token: string | null = null, cookie = "") {
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const http = {
     fetch: (async (input: string | URL | Request, init?: RequestInit) => {
@@ -20,7 +20,10 @@ function create_client(handler: Handler, token: string | null = null) {
       return handler(url, init ?? {});
     }) as typeof globalThis.fetch,
   };
-  return { client: new NoveliaClient(http, () => token), requests };
+  return {
+    client: new NoveliaClient(http, () => (token === null ? null : { token, cookie })),
+    requests,
+  };
 }
 
 function json(body: unknown, status = 200): Response {
@@ -458,6 +461,23 @@ describe("NoveliaClient 文库", () => {
       paragraphsZh: ["A"],
       sakuraVersion: "0.9",
     });
+  });
+
+  it("必需鉴权请求原样携带凭据 Cookie 头", async () => {
+    const { client, requests } = create_client(
+      () => json({ paragraphJp: ["甲"] }),
+      "token",
+      "sid=abc; theme=dark",
+    );
+    await client.read_chapter_task(
+      WENKU_REF,
+      { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一卷 001.txt", translated: false },
+      { sync: false },
+    );
+
+    const headers = requests[0]?.init.headers as Headers;
+    expect(headers.get("cookie")).toBe("sid=abc; theme=dark");
+    expect(headers.get("authorization")).toBe("Bearer token");
   });
 
   it("工作区读取目录时不下载章节正文", async () => {

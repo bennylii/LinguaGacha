@@ -77,6 +77,8 @@ const POST_PATHS = new Set([
   "/api/remote/workspace/snapshot",
   "/api/remote/source/read",
   "/api/remote/auth/status",
+  "/api/remote/auth/login",
+  "/api/remote/auth/login/cancel",
   "/api/remote/auth/import",
   "/api/remote/auth/clear",
   "/api/remote/auth/bridge",

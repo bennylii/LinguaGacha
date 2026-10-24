@@ -8,6 +8,7 @@ import { resolve_workspace_runtime_entry } from "../../native/workspace-runtime"
 import { pathToFileURL } from "node:url";
 import { PDFWorker } from "../file/pdf/pdf-worker";
 import type { PDFHost } from "../../shared/pdf";
+import type { RemoteAuthHost } from "../../shared/remote-auth-host";
 import { AppMetadataService } from "../app/app-metadata-service";
 import { AppPathService } from "../app/app-path-service";
 import { AppSettingsCommandService } from "../app/app-settings-command-service";
@@ -59,6 +60,7 @@ import { ProjectFileLock } from "../project/project-file-lock";
 import { InstanceRegistryService } from "../app/instance-registry-service";
 import type { JsonRecord } from "../../domain/json";
 import { PROJECT_CHANGE_EVENT_TOPIC } from "../../shared/project-event";
+import { REMOTE_AUTH_SNAPSHOT_EVENT_TOPIC } from "../../shared/remote-auth-host";
 import { MODEL_CATALOG_UPDATED_EVENT_TOPIC } from "../../shared/model-catalog";
 import {
   RUNTIME_ACTIVITY_EVENT_TOPIC,
@@ -80,6 +82,7 @@ export interface BackendServicesOptions {
   openOutputFolder: OutputFolderOpener; // GUI 专用副作用，CLI 注入空实现
   focusWindow?: (() => Promise<void>) | undefined; // GUI 宿主窗口聚焦；CLI 缺席
   openProjectWindow?: ((project_path: string) => Promise<void>) | undefined; // 新进程窗口入口
+  remoteAuthHost?: RemoteAuthHost | undefined; // 内嵌登录窗口与续期；CLI 缺席时登录拒绝、刷新停用
   workerExecution: BackendWorkerExecution; // 入口层注入的 Backend worker 执行配置
   noveliaFetch?: typeof globalThis.fetch; // 允许跟随 302 的专用 transport；测试可省略
 }
@@ -156,6 +159,7 @@ export class BackendServices {
   private task_stream_unsubscribe: (() => void) | null; // dispose 时先切断任务事件发布
   private runtime_stream_unsubscribe: (() => void) | null; // dispose 时停止发布已关闭业务根的事件
   private remote_stream_unsubscribe: (() => void) | null; // 工作区提交进度只发布完整快照
+  private remote_auth_stream_unsubscribe: (() => void) | null; // 凭据与登录状态只发布完整快照
 
   public readonly app: BackendAppServices;
   public readonly runtime: BackendRuntimeServices;
@@ -252,7 +256,7 @@ export class BackendServices {
     );
     const novelia_client = new NoveliaClient(
       { fetch: options.noveliaFetch ?? globalThis.fetch },
-      (origin) => novelia_credentials.read_token(origin),
+      (origin) => novelia_credentials.read_credential(origin),
     );
     const remote_sources = new NovelSourceService({
       paths,
@@ -263,15 +267,17 @@ export class BackendServices {
       writer: project_content,
       project_lock,
     });
-    this.remote = {
-      auth: new RemoteAuthService({
+    const remote_auth = new RemoteAuthService({
+      credentials: novelia_credentials,
+      bridge: new NoveliaAuthBridge({
         credentials: novelia_credentials,
-        bridge: new NoveliaAuthBridge({
-          credentials: novelia_credentials,
-          log: this.logManager,
-        }),
-        settings: this.app_setting_service,
+        log: this.logManager,
       }),
+      settings: this.app_setting_service,
+      auth_host: options.remoteAuthHost,
+    });
+    this.remote = {
+      auth: remote_auth,
       sources: remote_sources,
       workspace: new RemoteWorkspaceSubmissionService({
         database,
@@ -280,6 +286,8 @@ export class BackendServices {
         settings: this.app_setting_service,
         client: novelia_client,
         llm: llm_client,
+        refresh_credentials: async (origin) =>
+          await remote_auth.try_refresh(origin, { force: true }),
       }),
       snapshots: remote_snapshots,
       projectLock: project_lock,
@@ -449,6 +457,11 @@ export class BackendServices {
         remote_workspace: snapshot as unknown as JsonRecord,
       });
     });
+    this.remote_auth_stream_unsubscribe = this.remote.auth.subscribe((snapshot) => {
+      options.publishEvent(REMOTE_AUTH_SNAPSHOT_EVENT_TOPIC, {
+        auth: snapshot as unknown as JsonRecord,
+      });
+    });
   }
 
   /** GUI 启动后按设置启动本地凭据桥接；CLI 不监听端口。 */
@@ -503,6 +516,8 @@ export class BackendServices {
     this.runtime_stream_unsubscribe = null;
     this.remote_stream_unsubscribe?.();
     this.remote_stream_unsubscribe = null;
+    this.remote_auth_stream_unsubscribe?.();
+    this.remote_auth_stream_unsubscribe = null;
     await remote_workspace;
     try {
       await this.task_runtime.dispose();

@@ -1,8 +1,9 @@
 import { type JSX, useCallback, useEffect, useState } from "react";
-import { CloudDownload, RefreshCw, Send, ShieldCheck, Unlink } from "lucide-react";
+import { CloudDownload, LogIn, RefreshCw, Send, ShieldCheck, Unlink, X } from "lucide-react";
 
 import { api_fetch, open_event_stream } from "@frontend/app/desktop/desktop-api";
 import { push_error_toast, push_toast } from "@frontend/app/feedback/desktop-toast";
+import { useAppearance } from "@frontend/app/appearance/appearance-context";
 import { useI18n } from "@frontend/app/locale/locale-context";
 import { Badge } from "@frontend/shadcn/badge";
 import { Input } from "@frontend/shadcn/input";
@@ -18,7 +19,8 @@ type RemoteCredential = {
   origin: string;
   token_tail: string;
   updated_at: string;
-  source: "bridge" | "manual";
+  source: "bridge" | "manual" | "login";
+  expired: boolean;
 };
 
 type RemoteAuth = {
@@ -32,6 +34,11 @@ type RemoteAuth = {
       address: string | null;
       error: string | null;
     };
+  };
+  login: {
+    running: boolean;
+    origin: string | null;
+    started_at: string | null;
   };
 };
 
@@ -150,18 +157,22 @@ const REMOTE_TRANSLATION_BLOCKED_STATUSES = new Set([
  */
 export function RemotePage(): JSX.Element {
   const { t } = useI18n();
+  const { resolved_theme } = useAppearance();
   const [auth, set_auth] = useState<RemoteAuth | null>(null);
   const [source, set_source] = useState<RemoteSource | null>(null);
   const [workspace, set_workspace] = useState<RemoteWorkspaceSnapshot | null>(null);
   const [token_input, set_token_input] = useState("");
   const [origin_input, set_origin_input] = useState("");
   const [is_auth_busy, set_is_auth_busy] = useState(false);
+  const [is_login_busy, set_is_login_busy] = useState(false);
   const [preview, set_preview] = useState<RemoteSyncPreview | null>(null);
   const [align, set_align] = useState<RemoteAlignPreview | null>(null);
   const [overrides, set_overrides] = useState<Map<number, RowOverride>>(() => new Map());
   const [sync_mode, set_sync_mode] = useState<SyncMode>("auto");
   const [is_sync_busy, set_is_sync_busy] = useState(false);
   const [is_workspace_busy, set_is_workspace_busy] = useState(false);
+  // 登录请求在窗口关闭前一直挂起；快照里的 running 让 SSE 也能反映登录中。
+  const login_running = is_login_busy || (auth?.login.running ?? false);
 
   const refresh_auth = useCallback(async (): Promise<void> => {
     const payload = await api_fetch<{ auth: RemoteAuth }>("/api/remote/auth/status", {});
@@ -205,9 +216,19 @@ export function RemotePage(): JSX.Element {
         // 事件损坏时保持当前快照，下一次轮询或操作会重新读取。
       }
     };
+    const handle_auth = (event: MessageEvent<string>): void => {
+      try {
+        const payload = JSON.parse(event.data) as { auth?: RemoteAuth };
+        if (payload.auth !== undefined) set_auth(payload.auth);
+      } catch {
+        // 事件损坏时保持当前快照，下一次操作会重新读取。
+      }
+    };
     event_source.addEventListener("remote_workspace.snapshot_changed", handle_workspace);
+    event_source.addEventListener("remote_auth.snapshot_changed", handle_auth);
     return () => {
       event_source.removeEventListener("remote_workspace.snapshot_changed", handle_workspace);
+      event_source.removeEventListener("remote_auth.snapshot_changed", handle_auth);
       event_source.close();
     };
   }, [refresh_all, t]);
@@ -258,6 +279,33 @@ export function RemotePage(): JSX.Element {
       push_error_toast(t("remote_page.auth.bridge.failed"), error);
     } finally {
       set_is_auth_busy(false);
+    }
+  }
+
+  /** 内嵌窗口登录：请求在窗口关闭或超时前挂起，期间快照由 SSE 持续推送。 */
+  async function start_login(): Promise<void> {
+    if (is_auth_busy || login_running) return;
+    set_is_login_busy(true);
+    try {
+      const payload = await api_fetch<{ auth: RemoteAuth }>("/api/remote/auth/login", {
+        origin: origin_input.trim(),
+        theme: resolved_theme,
+      });
+      set_auth(payload.auth);
+      push_toast("success", t("remote_page.auth.login_succeeded"));
+    } catch (error) {
+      push_error_toast(t("remote_page.auth.login_failed"), error);
+    } finally {
+      set_is_login_busy(false);
+    }
+  }
+
+  async function cancel_login(): Promise<void> {
+    try {
+      const payload = await api_fetch<{ auth: RemoteAuth }>("/api/remote/auth/login/cancel", {});
+      set_auth(payload.auth);
+    } catch (error) {
+      push_error_toast(t("remote_page.auth.login_failed"), error);
     }
   }
 
@@ -405,6 +453,34 @@ export function RemotePage(): JSX.Element {
             {auth?.bridge.status.error ? ` · ${auth.bridge.status.error}` : ""}
           </p>
 
+          <div className="remote-page__actions">
+            <AppButton
+              type="button"
+              disabled={is_auth_busy || login_running}
+              onClick={() => {
+                void start_login();
+              }}
+            >
+              <LogIn data-icon="inline-start" />
+              {t("remote_page.auth.login")}
+            </AppButton>
+            {login_running ? (
+              <AppButton
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  void cancel_login();
+                }}
+              >
+                <X data-icon="inline-start" />
+                {t("remote_page.auth.login_cancel")}
+              </AppButton>
+            ) : null}
+          </div>
+          {login_running ? (
+            <p className="remote-page__hint">{t("remote_page.auth.login_running")}</p>
+          ) : null}
+
           <Textarea
             value={token_input}
             aria-label={t("remote_page.auth.token")}
@@ -459,10 +535,13 @@ export function RemotePage(): JSX.Element {
                     {t(
                       credential.source === "bridge"
                         ? "remote_page.auth.source.bridge"
-                        : "remote_page.auth.source.manual",
+                        : credential.source === "login"
+                          ? "remote_page.auth.source.login"
+                          : "remote_page.auth.source.manual",
                     )}
                     {" · "}
                     {format_local_timestamp(credential.updated_at) ?? credential.updated_at}
+                    {credential.expired ? ` · ${t("remote_page.auth.expired")}` : ""}
                   </span>
                 </li>
               ))}

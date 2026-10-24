@@ -8,13 +8,20 @@ export const en_us_remote_page = {
   auth: {
     title: "Site connection",
     description:
-      "Sync n.novelia.cc credentials through the ntr-toolbox bridge or paste them manually; only the token tail is shown.",
+      "Log in to n.novelia.cc in an embedded window, or sync credentials via the ntr-toolbox bridge or manual paste; only the token tail is shown.",
     origin: "Site origin",
     token: "Site token or cookie",
     token_placeholder: "Paste a token, cookie string, or the localStorage auth JSON",
     import: "Import credential",
     imported: "Credential saved",
     import_failed: "Failed to import credential …",
+    login: "Log in to site",
+    login_cancel: "Cancel login",
+    login_running:
+      "The login window is open; credentials are saved and refreshed automatically when done.",
+    login_succeeded: "Logged in; credential saved",
+    login_failed: "Login failed …",
+    expired: "Expired, log in again",
     clear: "Clear this site",
     clear_all: "Clear all",
     clear_failed: "Failed to clear credentials …",
@@ -23,6 +30,7 @@ export const en_us_remote_page = {
     source: {
       bridge: "bridge",
       manual: "manual",
+      login: "login",
     },
     bridge: {
       running: "Bridge listening",

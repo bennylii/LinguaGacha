@@ -8,19 +8,29 @@ const AUTH_DIRECTORY = "auth";
 const AUTH_FILE_NAME = "novelia.json";
 const MAX_TOKEN_LENGTH = 8192;
 
-export type NoveliaCredentialSource = "bridge" | "manual";
+export type NoveliaCredentialSource = "bridge" | "manual" | "login";
+const CREDENTIAL_SOURCES: readonly NoveliaCredentialSource[] = ["bridge", "manual", "login"];
 
 export interface NoveliaCredentialStatus {
   origin: string;
   token_tail: string; // 只公开末位，界面用于确认同步的是哪一份凭据
   updated_at: string;
   source: NoveliaCredentialSource;
+  expired: boolean; // 登录来源续期失败后的标记，提示重新登录
+}
+
+/** 请求期凭据：Bearer token 与可选的 auth 域 Cookie 串。 */
+export interface NoveliaCredential {
+  token: string;
+  cookie: string;
 }
 
 interface StoredCredential {
   token: string;
+  cookie: string;
   updated_at: string;
   source: NoveliaCredentialSource;
+  expired: boolean;
 }
 
 interface StoredAuthFile {
@@ -47,15 +57,23 @@ export class NoveliaCredentialStore {
 
   /** 请求期读取当前 token；外部实例刚写入的凭据也能立即生效。 */
   public read_token(origin: string): string | null {
-    const normalized = normalize_novel_origin(origin);
-    if (normalized === null) return null;
-    return this.read_file().origins[normalized]?.token ?? null;
+    return this.read_credential(origin)?.token ?? null;
   }
 
-  /** 手动导入与桥接推送共用的唯一写入口。 */
+  /** 请求期读取完整凭据；token 与 Cookie 一起供客户端注入请求头。 */
+  public read_credential(origin: string): NoveliaCredential | null {
+    const normalized = normalize_novel_origin(origin);
+    if (normalized === null) return null;
+    const credential = this.read_file().origins[normalized];
+    if (credential === undefined) return null;
+    return { token: credential.token, cookie: credential.cookie };
+  }
+
+  /** 手动导入、桥接推送与登录续期共用的唯一写入口；cookie 仅登录链路提供。 */
   public save_token(input: {
     origin: string;
     raw_token: string;
+    cookie?: string;
     source: NoveliaCredentialSource;
   }): NoveliaCredentialStatus {
     const origin = normalize_novel_origin(input.origin);
@@ -67,14 +85,30 @@ export class NoveliaCredentialStore {
       throw new AppError("request.validation_failed", { public_details: { field: "token" } });
     }
     const file = this.read_file();
+    // 重新保存（含续期成功）视为凭据恢复有效。
     const credential: StoredCredential = {
       token,
+      cookie: input.cookie?.trim() ?? "",
       updated_at: new Date().toISOString(),
       source: input.source,
+      expired: false,
     };
     file.origins[origin] = credential;
     this.write_file(file);
     return to_status(origin, credential);
+  }
+
+  /** 续期失败时只打过期标记，不删除凭据；恢复有效由 save_token 完成。 */
+  public mark_expired(origin: string, expired: boolean): void {
+    const normalized = normalize_novel_origin(origin);
+    if (normalized === null) {
+      throw new AppError("request.validation_failed", { public_details: { field: "origin" } });
+    }
+    const file = this.read_file();
+    const credential = file.origins[normalized];
+    if (credential === undefined || credential.expired === expired) return;
+    file.origins[normalized] = { ...credential, expired };
+    this.write_file(file);
   }
 
   /** 省略 origin 时清空全部站点凭据；返回清除后的状态列表。 */
@@ -124,10 +158,21 @@ export class NoveliaCredentialStore {
       const raw_token = raw_credential["token"];
       const token = typeof raw_token === "string" ? extract_novelia_token(raw_token) : null;
       if (token === null) continue;
-      const source = raw_credential["source"] === "bridge" ? "bridge" : "manual";
-      const updated_at =
-        typeof raw_credential["updated_at"] === "string" ? raw_credential["updated_at"] : "";
-      origins[origin] = { token, updated_at, source };
+      const raw_source = raw_credential["source"];
+      const source =
+        typeof raw_source === "string" &&
+        (CREDENTIAL_SOURCES as readonly string[]).includes(raw_source)
+          ? (raw_source as NoveliaCredentialSource)
+          : "manual";
+      const raw_cookie = raw_credential["cookie"];
+      origins[origin] = {
+        token,
+        cookie: typeof raw_cookie === "string" ? raw_cookie : "",
+        updated_at:
+          typeof raw_credential["updated_at"] === "string" ? raw_credential["updated_at"] : "",
+        source,
+        expired: raw_credential["expired"] === true,
+      };
     }
     return { origins };
   }
@@ -147,7 +192,39 @@ function to_status(origin: string, credential: StoredCredential): NoveliaCredent
     token_tail: credential.token.length <= 8 ? "****" : credential.token.slice(-4),
     updated_at: credential.updated_at,
     source: credential.source,
+    expired: credential.expired,
   };
+}
+
+export interface NoveliaTokenPayload {
+  sub: string;
+  iat: number; // 签发时间（秒），续期冷却的判定依据
+  exp: number; // 过期时间（秒），仅用于状态显示
+}
+
+/**
+ * 只解码 JWT payload 用于调度与状态显示，不验证签名；
+ * 解析失败或缺少关键字段时返回 null，调用方按无载荷处理。
+ */
+export function decode_novelia_token_payload(token: string): NoveliaTokenPayload | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8"));
+    if (!is_record(parsed)) return null;
+    const iat = read_seconds(parsed["iat"]);
+    const exp = read_seconds(parsed["exp"]);
+    if (iat === null || exp === null || typeof parsed["sub"] !== "string" || parsed["sub"] === "") {
+      return null;
+    }
+    return { sub: parsed["sub"], iat, exp };
+  } catch {
+    return null;
+  }
+}
+
+function read_seconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 /**

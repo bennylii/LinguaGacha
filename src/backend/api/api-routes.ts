@@ -136,6 +136,12 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.postJson("/api/remote/auth/status", () => ({
     auth: remote.auth.snapshot() as unknown as JsonValue,
   }));
+  context.postJson("/api/remote/auth/login", async (body) => ({
+    auth: (await remote.auth.login(body)) as unknown as JsonValue,
+  }));
+  context.postJson("/api/remote/auth/login/cancel", async () => ({
+    auth: (await remote.auth.cancel_login()) as unknown as JsonValue,
+  }));
   context.postJson("/api/remote/auth/import", (body) => ({
     auth: remote.auth.import(body) as unknown as JsonValue,
   }));

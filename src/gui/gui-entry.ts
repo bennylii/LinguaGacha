@@ -17,6 +17,7 @@ import {
   create_main_window,
 } from "./shell/desktop-window-host";
 import { type LogWindowHost } from "./shell/log-window-host";
+import { create_remote_login_window_host } from "./shell/remote-login-window-host";
 import { install_main_fatal_error_handler } from "./shell/main-fatal-error-handler";
 import { try_show_native_error_dialog } from "./shell/native-error-dialog";
 import {
@@ -81,6 +82,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
       app.isPackaged ? "build/dist/fonts" : "public/fonts",
     ),
   });
+  const remote_login_window_host = create_remote_login_window_host();
   const backend_runtime = new BackendRuntimeClient({
     workerEntryUrl: options.backendRuntimeWorkerEntryUrl,
     appRoot: app_root,
@@ -88,6 +90,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     workspaceRuntimeDirectory: workspace_runtime_directory,
     pdfHost: pdf_host,
     imageHost: prepare_agent_image,
+    remoteAuthHost: remote_login_window_host,
     resolveProxy: (url) => session.defaultSession.resolveProxy(url),
     openDirectory: open_directory,
     pickSavePath: async (default_name) => {
@@ -258,6 +261,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
           await backend_runtime.stop();
         } finally {
           await pdf_host.dispose();
+          await remote_login_window_host.dispose();
         }
         await launch_update?.();
       } catch (error) {

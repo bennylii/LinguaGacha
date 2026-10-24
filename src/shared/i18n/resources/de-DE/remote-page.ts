@@ -9,13 +9,20 @@ export const de_de_remote_page = {
   auth: {
     title: "Website-Verbindung",
     description:
-      "n.novelia.cc-Zugangsdaten über die ntr-toolbox-Brücke oder manuell einfügen; nur die Token-Endung wird angezeigt.",
+      "In einem eingebetteten Fenster bei n.novelia.cc anmelden oder Zugangsdaten über die ntr-toolbox-Brücke bzw. manuell synchronisieren; nur die Token-Endung wird angezeigt.",
     origin: "Website-Adresse",
     token: "Website-Token oder Cookie",
     token_placeholder: "Token, Cookie-Zeichenkette oder auth-JSON aus localStorage einfügen",
     import: "Zugangsdaten importieren",
     imported: "Zugangsdaten gespeichert",
     import_failed: "Import der Zugangsdaten fehlgeschlagen …",
+    login: "Bei der Seite anmelden",
+    login_cancel: "Anmeldung abbrechen",
+    login_running:
+      "Das Anmeldefenster ist geöffnet; Zugangsdaten werden nach Abschluss automatisch gespeichert und erneuert.",
+    login_succeeded: "Angemeldet; Zugangsdaten gespeichert",
+    login_failed: "Anmeldung fehlgeschlagen …",
+    expired: "Abgelaufen, bitte neu anmelden",
     clear: "Diese Website löschen",
     clear_all: "Alle löschen",
     clear_failed: "Löschen der Zugangsdaten fehlgeschlagen …",
@@ -24,6 +31,7 @@ export const de_de_remote_page = {
     source: {
       bridge: "Brücke",
       manual: "Manuell",
+      login: "Anmeldung",
     },
     bridge: {
       running: "Brücke lauscht",

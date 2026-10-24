@@ -29,6 +29,10 @@ vi.mock("@frontend/app/feedback/desktop-toast", () => ({
   push_toast: push_toast_mock,
 }));
 
+vi.mock("@frontend/app/appearance/appearance-context", () => ({
+  useAppearance: () => ({ resolved_theme: "light" }),
+}));
+
 const AUTH_SNAPSHOT = {
   default_origin: "https://n.novelia.cc",
   origins: [
@@ -37,6 +41,7 @@ const AUTH_SNAPSHOT = {
       token_tail: "abcd",
       updated_at: "2026-10-01T10:00:00",
       source: "manual",
+      expired: false,
     },
   ],
   bridge: {
@@ -47,6 +52,11 @@ const AUTH_SNAPSHOT = {
       address: "127.0.0.1:7331",
       error: null,
     },
+  },
+  login: {
+    running: false,
+    origin: null,
+    started_at: null,
   },
 };
 
@@ -378,5 +388,87 @@ describe("RemotePage", () => {
       mode: "missing",
     });
     expect(page.textContent).toContain("提交中");
+  });
+
+  it("通过内嵌窗口登录并保存登录来源凭据", async () => {
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/auth/status") return { auth: AUTH_SNAPSHOT };
+      if (path === "/api/remote/source/read") return { source: SOURCE_SNAPSHOT };
+      if (path === "/api/remote/workspace/snapshot") {
+        return { remote_workspace: WORKSPACE_SNAPSHOT };
+      }
+      if (path === "/api/remote/auth/login") {
+        return {
+          auth: {
+            ...AUTH_SNAPSHOT,
+            origins: [
+              {
+                origin: "https://n.novelia.cc",
+                token_tail: "log1",
+                updated_at: "2026-10-03T12:00:00",
+                source: "login",
+                expired: false,
+              },
+            ],
+          },
+        };
+      }
+
+      return {};
+    });
+
+    const page = await mount_page();
+    await act(async () => {
+      get_button_by_text(page, "登录站点").click();
+    });
+
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/auth/login", {
+      origin: "https://n.novelia.cc",
+      theme: "light",
+    });
+    expect(push_toast_mock).toHaveBeenCalledWith("success", "登录成功，凭据已保存");
+    expect(page.textContent).toContain("尾号 log1");
+  });
+
+  it("登录中状态由事件流推送并可取消", async () => {
+    const page = await mount_page();
+    const auth_listener = event_source.addEventListener.mock.calls.find(
+      (call) => call[0] === "remote_auth.snapshot_changed",
+    )?.[1];
+    if (typeof auth_listener !== "function") throw new Error("未订阅登录状态事件。");
+
+    await act(async () => {
+      auth_listener(
+        new MessageEvent("remote_auth.snapshot_changed", {
+          data: JSON.stringify({
+            auth: {
+              ...AUTH_SNAPSHOT,
+              login: {
+                running: true,
+                origin: "https://n.novelia.cc",
+                started_at: "2026-10-03T12:00:00",
+              },
+            },
+          }),
+        }),
+      );
+    });
+
+    expect(page.textContent).toContain("登录窗口已打开");
+
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/auth/login/cancel") {
+        return {
+          auth: { ...AUTH_SNAPSHOT, login: { running: false, origin: null, started_at: null } },
+        };
+      }
+      return {};
+    });
+    await act(async () => {
+      get_button_by_text(page, "取消登录").click();
+    });
+
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/auth/login/cancel", {});
+    expect(page.textContent).not.toContain("登录窗口已打开");
   });
 });

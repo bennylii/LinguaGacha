@@ -8,13 +8,20 @@ export const ja_jp_remote_page = {
   auth: {
     title: "サイト接続",
     description:
-      "ntr-toolbox ブリッジまたは手動貼り付けで n.novelia.cc の認証情報を同期します。token は末尾のみ表示されます。",
+      "埋め込みウィンドウで n.novelia.cc にログインするか、ntr-toolbox ブリッジや手動貼り付けで認証情報を同期します。token は末尾のみ表示されます。",
     origin: "サイトアドレス",
     token: "サイト token または Cookie",
     token_placeholder: "token、Cookie 文字列、localStorage の auth JSON を貼り付け",
     import: "認証情報をインポート",
     imported: "認証情報を保存しました",
     import_failed: "認証情報のインポートに失敗しました …",
+    login: "サイトにログイン",
+    login_cancel: "ログインをキャンセル",
+    login_running:
+      "ログインウィンドウを開いています。完了すると認証情報を自動的に保存・更新します。",
+    login_succeeded: "ログインしました。認証情報を保存しました",
+    login_failed: "ログインに失敗しました …",
+    expired: "有効期限切れです。再ログインしてください",
     clear: "このサイトを削除",
     clear_all: "すべて削除",
     clear_failed: "認証情報の削除に失敗しました …",
@@ -23,6 +30,7 @@ export const ja_jp_remote_page = {
     source: {
       bridge: "ブリッジ",
       manual: "手動",
+      login: "ログイン",
     },
     bridge: {
       running: "ブリッジ待ち受け中",

@@ -223,6 +223,11 @@ export const APP_ERROR_DEFINITIONS = {
     status: 500,
     severity: "expected",
   },
+  "remote.login_in_progress": {
+    message: "A remote login is already in progress.",
+    status: 409,
+    severity: "expected",
+  },
 } as const satisfies Readonly<Record<string, AppErrorDefinition>>;
 
 export type AppErrorCode = keyof typeof APP_ERROR_DEFINITIONS;

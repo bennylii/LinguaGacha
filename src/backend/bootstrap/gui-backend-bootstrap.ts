@@ -2,6 +2,7 @@ import { AgentPersonalityService } from "../agent/agent-personality-service";
 import { AgentSkillsService } from "../agent/agent-skills-service";
 import type { PDFHost } from "../../shared/pdf";
 import type { AgentImageHost } from "../../shared/agent-image";
+import type { RemoteAuthHost } from "../../shared/remote-auth-host";
 import { AgentImageService } from "../agent/agent-image-service";
 import { AgentService } from "../agent/agent-service";
 import { WebSearchService } from "../agent/web-search-service";
@@ -33,6 +34,7 @@ export interface GuiBackendBootstrapOptions {
   pickSavePath: (defaultName: string) => Promise<string | null>; // 原生保存选择，取消返回 null
   focusWindow?: (() => Promise<void>) | undefined; // 聚焦本实例窗口，供其他实例的切换请求调用
   openProjectWindow?: ((projectPath: string) => Promise<void>) | undefined; // 以 --project 启动新窗口
+  remoteAuthHost?: RemoteAuthHost | undefined; // 内嵌登录窗口与续期，Electron main 提供、CLI 缺席
   workerExecution: BackendWorkerExecution; // 正式 worker_threads 与测试执行策略
 }
 
@@ -111,6 +113,7 @@ export class GuiBackendBootstrap {
         openOutputFolder: this.options.openDirectory,
         focusWindow: this.options.focusWindow,
         openProjectWindow: this.options.openProjectWindow,
+        remoteAuthHost: this.options.remoteAuthHost,
         pdfHost: this.options.pdfHost,
         workspaceRuntimeDirectory: this.options.workspaceRuntimeDirectory,
         workerExecution: this.options.workerExecution,

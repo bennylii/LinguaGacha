@@ -8,13 +8,19 @@ export const ko_kr_remote_page = {
   auth: {
     title: "사이트 연결",
     description:
-      "ntr-toolbox 브리지 또는 직접 붙여넣기로 n.novelia.cc 자격 증명을 동기화합니다. token은 끝자리만 표시됩니다.",
+      "내장 창에서 n.novelia.cc에 로그인하거나 ntr-toolbox 브리지 또는 직접 붙여넣기로 자격 증명을 동기화합니다. token은 끝자리만 표시됩니다.",
     origin: "사이트 주소",
     token: "사이트 token 또는 Cookie",
     token_placeholder: "token, Cookie 문자열 또는 localStorage의 auth JSON 붙여넣기",
     import: "자격 증명 가져오기",
     imported: "자격 증명이 저장되었습니다",
     import_failed: "자격 증명 가져오기에 실패했습니다 …",
+    login: "사이트 로그인",
+    login_cancel: "로그인 취소",
+    login_running: "로그인 창이 열려 있습니다. 완료하면 자격 증명이 자동으로 저장·갱신됩니다.",
+    login_succeeded: "로그인했습니다. 자격 증명을 저장했습니다",
+    login_failed: "로그인에 실패했습니다 …",
+    expired: "만료되었습니다. 다시 로그인하세요",
     clear: "이 사이트 삭제",
     clear_all: "모두 삭제",
     clear_failed: "자격 증명 삭제에 실패했습니다 …",
@@ -23,6 +29,7 @@ export const ko_kr_remote_page = {
     source: {
       bridge: "브리지",
       manual: "수동",
+      login: "로그인",
     },
     bridge: {
       running: "브리지 수신 중",

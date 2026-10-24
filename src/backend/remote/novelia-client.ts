@@ -1,4 +1,5 @@
 import { AppError } from "../../shared/error/app-error";
+import type { NoveliaCredential } from "./novelia-credential-store";
 import {
   NOVELIA_HOSTS,
   REMOTE_NOVEL_MAX_BYTES,
@@ -23,12 +24,12 @@ const UPLOAD_RETRY_BASE_MS = 1_000;
 const UPLOAD_RETRY_MAX_MS = 30_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-/** 站点客户端只依赖可注入的 fetch 与 token 读取，测试不需要真实网络。 */
+/** 站点客户端只依赖可注入的 fetch 与凭据读取，测试不需要真实网络。 */
 export interface NoveliaHttpPort {
   fetch: typeof globalThis.fetch;
 }
 
-export type NoveliaTokenReader = (origin: string) => string | null;
+export type NoveliaTokenReader = (origin: string) => NoveliaCredential | null;
 
 export interface RemoteNovelVolume {
   volume_id: string;
@@ -551,18 +552,22 @@ export class NoveliaClient {
     body?: string,
   ): Promise<Response> {
     signal.throwIfAborted();
-    const token = this.read_token(ref.origin);
-    if (auth === "required" && token === null) {
+    const credential = this.read_token(ref.origin);
+    if (auth === "required" && credential === null) {
       throw new AppError("remote.auth_missing", {
         public_details: { origin: ref.origin },
       });
     }
+    let url = new URL(path, ref.origin);
     const headers = new Headers({
       accept: "application/json, text/plain, */*",
     });
-    if (token !== null) headers.set("authorization", `Bearer ${token}`);
+    if (credential !== null) {
+      headers.set("authorization", `Bearer ${credential.token}`);
+      // 站点部分接口在浏览器内依赖同源 Cookie；登录会话已按目标域采集，直接原样携带。
+      if (credential.cookie.trim() !== "") headers.set("cookie", credential.cookie.trim());
+    }
     if (body !== undefined) headers.set("content-type", "application/json");
-    let url = new URL(path, ref.origin);
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
       assert_allowed_url(url);
       let response: Response;
@@ -582,7 +587,7 @@ export class NoveliaClient {
         });
       }
       if (!REDIRECT_STATUSES.has(response.status)) {
-        this.assert_response_ok(response, token !== null, path);
+        this.assert_response_ok(response, credential !== null, path);
         return response;
       }
       const location = response.headers.get("location");
