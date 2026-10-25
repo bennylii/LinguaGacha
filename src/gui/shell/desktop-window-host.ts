@@ -69,7 +69,11 @@ type HostDiagnosticReporter = (args: {
  */
 export function configure_development_remote_debugging(): void {
   if (is_development_mode()) {
-    app.commandLine.appendSwitch("remote-debugging-port", "9222");
+    // 默认端口被本机其它调试端（如 Chrome）占用时，用环境变量改口。
+    app.commandLine.appendSwitch(
+      "remote-debugging-port",
+      process.env.LINGUAGACHA_REMOTE_DEBUGGING_PORT ?? "9222",
+    );
   }
 }
 
