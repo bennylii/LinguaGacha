@@ -152,6 +152,70 @@ describe("SystemProxyHttpClient", () => {
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
+  it("传输失败上报原始原因与所选路由", async () => {
+    const failure = Object.assign(new TypeError("fetch failed"), {
+      cause: new Error("Client network socket disconnected"),
+    });
+    mocks.fetch.mockRejectedValue(failure);
+    const on_transport_failure = vi.fn();
+    const client = new SystemProxyHttpClient(
+      { resolveProxy: vi.fn(async () => "PROXY 127.0.0.1:7890") },
+      { onTransportFailure: on_transport_failure },
+    );
+
+    await expect(client.fetch("https://api.example/v1/chat")).rejects.toBe(failure);
+
+    expect(on_transport_failure).toHaveBeenCalledExactlyOnceWith({
+      url: "https://api.example/v1/chat",
+      route: { kind: "proxy", uri: "http://127.0.0.1:7890/" },
+      error: failure,
+    });
+    await client.dispose();
+  });
+
+  it("代理解析失败按无路由上报", async () => {
+    const failure = new Error("System proxy returned no supported route.");
+    const on_transport_failure = vi.fn();
+    const client = new SystemProxyHttpClient(
+      {
+        resolveProxy: vi.fn(async () => {
+          throw failure;
+        }),
+      },
+      { onTransportFailure: on_transport_failure },
+    );
+
+    await expect(client.fetch("https://api.example/v1/chat")).rejects.toBe(failure);
+
+    expect(on_transport_failure).toHaveBeenCalledExactlyOnceWith({
+      url: "https://api.example/v1/chat",
+      route: null,
+      error: failure,
+    });
+    await client.dispose();
+  });
+
+  it("调用方取消不算传输失败", async () => {
+    mocks.fetch.mockRejectedValue(
+      Object.assign(new Error("This operation was aborted"), { name: "AbortError" }),
+    );
+    const on_transport_failure = vi.fn();
+    const controller = new AbortController();
+    const client = new SystemProxyHttpClient(
+      { resolveProxy: vi.fn(async () => "DIRECT") },
+      { onTransportFailure: on_transport_failure },
+    );
+
+    const pending = client.fetch("https://api.example/v1/chat", { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toThrow("aborted");
+    await expect(
+      client.fetch("https://api.example/v1/chat", { signal: AbortSignal.abort() }),
+    ).rejects.toThrow();
+    expect(on_transport_failure).not.toHaveBeenCalled();
+    await client.dispose();
+  });
+
   it("释放所有自有直连和代理连接池", async () => {
     const client = new SystemProxyHttpClient({
       resolveProxy: vi.fn(async (url) =>

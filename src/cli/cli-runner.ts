@@ -44,6 +44,7 @@ export async function run_cli_command(
         projectRoot: app_root,
       }),
       workerExecution: worker_execution,
+      noveliaFetch: resources.noveliaFetch,
     });
     await run_cli_job(
       services,

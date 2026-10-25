@@ -83,10 +83,9 @@ describe("AppSettingService", () => {
 
     expect(result["settings"]).toMatchObject({
       app_language: "ZH",
-      source_language: "JA",
-      target_language: "ZH",
       recent_projects: [],
     });
+    expect(result["settings"]).not.toHaveProperty("source_language");
     expect(result["settings"]).not.toHaveProperty("models");
     expect(saved).toMatchObject({
       app_language: "ZH",
@@ -158,6 +157,29 @@ describe("AppSettingService", () => {
     ]);
   });
 
+  it("代理策略读取归一存储值，缺省与非法值回默认", () => {
+    const { service, paths, config_path } = create_service();
+    expect(service.read_network_proxy_policy()).toEqual({
+      mode: "system",
+      address: "127.0.0.1:6789",
+    });
+
+    write_config(config_path, {
+      network_proxy_mode: "proxy",
+      network_proxy_address: " 10.0.0.5:1080 ",
+    });
+    expect(new AppSettingService(paths).read_network_proxy_policy()).toEqual({
+      mode: "proxy",
+      address: "10.0.0.5:1080",
+    });
+
+    write_config(config_path, { network_proxy_mode: "unknown", network_proxy_address: "bad" });
+    expect(new AppSettingService(paths).read_network_proxy_policy()).toEqual({
+      mode: "system",
+      address: "127.0.0.1:6789",
+    });
+  });
+
   it("完整设置读取使用实例级缓存且保存后刷新缓存", () => {
     const { service, config_path } = create_service();
     write_config(config_path, { app_language: "ZH" });
@@ -174,27 +196,23 @@ describe("AppSettingService", () => {
   it("临时覆盖只影响运行期读取且不会写回 config.json", () => {
     const { service, config_path } = create_service();
     write_config(config_path, {
-      source_language: "JA",
-      target_language: "ZH",
+      request_timeout: 60,
       output_folder_open_on_finish: true,
       prompt_enhancement_enable: false,
     });
 
     service.set_transient_overrides({
-      source_language: "ALL",
-      target_language: "EN",
+      request_timeout: 30,
       output_folder_open_on_finish: false,
     });
 
     expect(service.read_setting()).toMatchObject({
-      source_language: "ALL",
-      target_language: "EN",
+      request_timeout: 30,
       output_folder_open_on_finish: false,
       prompt_enhancement_enable: false,
     });
     expect(read_config(config_path)).toMatchObject({
-      source_language: "JA",
-      target_language: "ZH",
+      request_timeout: 60,
       output_folder_open_on_finish: true,
       prompt_enhancement_enable: false,
     });
@@ -202,8 +220,7 @@ describe("AppSettingService", () => {
     service.set_transient_overrides(null);
 
     expect(service.read_setting()).toMatchObject({
-      source_language: "JA",
-      target_language: "ZH",
+      request_timeout: 60,
       output_folder_open_on_finish: true,
       prompt_enhancement_enable: false,
     });

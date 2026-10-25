@@ -14,7 +14,7 @@ import type {
   SubmissionRecord,
 } from "@earendil-works/pi-durable";
 import { expect, it } from "vitest";
-import { AgentChatDoc } from "./agent-chat-data";
+import { AgentChatDoc, AGENT_INPUT_ENTRY_KIND } from "./agent-chat-data";
 import { AgentChatView } from "./agent-chat-view";
 
 it("压缩起始时间可随独立文档提交补入，任务终态与恢复沿用同一时间", () => {
@@ -64,6 +64,7 @@ it("已提交历史按用户、助手、工具和后续回答投影，隐藏继�
     checkpoint: 0 as EntryId,
     endedAt: 10,
     averageTokensPerSecond: null,
+    failure: null,
   };
   const conversationId = 1 as ConversationId;
   const messages: Message[] = [
@@ -131,6 +132,47 @@ it("已提交历史按用户、助手、工具和后续回答投影，隐藏继�
   ]);
 });
 
+it("失败轮次把原因摘要投影到公开的用户消息", () => {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  state.rounds.round = {
+    status: "error",
+    checkpoint: 0 as EntryId,
+    endedAt: 10,
+    averageTokensPerSecond: null,
+    failure: { status: 400, detail: "Upstream request failed: [security_audit_fail]" },
+  };
+  const view = new AgentChatView();
+  view.reset(
+    [
+      {
+        id: 1 as EntryId,
+        conversationId,
+        kind: AGENT_INPUT_ENTRY_KIND,
+        data: {
+          roundId: "round",
+          message: { text: "问题", attachments: [] },
+          delivery: "round",
+          queuedId: null,
+        },
+      },
+    ],
+    new Map(),
+    [],
+    {},
+    state,
+  );
+  expect(view.entries).toMatchObject([
+    {
+      kind: "user_message",
+      id: "round",
+      text: "问题",
+      status: "error",
+      failure: { status: 400, detail: "Upstream request failed: [security_audit_fail]" },
+    },
+  ]);
+});
+
 it("流式变化只返回当前条目，终帧与提交变化顺序不影响恢复结果", () => {
   const conversationId = 1 as ConversationId;
   const taskId = 5000 as TaskId;
@@ -146,6 +188,7 @@ it("流式变化只返回当前条目，终帧与提交变化顺序不影响恢�
     checkpoint: 0 as EntryId,
     endedAt: null,
     averageTokensPerSecond: null,
+    failure: null,
   };
   const view = new AgentChatView();
   view.conversations.set(conversationId, { id: conversationId });

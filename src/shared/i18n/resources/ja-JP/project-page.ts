@@ -3,6 +3,18 @@ import type { LocaleMessageSchema } from "../../types";
 export const ja_jp_project_page = {
   title: "プロジェクト",
   create: {
+    mode: {
+      label: "作成元",
+      files: "ローカルファイル",
+      novel: "小説 URL",
+    },
+    remote: {
+      url_placeholder: "n.novelia.cc の小説ページ URL を貼り付け",
+      check: "確認",
+      hint: "確認するとタイトルと章数を読み取ります。作成時に作品全体をダウンロードして取り込みます。",
+      chapters: "{COUNT} 章",
+      check_failed: "小説情報を読み取れませんでした …",
+    },
     title: "新しいプロジェクト",
     subtitle: "元ファイルから .lg を作成。作成後は元ファイル不要",
     drop_title: "クリックまたは元ファイルをドロップ",
@@ -18,6 +30,7 @@ export const ja_jp_project_page = {
       translation_prompt: "翻訳プロンプト",
     },
     action: "プロジェクトを作成",
+    language_dialog_title: "プロジェクトの言語",
   },
   open: {
     title: "プロジェクトを開く",

@@ -5,10 +5,10 @@ export const de_de_basic_settings_page = {
   title: "Grundeinstellungen",
   fields: {
     source_language: {
-      description: "Legt die Sprache des Eingabetexts im aktuellen Projekt fest",
+      description: "Legt die Sprache des Eingabetexts fest",
     },
     target_language: {
-      description: "Legt die Sprache des Ausgabetexts im aktuellen Projekt fest",
+      description: "Legt die Sprache des Ausgabetexts fest",
     },
     project_save_mode: {
       title: "Projekt-Speicherort",
@@ -34,11 +34,26 @@ export const de_de_basic_settings_page = {
       description:
         "Maximale Antwortzeit in Sekunden. Ohne Antwort innerhalb dieser Frist gilt die Aufgabe als fehlgeschlagen.",
     },
+    network_proxy_mode: {
+      title: "Netzwerkproxy",
+      description:
+        "Legt fest, wie Modellanfragen und Websuche einen Proxy verwenden. Änderungen gelten sofort für spätere Anfragen",
+      options: {
+        system: "Systemproxy verwenden",
+        proxy: "Eigener Proxy",
+        direct: "Direkte Verbindung",
+      },
+    },
+    network_proxy_address: {
+      title: "Proxyadresse",
+      description: "Adresse für den eigenen Proxy im Format Host:Port, zum Beispiel 127.0.0.1:6789",
+    },
   },
   feedback: {
     request_timeout_invalid:
       "Das Anfrage-Timeout muss eine Zahl innerhalb des gültigen Bereichs sein …",
     pick_directory_failed:
       "Ordnerauswahl fehlgeschlagen. Bitte wählen Sie das feste Speicherverzeichnis erneut aus …",
+    network_proxy_address_invalid: "Die Proxyadresse muss im Format Host:Port angegeben werden …",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_basic_settings_page>;

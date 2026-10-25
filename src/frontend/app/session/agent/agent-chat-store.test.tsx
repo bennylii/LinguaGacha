@@ -355,6 +355,112 @@ describe("AgentChatStore", () => {
     }
   });
 
+  it("自动续跑等待通过快照和增量事件同步，拒绝非法帧", async () => {
+    const resuming = { roundId: "round-1", attempt: 1, maxAttempts: 5, retryAt: 1_000 };
+    desktop_api_mocks.api_get.mockResolvedValueOnce(agent_snapshot({ autoResume: resuming }));
+    let latest!: ReturnType<typeof useAgentChat>;
+    await render_probe(() => {
+      latest = useAgentChat();
+    });
+    await wait_for(() => expect(latest.transport).toBe("ready"));
+    expect(latest.autoResume).toEqual(resuming);
+
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { ...resuming, attempt: 2, retryAt: 6_000 },
+      });
+    });
+    expect(latest.autoResume).toMatchObject({ attempt: 2, retryAt: 6_000 });
+
+    // 重试开始后只发布空快照。
+    await act(async () => {
+      event_source.change({ type: "auto_resume", autoResume: null });
+    });
+    expect(latest.autoResume).toBeNull();
+
+    await act(async () => {
+      event_source.change({ type: "auto_resume", autoResume: resuming });
+    });
+    expect(latest.autoResume).toEqual(resuming);
+
+    // 非法帧整批丢弃，保留最近一次合法值；重试执行期不再用空 retryAt 表示。
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { roundId: "", attempt: 0, maxAttempts: 0, retryAt: -1 },
+      });
+    });
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { roundId: "round-1", attempt: 2, maxAttempts: null, retryAt: null },
+      });
+    });
+    expect(latest.autoResume).toEqual(resuming);
+  });
+
+  it("自动继续状态通过快照和增量事件同步，拒绝非法帧", async () => {
+    const judging = { roundId: "round-1", attempt: 1, phase: "judging" } as const;
+    desktop_api_mocks.api_get.mockResolvedValueOnce(agent_snapshot({ autoContinue: judging }));
+    let latest!: ReturnType<typeof useAgentChat>;
+    await render_probe(() => {
+      latest = useAgentChat();
+    });
+    await wait_for(() => expect(latest.transport).toBe("ready"));
+    expect(latest.autoContinue).toEqual(judging);
+
+    await act(async () => {
+      event_source.change({
+        type: "auto_continue",
+        autoContinue: { roundId: "round-1", attempt: 1, phase: "continuing" },
+      });
+    });
+    expect(latest.autoContinue).toEqual({ roundId: "round-1", attempt: 1, phase: "continuing" });
+
+    await act(async () => {
+      event_source.change({ type: "auto_continue", autoContinue: null });
+    });
+    expect(latest.autoContinue).toBeNull();
+
+    await act(async () => {
+      event_source.change({ type: "auto_continue", autoContinue: judging });
+    });
+    expect(latest.autoContinue).toEqual(judging);
+
+    // 非法帧整批丢弃，保留最近一次合法值。
+    await act(async () => {
+      event_source.change({
+        type: "auto_continue",
+        autoContinue: { roundId: "", attempt: 0, phase: "unknown" },
+      });
+    });
+    expect(latest.autoContinue).toEqual(judging);
+  });
+
+  it("自动重试等待期间空闲状态也允许取消", async () => {
+    desktop_api_mocks.api_get.mockResolvedValueOnce(
+      agent_snapshot({
+        state: "idle",
+        autoResume: { roundId: "round-1", attempt: 1, maxAttempts: null, retryAt: 1_000 },
+      }),
+    );
+    desktop_api_mocks.api_fetch.mockResolvedValueOnce({ revision: 0, status: "accepted" });
+    let latest!: ReturnType<typeof useAgentChat>;
+    await render_probe(() => {
+      latest = useAgentChat();
+    });
+    await wait_for(() => expect(latest.transport).toBe("ready"));
+    expect(latest.state).toBe("idle");
+    expect(latest.autoResume).not.toBeNull();
+
+    await act(async () => {
+      await latest.stop();
+    });
+
+    expect(desktop_api_mocks.api_fetch).toHaveBeenCalledWith("/api/agent/stop");
+  });
+
   it("StrictMode effect 重放后仍能完成会话恢复", async () => {
     let latest!: ReturnType<typeof useAgentChat>;
     /** 在 StrictMode 重放期间订阅同一公开会话。 */
@@ -1084,6 +1190,8 @@ describe("AgentChatStore", () => {
       doing: null,
       context: { tokens: null, compactable: false, limits: null },
       tokenSpeed: null,
+      autoResume: null,
+      autoContinue: null,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       skills: [
         TEST_SKILLS[0],
@@ -1293,6 +1401,30 @@ describe("AgentChatStore", () => {
         },
         {
           kind: "user_message",
+          id: "user-invalid-failure-status",
+          delivery: "round",
+          averageTokensPerSecond: null,
+          text: "非法失败状态码",
+          attachments: [],
+          status: "error",
+          createdAt: 12,
+          endedAt: 12,
+          failure: { status: "400", detail: "请求失败" },
+        },
+        {
+          kind: "user_message",
+          id: "user-invalid-failure-detail",
+          delivery: "round",
+          averageTokensPerSecond: null,
+          text: "缺少失败说明",
+          attachments: [],
+          status: "error",
+          createdAt: 12,
+          endedAt: 12,
+          failure: { status: 400 },
+        },
+        {
+          kind: "user_message",
           id: "user-float-ended-at",
           delivery: "round",
           averageTokensPerSecond: null,
@@ -1331,6 +1463,8 @@ describe("AgentChatStore", () => {
       doing: null,
       context: { tokens: null, compactable: false, limits: null },
       tokenSpeed: null,
+      autoResume: null,
+      autoContinue: null,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
     let latest!: ReturnType<typeof useAgentChat>;
@@ -1399,6 +1533,7 @@ describe("AgentChatStore", () => {
         status: "success",
         createdAt: 10,
         endedAt: 12,
+        failure: null,
       },
       {
         kind: "user_message",
@@ -2029,6 +2164,7 @@ function user_entry(id: string, text: string, images: string[] = []) {
     status: "success" as const,
     createdAt: 1,
     endedAt: 2,
+    failure: null,
   };
 }
 
@@ -2051,6 +2187,8 @@ function agent_snapshot(overrides: Partial<AgentChatSnapshot> = {}): AgentChatSn
     context: { tokens: null, compactable: false, limits: null },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     tokenSpeed: null,
+    autoResume: null,
+    autoContinue: null,
     ...overrides,
   };
 }

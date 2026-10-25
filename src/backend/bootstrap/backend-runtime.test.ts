@@ -103,6 +103,7 @@ describe("run_backend_runtime", () => {
     runtime_mocks.start.mockResolvedValue({
       apiBaseUrl: "http://127.0.0.1:4567",
       readAppLanguage: () => "EN",
+      networkProxy: { mode: "proxy", address: "127.0.0.1:6789" },
       backendServices: {
         app: {
           metadata: { read_version: () => "1.2.3" },
@@ -131,6 +132,7 @@ describe("run_backend_runtime", () => {
         apiBaseUrl: "http://127.0.0.1:4567",
         berserkerUpdateRootDir: "E:/userdata/berserker",
         appVersion: "1.2.3",
+        networkProxy: { mode: "proxy", address: "127.0.0.1:6789" },
       },
     });
     const bootstrap_options = runtime_mocks.constructor_options[0] as {

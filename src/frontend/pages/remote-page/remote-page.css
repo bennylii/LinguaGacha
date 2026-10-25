@@ -1,0 +1,232 @@
+.remote-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding-bottom: 32px;
+}
+
+.remote-page__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.remote-page__title {
+  margin: 0;
+  font-size: var(--ui-font-size-18);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.remote-page__subtitle {
+  margin: 0;
+  font-size: var(--ui-font-size-12);
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.remote-page__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.remote-page__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.remote-page__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.remote-page__hint {
+  margin: 0;
+  font-size: var(--ui-font-size-12);
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.remote-page__warning {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--ui-radius-button);
+  border: 1px solid color-mix(in srgb, var(--ui-warning) 40%, var(--border));
+  background: color-mix(in srgb, var(--ui-warning) 8%, transparent);
+  font-size: var(--ui-font-size-12);
+  line-height: 1.5;
+}
+
+.remote-page__list,
+.remote-page__chapters,
+.remote-page__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.remote-page__credential {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.remote-page__credential-origin {
+  font-size: var(--ui-font-size-13);
+  font-weight: 500;
+}
+
+.remote-page__credential-meta,
+.remote-page__chapter-meta {
+  font-size: var(--ui-font-size-12);
+  color: var(--muted-foreground);
+}
+
+.remote-page__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+}
+
+.remote-page__facts dt {
+  font-size: var(--ui-font-size-12);
+  color: var(--muted-foreground);
+}
+
+.remote-page__facts dd {
+  margin: 0;
+  font-size: var(--ui-font-size-13);
+  line-height: 1.45;
+}
+
+.remote-page__break {
+  overflow-wrap: anywhere;
+}
+
+.remote-page__section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.remote-page__section-title {
+  margin: 0;
+  font-size: var(--ui-font-size-14);
+  font-weight: 500;
+}
+
+.remote-page__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: var(--ui-font-size-12);
+  color: var(--muted-foreground);
+}
+
+.remote-page__stat strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.remote-page__chapter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--ui-radius-button);
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.remote-page__chapter:hover {
+  background: var(--accent);
+}
+
+.remote-page__chapter-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-font-size-13);
+}
+
+.remote-page__workspace-chapter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.remote-page__align {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.remote-page__row-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.remote-page__row-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--ui-font-size-13);
+  line-height: 1.45;
+}
+
+.remote-page__row-text p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.remote-page__row-old,
+.remote-page__row-dst {
+  color: var(--muted-foreground);
+  font-size: var(--ui-font-size-12);
+}
+
+.remote-page__row-dst {
+  color: var(--foreground);
+  opacity: 0.8;
+}
+
+.remote-page__row-label {
+  margin-right: 6px;
+  color: var(--muted-foreground);
+  font-size: var(--ui-font-size-11);
+}
+
+.remote-page__row-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}

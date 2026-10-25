@@ -1,20 +1,21 @@
 import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
 import { type JSX, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { is_network_proxy_address } from "@domain/setting";
 
 import { parse_bounded_setting_number_draft } from "@frontend/features/settings-editor/setting-number-draft";
-import { get_language_label_key } from "@frontend/app/locale/language-label";
 import { useI18n } from "@frontend/app/locale/locale-context";
 import "@frontend/pages/basic-settings-page/basic-settings-page.css";
 import {
-  ALL_LANGUAGE_VALUE,
+  NETWORK_PROXY_MODE_LABEL_KEYS,
+  NETWORK_PROXY_MODE_OPTIONS,
   PROJECT_SAVE_MODE_LABEL_KEYS,
   PROJECT_SAVE_MODE_OPTIONS,
   REQUEST_TIMEOUT_MAX,
   REQUEST_TIMEOUT_MIN,
-  SOURCE_LANGUAGE_CODES,
-  TARGET_LANGUAGE_CODES,
+  is_network_proxy_mode,
   is_project_save_mode,
 } from "@frontend/pages/basic-settings-page/types";
+import { ProjectLanguageSelect } from "@frontend/features/project-language/project-language-select";
 import { useBasicSettingsState } from "@frontend/pages/basic-settings-page/use-basic-settings-state";
 import { Input } from "@frontend/shadcn/input";
 import { BooleanSegmentedToggle } from "@frontend/widgets/boolean-segmented-toggle";
@@ -40,41 +41,32 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
     return String(basic_settings_state.snapshot.request_timeout);
   });
   const [is_request_timeout_editing, set_is_request_timeout_editing] = useState(false);
+  const [network_proxy_address_draft, set_network_proxy_address_draft] = useState<string>(() => {
+    return basic_settings_state.snapshot.network_proxy_address;
+  });
+  const [is_network_proxy_address_editing, set_is_network_proxy_address_editing] = useState(false);
   const parsed_request_timeout = parse_bounded_setting_number_draft(
     request_timeout_draft,
     REQUEST_TIMEOUT_MIN,
     REQUEST_TIMEOUT_MAX,
   );
   const request_timeout_invalid = parsed_request_timeout === null;
-  const source_language_options = useMemo(() => {
-    return [
-      {
-        value: ALL_LANGUAGE_VALUE,
-        label: t(get_language_label_key(ALL_LANGUAGE_VALUE)),
-      },
-      ...SOURCE_LANGUAGE_CODES.map((language_code) => {
-        return {
-          value: language_code,
-          label: t(get_language_label_key(language_code)),
-        };
-      }),
-    ];
-  }, [t]);
-
-  const target_language_options = useMemo(() => {
-    return TARGET_LANGUAGE_CODES.map((language_code) => {
-      return {
-        value: language_code,
-        label: t(get_language_label_key(language_code)),
-      };
-    });
-  }, [t]);
+  const network_proxy_address_invalid = !is_network_proxy_address(network_proxy_address_draft);
 
   const project_save_mode_options = useMemo(() => {
     return PROJECT_SAVE_MODE_OPTIONS.map((mode) => {
       return {
         value: mode,
         label: t(PROJECT_SAVE_MODE_LABEL_KEYS[mode]),
+      };
+    });
+  }, [t]);
+
+  const network_proxy_mode_options = useMemo(() => {
+    return NETWORK_PROXY_MODE_OPTIONS.map((mode) => {
+      return {
+        value: mode,
+        label: t(NETWORK_PROXY_MODE_LABEL_KEYS[mode]),
       };
     });
   }, [t]);
@@ -87,7 +79,7 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
         })
       : t("basic_settings_page.fields.project_save_mode.description");
 
-  const language_locked = basic_settings_state.runtime_locked;
+  const language_locked = basic_settings_state.language_locked;
 
   useEffect(() => {
     if (is_request_timeout_editing) {
@@ -96,6 +88,14 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
 
     set_request_timeout_draft(String(basic_settings_state.snapshot.request_timeout));
   }, [basic_settings_state.snapshot.request_timeout, is_request_timeout_editing]);
+
+  useEffect(() => {
+    if (is_network_proxy_address_editing) {
+      return;
+    }
+
+    set_network_proxy_address_draft(basic_settings_state.snapshot.network_proxy_address);
+  }, [basic_settings_state.snapshot.network_proxy_address, is_network_proxy_address_editing]);
 
   /** 校验输入后提交超时设置，无效草稿留在当前编辑状态。 */
   async function commit_request_timeout_draft(): Promise<void> {
@@ -127,6 +127,37 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
     void commit_request_timeout_draft();
   }
 
+  /** 校验输入后提交代理地址，无效草稿留在当前编辑状态。 */
+  async function commit_network_proxy_address_draft(): Promise<void> {
+    const address = network_proxy_address_draft.trim();
+    if (!is_network_proxy_address(address)) {
+      push_error_toast(
+        t("app.feedback.save_failed"),
+        t("basic_settings_page.feedback.network_proxy_address_invalid"),
+      );
+      set_is_network_proxy_address_editing(true);
+      return;
+    }
+
+    if (address === basic_settings_state.snapshot.network_proxy_address) {
+      set_network_proxy_address_draft(address);
+      set_is_network_proxy_address_editing(false);
+      return;
+    }
+
+    await basic_settings_state.update_network_proxy_address(address);
+    set_is_network_proxy_address_editing(false);
+  }
+  /** Enter 与失焦共用提交入口。 */
+  function handle_network_proxy_address_key_down(event: KeyboardEvent<HTMLInputElement>): void {
+    if (event.key !== "Enter") {
+      return;
+    }
+
+    event.preventDefault();
+    void commit_network_proxy_address_draft();
+  }
+
   return (
     <div className="basic-settings-page page-shell page-shell--full">
       <section className="basic-settings-page__list" aria-label={t("basic_settings_page.title")}>
@@ -135,28 +166,16 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
           title={t("app.language_role.source")}
           description={t("basic_settings_page.fields.source_language.description")}
           action={
-            <Select
-              items={source_language_options}
-              value={basic_settings_state.snapshot.source_language}
-              disabled={language_locked || basic_settings_state.pending_state.source_language}
-              onValueChange={(next_value) => {
-                if (next_value !== null)
-                  void basic_settings_state.update_source_language(next_value);
+            <ProjectLanguageSelect
+              field="source_language"
+              value={basic_settings_state.languages.source_language}
+              disabled={
+                language_locked || basic_settings_state.language_pending_state.source_language
+              }
+              on_change={(next_value) => {
+                void basic_settings_state.update_source_language(next_value);
               }}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {source_language_options.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+            />
           }
         />
 
@@ -165,28 +184,16 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
           title={t("app.language_role.target")}
           description={t("basic_settings_page.fields.target_language.description")}
           action={
-            <Select
-              items={target_language_options}
-              value={basic_settings_state.snapshot.target_language}
-              disabled={language_locked || basic_settings_state.pending_state.target_language}
-              onValueChange={(next_value) => {
-                if (next_value !== null)
-                  void basic_settings_state.update_target_language(next_value);
+            <ProjectLanguageSelect
+              field="target_language"
+              value={basic_settings_state.languages.target_language}
+              disabled={
+                language_locked || basic_settings_state.language_pending_state.target_language
+              }
+              on_change={(next_value) => {
+                void basic_settings_state.update_target_language(next_value);
               }}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {target_language_options.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+            />
           }
         />
 
@@ -241,7 +248,7 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
           title={t("basic_settings_page.fields.request_timeout.title")}
           description={t("basic_settings_page.fields.request_timeout.description")}
           action={
-            <div className="basic-settings-page__number-field">
+            <div className="basic-settings-page__input-field">
               <Input
                 type="number"
                 min={REQUEST_TIMEOUT_MIN}
@@ -259,6 +266,65 @@ export function BasicSettingsPage(_props: BasicSettingsPageProps): JSX.Element {
                 onKeyDown={handle_request_timeout_key_down}
                 onFocus={() => {
                   set_is_request_timeout_editing(true);
+                }}
+              />
+            </div>
+          }
+        />
+        <SettingCardRow
+          action_width="content"
+          title={t("basic_settings_page.fields.network_proxy_mode.title")}
+          description={t("basic_settings_page.fields.network_proxy_mode.description")}
+          action={
+            <Select
+              items={network_proxy_mode_options}
+              value={basic_settings_state.snapshot.network_proxy_mode}
+              disabled={basic_settings_state.pending_state.network_proxy_mode}
+              onValueChange={(next_value) => {
+                if (next_value !== null && is_network_proxy_mode(next_value)) {
+                  void basic_settings_state.update_network_proxy_mode(next_value);
+                }
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {network_proxy_mode_options.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          }
+        />
+
+        <SettingCardRow
+          title={t("basic_settings_page.fields.network_proxy_address.title")}
+          description={t("basic_settings_page.fields.network_proxy_address.description")}
+          action={
+            <div className="basic-settings-page__input-field">
+              <Input
+                type="text"
+                value={network_proxy_address_draft}
+                aria-invalid={network_proxy_address_invalid || undefined}
+                disabled={
+                  basic_settings_state.snapshot.network_proxy_mode !== "proxy" ||
+                  basic_settings_state.pending_state.network_proxy_address
+                }
+                onChange={(event) => {
+                  set_is_network_proxy_address_editing(true);
+                  set_network_proxy_address_draft(event.target.value);
+                }}
+                onBlur={() => {
+                  void commit_network_proxy_address_draft();
+                }}
+                onKeyDown={handle_network_proxy_address_key_down}
+                onFocus={() => {
+                  set_is_network_proxy_address_editing(true);
                 }}
               />
             </div>

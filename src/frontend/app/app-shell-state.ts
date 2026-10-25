@@ -30,6 +30,7 @@ const PROJECT_LOADED_ONLY_ROUTE_IDS: ReadonlySet<RouteId> = new Set([
   "post-translation-replacement",
   "custom-prompt",
   "laboratory",
+  "remote",
 ]);
 
 /** 识别需要项目会话才能进入的路由。 */

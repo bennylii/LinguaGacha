@@ -1,15 +1,26 @@
-import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
-import { type JSX, useEffect, useState, type KeyboardEvent } from "react";
+import { type JSX } from "react";
 
-import { parse_bounded_setting_number_draft } from "@frontend/features/settings-editor/setting-number-draft";
+import {
+  AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
+  AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MAX,
+  AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MIN,
+  AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
+  AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MAX,
+  AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MIN,
+} from "@domain/setting";
 import { useI18n } from "@frontend/app/locale/locale-context";
 import "@frontend/pages/expert-settings-page/expert-settings-page.css";
-import { useExpertSettingsState } from "@frontend/pages/expert-settings-page/use-expert-settings-state";
 import {
   PRECEDING_LINES_THRESHOLD_MAX,
   PRECEDING_LINES_THRESHOLD_MIN,
 } from "@frontend/pages/expert-settings-page/types";
+import {
+  useNumberSettingDraft,
+  type NumberSettingDraft,
+} from "@frontend/pages/expert-settings-page/use-number-setting-draft";
+import { useExpertSettingsState } from "@frontend/pages/expert-settings-page/use-expert-settings-state";
 import { Input } from "@frontend/shadcn/input";
+import type { LocaleKey } from "@shared/i18n";
 import { BooleanSegmentedToggle } from "@frontend/widgets/boolean-segmented-toggle";
 import { SettingCardRow } from "@frontend/widgets/setting-card-row/setting-card-row";
 
@@ -22,25 +33,44 @@ export function ExpertSettingsPage(_props: ExpertSettingsPageProps): JSX.Element
   const { t } = useI18n();
 
   const expert_settings_state = useExpertSettingsState();
-  const [preceding_lines_threshold_draft, set_preceding_lines_threshold_draft] = useState<string>(
-    () => {
-      return String(expert_settings_state.snapshot.preceding_lines_threshold);
-    },
-  );
-  const [is_preceding_lines_threshold_editing, set_is_preceding_lines_threshold_editing] =
-    useState(false);
-  const parsed_preceding_lines_threshold = parse_bounded_setting_number_draft(
-    preceding_lines_threshold_draft,
-    PRECEDING_LINES_THRESHOLD_MIN,
-    PRECEDING_LINES_THRESHOLD_MAX,
-  );
-  const preceding_lines_threshold_invalid = parsed_preceding_lines_threshold === null;
+  const agent_auto_resume_initial_delay_draft = useNumberSettingDraft({
+    value: expert_settings_state.snapshot.agent_auto_resume_initial_delay,
+    min: AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MIN,
+    max: AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MAX,
+    invalid_message: "expert_settings_page.feedback.agent_auto_resume_initial_delay_invalid",
+    commit: expert_settings_state.update_agent_auto_resume_initial_delay,
+  });
+  const agent_auto_resume_max_delay_draft = useNumberSettingDraft({
+    value: expert_settings_state.snapshot.agent_auto_resume_max_delay,
+    min: AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MIN,
+    max: AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MAX,
+    invalid_message: "expert_settings_page.feedback.agent_auto_resume_max_delay_invalid",
+    commit: expert_settings_state.update_agent_auto_resume_max_delay,
+  });
+  const agent_auto_resume_max_attempts_draft = useNumberSettingDraft({
+    value: expert_settings_state.snapshot.agent_auto_resume_max_attempts,
+    min: 0,
+    max: AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
+    invalid_message: "expert_settings_page.feedback.agent_auto_resume_max_attempts_invalid",
+    commit: expert_settings_state.update_agent_auto_resume_max_attempts,
+  });
+  const agent_auto_continue_max_continues_draft = useNumberSettingDraft({
+    value: expert_settings_state.snapshot.agent_auto_continue_max_continues,
+    min: 0,
+    max: AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
+    invalid_message: "expert_settings_page.feedback.agent_auto_continue_max_continues_invalid",
+    commit: expert_settings_state.update_agent_auto_continue_max_continues,
+  });
+  const preceding_lines_threshold_draft = useNumberSettingDraft({
+    value: expert_settings_state.snapshot.preceding_lines_threshold,
+    min: PRECEDING_LINES_THRESHOLD_MIN,
+    max: PRECEDING_LINES_THRESHOLD_MAX,
+    invalid_message: "expert_settings_page.feedback.preceding_lines_threshold_invalid",
+    commit: expert_settings_state.update_preceding_lines_threshold,
+  });
   /** 开关复用可见标题作为无障碍名称。 */
   function render_boolean_toggle(options: {
-    title_key:
-      | "expert_settings_page.fields.clean_ruby.title"
-      | "expert_settings_page.fields.deduplication_in_bilingual.title"
-      | "expert_settings_page.fields.write_translated_name_fields_to_file.title";
+    title_key: LocaleKey;
     value: boolean;
     disabled: boolean;
     on_value_change: (next_value: boolean) => void;
@@ -55,81 +85,117 @@ export function ExpertSettingsPage(_props: ExpertSettingsPageProps): JSX.Element
       />
     );
   }
-
-  useEffect(() => {
-    if (is_preceding_lines_threshold_editing) {
-      return;
-    }
-
-    set_preceding_lines_threshold_draft(
-      String(expert_settings_state.snapshot.preceding_lines_threshold),
+  /** 数值行共用同一提交草稿控件，避免四个字段各自维护输入状态。 */
+  function render_number_field(
+    draft: NumberSettingDraft,
+    min: number,
+    max: number,
+    disabled: boolean,
+  ): JSX.Element {
+    return (
+      <div className="expert-settings-page__number-field">
+        <Input
+          type="number"
+          min={min}
+          max={max}
+          value={draft.draft}
+          aria-invalid={draft.invalid || undefined}
+          disabled={disabled}
+          onChange={(event) => {
+            draft.on_change(event.target.value);
+          }}
+          onBlur={draft.on_blur}
+          onKeyDown={draft.on_key_down}
+          onFocus={draft.on_focus}
+        />
+      </div>
     );
-  }, [
-    expert_settings_state.snapshot.preceding_lines_threshold,
-    is_preceding_lines_threshold_editing,
-  ]);
-
-  /** 非法输入保留草稿，合法输入交给设置入口保存。 */
-  async function commit_preceding_lines_threshold_draft(): Promise<void> {
-    if (parsed_preceding_lines_threshold === null) {
-      push_error_toast(
-        t("app.feedback.save_failed"),
-        t("expert_settings_page.feedback.preceding_lines_threshold_invalid"),
-      );
-      set_is_preceding_lines_threshold_editing(true);
-      return;
-    }
-
-    if (
-      parsed_preceding_lines_threshold === expert_settings_state.snapshot.preceding_lines_threshold
-    ) {
-      set_preceding_lines_threshold_draft(String(parsed_preceding_lines_threshold));
-      set_is_preceding_lines_threshold_editing(false);
-      return;
-    }
-
-    await expert_settings_state.update_preceding_lines_threshold(parsed_preceding_lines_threshold);
-    set_is_preceding_lines_threshold_editing(false);
-  }
-  /** Enter 与失焦共用草稿提交入口。 */
-  function handle_preceding_lines_threshold_key_down(event: KeyboardEvent<HTMLInputElement>): void {
-    if (event.key !== "Enter") {
-      return;
-    }
-
-    event.preventDefault();
-    void commit_preceding_lines_threshold_draft();
   }
 
   return (
     <div className="expert-settings-page page-shell page-shell--full">
       <section className="expert-settings-page__list" aria-label={t("expert_settings_page.title")}>
         <SettingCardRow
+          title={t("expert_settings_page.fields.agent_auto_resume_enabled.title")}
+          description={t("expert_settings_page.fields.agent_auto_resume_enabled.description")}
+          action={render_boolean_toggle({
+            title_key: "expert_settings_page.fields.agent_auto_resume_enabled.title",
+            value: expert_settings_state.snapshot.agent_auto_resume_enabled,
+            disabled: expert_settings_state.pending_state.agent_auto_resume_enabled,
+            on_value_change: (next_value) => {
+              void expert_settings_state.update_agent_auto_resume_enabled(next_value);
+            },
+          })}
+        />
+
+        <SettingCardRow
+          title={t("expert_settings_page.fields.agent_auto_resume_initial_delay.title")}
+          description={t("expert_settings_page.fields.agent_auto_resume_initial_delay.description")}
+          action={render_number_field(
+            agent_auto_resume_initial_delay_draft,
+            AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MIN,
+            AGENT_AUTO_RESUME_INITIAL_DELAY_SECONDS_MAX,
+            expert_settings_state.pending_state.agent_auto_resume_initial_delay,
+          )}
+        />
+
+        <SettingCardRow
+          title={t("expert_settings_page.fields.agent_auto_resume_max_delay.title")}
+          description={t("expert_settings_page.fields.agent_auto_resume_max_delay.description")}
+          action={render_number_field(
+            agent_auto_resume_max_delay_draft,
+            AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MIN,
+            AGENT_AUTO_RESUME_MAX_DELAY_SECONDS_MAX,
+            expert_settings_state.pending_state.agent_auto_resume_max_delay,
+          )}
+        />
+
+        <SettingCardRow
+          title={t("expert_settings_page.fields.agent_auto_resume_max_attempts.title")}
+          description={t("expert_settings_page.fields.agent_auto_resume_max_attempts.description")}
+          action={render_number_field(
+            agent_auto_resume_max_attempts_draft,
+            0,
+            AGENT_AUTO_RESUME_MAX_ATTEMPTS_LIMIT,
+            expert_settings_state.pending_state.agent_auto_resume_max_attempts,
+          )}
+        />
+
+        <SettingCardRow
+          title={t("expert_settings_page.fields.agent_auto_continue_enabled.title")}
+          description={t("expert_settings_page.fields.agent_auto_continue_enabled.description")}
+          action={render_boolean_toggle({
+            title_key: "expert_settings_page.fields.agent_auto_continue_enabled.title",
+            value: expert_settings_state.snapshot.agent_auto_continue_enabled,
+            disabled: expert_settings_state.pending_state.agent_auto_continue_enabled,
+            on_value_change: (next_value) => {
+              void expert_settings_state.update_agent_auto_continue_enabled(next_value);
+            },
+          })}
+        />
+
+        <SettingCardRow
+          title={t("expert_settings_page.fields.agent_auto_continue_max_continues.title")}
+          description={t(
+            "expert_settings_page.fields.agent_auto_continue_max_continues.description",
+          )}
+          action={render_number_field(
+            agent_auto_continue_max_continues_draft,
+            0,
+            AGENT_AUTO_CONTINUE_MAX_CONTINUES_LIMIT,
+            expert_settings_state.pending_state.agent_auto_continue_max_continues,
+          )}
+        />
+
+        <SettingCardRow
           title={t("expert_settings_page.fields.preceding_lines_threshold.title")}
           description={t("expert_settings_page.fields.preceding_lines_threshold.description")}
-          action={
-            <div className="expert-settings-page__number-field">
-              <Input
-                type="number"
-                min={PRECEDING_LINES_THRESHOLD_MIN}
-                max={PRECEDING_LINES_THRESHOLD_MAX}
-                value={preceding_lines_threshold_draft}
-                aria-invalid={preceding_lines_threshold_invalid || undefined}
-                disabled={expert_settings_state.pending_state.preceding_lines_threshold}
-                onChange={(event) => {
-                  set_is_preceding_lines_threshold_editing(true);
-                  set_preceding_lines_threshold_draft(event.target.value);
-                }}
-                onBlur={() => {
-                  void commit_preceding_lines_threshold_draft();
-                }}
-                onKeyDown={handle_preceding_lines_threshold_key_down}
-                onFocus={() => {
-                  set_is_preceding_lines_threshold_editing(true);
-                }}
-              />
-            </div>
-          }
+          action={render_number_field(
+            preceding_lines_threshold_draft,
+            PRECEDING_LINES_THRESHOLD_MIN,
+            PRECEDING_LINES_THRESHOLD_MAX,
+            expert_settings_state.pending_state.preceding_lines_threshold,
+          )}
         />
 
         <SettingCardRow

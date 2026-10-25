@@ -3,6 +3,18 @@ import type { LocaleMessageSchema } from "../../types";
 export const ko_kr_project_page = {
   title: "프로젝트 홈",
   create: {
+    mode: {
+      label: "프로젝트 원본",
+      files: "로컬 파일",
+      novel: "소설 URL",
+    },
+    remote: {
+      url_placeholder: "n.novelia.cc 소설 페이지 URL 붙여넣기",
+      check: "확인",
+      hint: "확인하면 제목과 장 수를 읽습니다. 생성 시 작품 전체를 내려받아 가져옵니다.",
+      chapters: "{COUNT}장",
+      check_failed: "소설 정보를 읽지 못했습니다 …",
+    },
     title: "새 프로젝트",
     subtitle: "원본 파일로 .lg 생성. 생성 후 원본 파일은 필요 없습니다",
     drop_title: "클릭하거나 원본 파일 놓기",
@@ -18,6 +30,7 @@ export const ko_kr_project_page = {
       translation_prompt: "번역 프롬프트",
     },
     action: "프로젝트 만들기",
+    language_dialog_title: "프로젝트 언어",
   },
   open: {
     title: "프로젝트 열기",

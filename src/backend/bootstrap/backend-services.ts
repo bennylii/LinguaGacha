@@ -8,6 +8,7 @@ import { resolve_workspace_runtime_entry } from "../../native/workspace-runtime"
 import { pathToFileURL } from "node:url";
 import { PDFWorker } from "../file/pdf/pdf-worker";
 import type { PDFHost } from "../../shared/pdf";
+import type { RemoteAuthHost } from "../../shared/remote-auth-host";
 import { AppMetadataService } from "../app/app-metadata-service";
 import { AppPathService } from "../app/app-path-service";
 import { AppSettingsCommandService } from "../app/app-settings-command-service";
@@ -48,8 +49,19 @@ import { QualityRuleService } from "../quality/quality-rule-service";
 import { QualityStatisticsService } from "../quality/quality-statistics-service";
 import { ComputeWorkerClient } from "../worker/compute-worker-client";
 import type { BackendWorkerExecution } from "../worker/worker-execution";
+import { NoveliaAuthBridge } from "../remote/novelia-auth-bridge";
+import { NoveliaClient } from "../remote/novelia-client";
+import { NoveliaCredentialStore } from "../remote/novelia-credential-store";
+import { NovelSourceService } from "../remote/novel-source-service";
+import { RemoteAuthService } from "../remote/remote-auth-service";
+import { RemoteChapterService } from "../remote/remote-chapter-service";
+import { RemoteSnapshotStore } from "../remote/remote-snapshot-store";
+import { RemoteWorkspaceSubmissionService } from "../remote/workspace-submission-service";
+import { ProjectFileLock } from "../project/project-file-lock";
+import { InstanceRegistryService } from "../app/instance-registry-service";
 import type { JsonRecord } from "../../domain/json";
 import { PROJECT_CHANGE_EVENT_TOPIC } from "../../shared/project-event";
+import { REMOTE_AUTH_SNAPSHOT_EVENT_TOPIC } from "../../shared/remote-auth-host";
 import { MODEL_CATALOG_UPDATED_EVENT_TOPIC } from "../../shared/model-catalog";
 import {
   RUNTIME_ACTIVITY_EVENT_TOPIC,
@@ -69,7 +81,11 @@ export interface BackendServicesOptions {
   logManager: LogManager; // Backend 内部日志和任务日志的唯一汇聚点
   publishEvent: (topic: string, payload: JsonRecord) => void; // 入口层选择公开传输或无输出；业务服务不依赖 SSE
   openOutputFolder: OutputFolderOpener; // GUI 专用副作用，CLI 注入空实现
+  focusWindow?: (() => Promise<void>) | undefined; // GUI 宿主窗口聚焦；CLI 缺席
+  openProjectWindow?: ((project_path: string) => Promise<void>) | undefined; // 新进程窗口入口
+  remoteAuthHost?: RemoteAuthHost | undefined; // 内嵌登录窗口与续期；CLI 缺席时登录拒绝、刷新停用
   workerExecution: BackendWorkerExecution; // 入口层注入的 Backend worker 执行配置
+  noveliaFetch?: typeof globalThis.fetch; // 允许跟随 302 的专用 transport；测试可省略
 }
 
 /** GUI 扩展与共享业务服务必须引用同一组状态拥有者。 */
@@ -116,6 +132,15 @@ export interface BackendFileServices {
   gameFont: GameFontService;
 }
 
+export interface BackendRemoteServices {
+  auth: RemoteAuthService;
+  sources: NovelSourceService;
+  chapters: RemoteChapterService;
+  workspace: RemoteWorkspaceSubmissionService;
+  snapshots: RemoteSnapshotStore;
+  projectLock: ProjectFileLock;
+}
+
 /**
  * GUI 与 CLI 共享的业务服务组合根；状态拥有者只在这里装配。
  */
@@ -135,6 +160,8 @@ export class BackendServices {
   private readonly planning_worker_pool: PlanningWorkerPool;
   private task_stream_unsubscribe: (() => void) | null; // dispose 时先切断任务事件发布
   private runtime_stream_unsubscribe: (() => void) | null; // dispose 时停止发布已关闭业务根的事件
+  private remote_stream_unsubscribe: (() => void) | null; // 工作区提交进度只发布完整快照
+  private remote_auth_stream_unsubscribe: (() => void) | null; // 凭据与登录状态只发布完整快照
 
   public readonly app: BackendAppServices;
   public readonly runtime: BackendRuntimeServices;
@@ -142,6 +169,8 @@ export class BackendServices {
   public readonly proofreading: BackendProofreadingServices;
   public readonly quality: BackendQualityServices;
   public readonly files: BackendFileServices;
+  public readonly remote: BackendRemoteServices;
+  public readonly instances: InstanceRegistryService;
   public readonly model: ModelService;
   public readonly batchTranslation: BatchTranslationService;
   public readonly logManager: LogManager;
@@ -185,6 +214,8 @@ export class BackendServices {
       options.workerExecution.kind === "in_process"
         ? null
         : options.workerExecution.gamePrepareWorkerEntryUrl,
+      undefined,
+      this.logManager,
     );
     this.compute_worker_client = new ComputeWorkerClient({
       execution: options.workerExecution,
@@ -211,6 +242,75 @@ export class BackendServices {
       this.cache_manager,
     );
 
+    const novelia_credentials = new NoveliaCredentialStore({ paths });
+    const remote_snapshots = new RemoteSnapshotStore({ paths });
+    const project_lock = new ProjectFileLock();
+    const project_content = new ProjectContentService(
+      options.database,
+      this.runtime_gate,
+      session_state,
+      write_store,
+      this.pdf_worker.run,
+      this.app_setting_service,
+      undefined,
+      this.logManager,
+      this.game_prepare_worker.run,
+    );
+    const novelia_client = new NoveliaClient(
+      { fetch: options.noveliaFetch ?? globalThis.fetch },
+      (origin) => novelia_credentials.read_credential(origin),
+    );
+    const remote_sources = new NovelSourceService({
+      paths,
+      database,
+      session_state,
+      client: novelia_client,
+      snapshots: remote_snapshots,
+      writer: project_content,
+      project_lock,
+    });
+    const remote_auth = new RemoteAuthService({
+      credentials: novelia_credentials,
+      bridge: new NoveliaAuthBridge({
+        credentials: novelia_credentials,
+        log: this.logManager,
+      }),
+      settings: this.app_setting_service,
+      auth_host: options.remoteAuthHost,
+    });
+    const refresh_credentials = async (origin: string): Promise<boolean> =>
+      await remote_auth.try_refresh(origin, { force: true });
+    this.remote = {
+      auth: remote_auth,
+      sources: remote_sources,
+      chapters: new RemoteChapterService({
+        sources: remote_sources,
+        client: novelia_client,
+        importer: project_content,
+        refresh_credentials,
+      }),
+      workspace: new RemoteWorkspaceSubmissionService({
+        database,
+        session_state,
+        runtime_gate: this.runtime_gate,
+        settings: this.app_setting_service,
+        client: novelia_client,
+        llm: llm_client,
+        refresh_credentials,
+      }),
+      snapshots: remote_snapshots,
+      projectLock: project_lock,
+    };
+    this.instances = new InstanceRegistryService({
+      paths,
+      session_state,
+      app_version: metadata.read_version_or_default(),
+      ...(options.focusWindow === undefined ? {} : { focus_window: options.focusWindow }),
+      ...(options.openProjectWindow === undefined
+        ? {}
+        : { open_project_window: options.openProjectWindow }),
+    });
+
     this.task_runtime = new BatchTranslationRuntime(session_state, database, this.runtime_gate);
     const lifecycle = new ProjectLifecycleService(
       options.database,
@@ -224,6 +324,7 @@ export class BackendServices {
       this.pdf_worker.run,
       undefined,
       this.game_prepare_worker.run,
+      remote_sources,
     );
     this.work_unit_worker_pool = new TranslationWorkerPool({
       builtinRoot: paths.get_builtin_root(),
@@ -267,17 +368,7 @@ export class BackendServices {
       },
 
       summary: new ProjectSummaryService(session_state, this.cache_manager),
-      content: new ProjectContentService(
-        options.database,
-        this.runtime_gate,
-        session_state,
-        write_store,
-        this.pdf_worker.run,
-        this.app_setting_service,
-        undefined,
-        this.logManager,
-        this.game_prepare_worker.run,
-      ),
+      content: project_content,
     };
     const settings_commands = new AppSettingsCommandService(
       this.app_setting_service,
@@ -289,7 +380,12 @@ export class BackendServices {
       paths,
       metadata,
       settings: this.app_setting_service,
-      updateSettings: (request) => settings_commands.update(request),
+      updateSettings: async (request) => {
+        const response = await settings_commands.update(request);
+        // 桥接开关是运行态副作用，设置已落盘后再按新值启停。
+        await this.remote.auth.apply_setting();
+        return response;
+      },
     };
     this.proofreading = {
       preview: new ProofreadingPagePreview(options.database, session_state, this.pdf_worker.run),
@@ -347,6 +443,7 @@ export class BackendServices {
       this.task_runtime,
       session_state,
       this.app_setting_service,
+      this.cache_manager.languages,
     );
     this.state = {
       session: session_state,
@@ -364,6 +461,26 @@ export class BackendServices {
         runtime: snapshot,
       });
     });
+    this.remote_stream_unsubscribe = this.remote.workspace.subscribe((snapshot) => {
+      options.publishEvent("remote_workspace.snapshot_changed", {
+        remote_workspace: snapshot as unknown as JsonRecord,
+      });
+    });
+    this.remote_auth_stream_unsubscribe = this.remote.auth.subscribe((snapshot) => {
+      options.publishEvent(REMOTE_AUTH_SNAPSHOT_EVENT_TOPIC, {
+        auth: snapshot as unknown as JsonRecord,
+      });
+    });
+  }
+
+  /** GUI 启动后按设置启动本地凭据桥接；CLI 不监听端口。 */
+  public async start_remote_services(): Promise<void> {
+    await this.remote.auth.start();
+  }
+
+  /** API 端口就绪后开启窗口注册心跳；CLI 入口不注册窗口实例。 */
+  public async start_instances(api_base_url: string): Promise<void> {
+    await this.instances.start(api_base_url);
   }
 
   /** GUI 启动后后台检查一次；CLI 只使用已加载缓存。 */
@@ -386,7 +503,15 @@ export class BackendServices {
    */
   public async dispose(): Promise<void> {
     const errors: unknown[] = [];
+    try {
+      await this.instances.stop();
+    } catch (error) {
+      errors.push(error);
+    }
     const project_writes = this.stop_project_writes();
+    const remote_workspace = this.remote.workspace.dispose().catch((error: unknown) => {
+      errors.push(error);
+    });
     this.modelCatalog.dispose();
     try {
       await this.catalog_check;
@@ -398,6 +523,11 @@ export class BackendServices {
     this.task_stream_unsubscribe = null;
     this.runtime_stream_unsubscribe?.();
     this.runtime_stream_unsubscribe = null;
+    this.remote_stream_unsubscribe?.();
+    this.remote_stream_unsubscribe = null;
+    this.remote_auth_stream_unsubscribe?.();
+    this.remote_auth_stream_unsubscribe = null;
+    await remote_workspace;
     try {
       await this.task_runtime.dispose();
     } catch (error) {
@@ -416,6 +546,11 @@ export class BackendServices {
       if (result.status === "rejected") {
         errors.push(result.reason);
       }
+    }
+    try {
+      await this.remote.auth.dispose();
+    } catch (error) {
+      errors.push(error);
     }
     try {
       await this.modelAuth.dispose();

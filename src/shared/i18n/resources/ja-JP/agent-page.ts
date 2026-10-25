@@ -123,6 +123,15 @@ export const ja_jp_agent_page = {
     copied: "コピーしました",
     follow_latest: "最新を追従",
   },
+  auto_resume: {
+    waiting: "自動再試行 {attempt} 回目 · {seconds} 秒後に開始",
+    waiting_limited: "自動再試行 {attempt}/{max_attempts} · {seconds} 秒後に開始",
+    cancel: "自動再試行をキャンセル",
+  },
+  auto_continue: {
+    judging: "タスクの完了を確認しています…",
+    continuing: "タスクが未完了のため自動続行しました（{attempt} 回目）",
+  },
   editing: {
     user: "メッセージを編集中",
     assistant: "モデルの返信を編集中",
@@ -131,7 +140,6 @@ export const ja_jp_agent_page = {
   queue: {
     no_message_text: "メッセージ本文なし",
     attachments: "添付ファイル {count} 件",
-    reorder: "ドラッグして並べ替え",
     send_now: "今すぐ送信",
     sending: "送信中",
     delete: "メッセージを削除",

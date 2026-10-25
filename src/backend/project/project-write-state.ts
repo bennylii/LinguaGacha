@@ -179,3 +179,35 @@ export function compute_project_prefilter_write(
     },
   };
 }
+
+/**
+ * 新建远程小说工程时套用站点已有译文；只补齐预过滤后仍待翻译的条目，
+ * 过滤、重复与人工排除状态保持预过滤结果。
+ */
+export function apply_remote_translations(
+  output: ProjectPrefilterWriteOutput,
+  translations: ReadonlyMap<number, string>,
+  asset_path: string,
+): ProjectPrefilterWriteOutput {
+  if (translations.size === 0) return output;
+  let changed = false;
+  const items: Record<string, ProjectItemPublicRecord> = {};
+  for (const [key, item] of Object.entries(output.items)) {
+    const dst = item.file_path === asset_path ? translations.get(item.row_number) : undefined;
+    if (item.status !== "NONE" || dst === undefined || dst.trim() === "") {
+      items[key] = item;
+      continue;
+    }
+    changed = true;
+    items[key] = { ...item, dst, status: "PROCESSED" };
+  }
+  if (!changed) return output;
+  return {
+    ...output,
+    items,
+    translation_extras: build_translation_extras_from_items({
+      progress: normalize_batch_translation_progress(undefined),
+      items: Object.values(items),
+    }),
+  };
+}

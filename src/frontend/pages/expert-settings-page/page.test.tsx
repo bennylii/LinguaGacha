@@ -51,17 +51,29 @@ vi.mock("@frontend/widgets/boolean-segmented-toggle", () => {
 function create_expert_settings_state_fixture() {
   return {
     snapshot: {
+      agent_auto_resume_enabled: true,
+      agent_auto_resume_initial_delay: 5,
+      agent_auto_resume_max_delay: 300,
+      agent_auto_resume_max_attempts: 0,
       preceding_lines_threshold: 0,
       clean_ruby: false,
       deduplication_in_bilingual: false,
       write_translated_name_fields_to_file: false,
     },
     pending_state: {
+      agent_auto_resume_enabled: false,
+      agent_auto_resume_initial_delay: false,
+      agent_auto_resume_max_delay: false,
+      agent_auto_resume_max_attempts: false,
       preceding_lines_threshold: false,
       clean_ruby: false,
       deduplication_in_bilingual: false,
       write_translated_name_fields_to_file: false,
     },
+    update_agent_auto_resume_enabled: vi.fn(async (_next_checked: boolean) => {}),
+    update_agent_auto_resume_initial_delay: vi.fn(async (_next_value: number) => {}),
+    update_agent_auto_resume_max_delay: vi.fn(async (_next_value: number) => {}),
+    update_agent_auto_resume_max_attempts: vi.fn(async (_next_value: number) => {}),
     update_preceding_lines_threshold: vi.fn(async (_next_value: number) => {}),
     update_clean_ruby: vi.fn(async (_next_checked: boolean) => {}),
     update_deduplication_in_bilingual: vi.fn(async (_next_checked: boolean) => {}),
@@ -124,12 +136,15 @@ describe("ExpertSettingsPage", () => {
     });
   }
 
-  /** 从页面读取阈值输入框，缺失时终止交互断言。 */
-  function get_preceding_lines_threshold_input(): HTMLInputElement {
-    const input = container?.querySelector('input[type="number"]');
+  /** 从页面按字段标题读取数值输入框，缺失时终止交互断言。 */
+  function get_number_input(field: string): HTMLInputElement {
+    const section = container?.querySelector(
+      `section[aria-label="expert_settings_page.fields.${field}.title"]`,
+    );
+    const input = section?.querySelector('input[type="number"]');
 
     if (!(input instanceof HTMLInputElement)) {
-      throw new Error("未找到参考上文行数阈值输入框。");
+      throw new Error(`未找到 ${field} 输入框。`);
     }
 
     return input;
@@ -137,7 +152,7 @@ describe("ExpertSettingsPage", () => {
 
   it("输入参考上文行数阈值时只更新本地草稿，失焦后再提交", async () => {
     await mount_page();
-    const input = get_preceding_lines_threshold_input();
+    const input = get_number_input("preceding_lines_threshold");
 
     await act(async () => {
       set_input_value(input, "12");
@@ -162,7 +177,7 @@ describe("ExpertSettingsPage", () => {
 
   it("提交非法参考上文行数阈值时标记红框并弹 toast", async () => {
     await mount_page();
-    const input = get_preceding_lines_threshold_input();
+    const input = get_number_input("preceding_lines_threshold");
 
     await act(async () => {
       set_input_value(input, "");
@@ -181,6 +196,57 @@ describe("ExpertSettingsPage", () => {
     expect(push_toast_mock).toHaveBeenCalledWith(
       "app.feedback.save_failed",
       "expert_settings_page.feedback.preceding_lines_threshold_invalid",
+    );
+  });
+
+  it("自动重试数值字段在失焦后提交，非法间隔保留草稿并提示", async () => {
+    await mount_page();
+    const initial_delay_input = get_number_input("agent_auto_resume_initial_delay");
+    const max_delay_input = get_number_input("agent_auto_resume_max_delay");
+    const max_attempts_input = get_number_input("agent_auto_resume_max_attempts");
+
+    await act(async () => {
+      set_input_value(initial_delay_input, "12");
+      set_input_value(max_delay_input, "600");
+      set_input_value(max_attempts_input, "0");
+    });
+
+    expect(
+      get_current_expert_settings_state().update_agent_auto_resume_initial_delay,
+    ).not.toHaveBeenCalled();
+
+    await act(async () => {
+      initial_delay_input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      max_delay_input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      max_attempts_input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(
+      get_current_expert_settings_state().update_agent_auto_resume_initial_delay,
+    ).toHaveBeenCalledWith(12);
+    expect(
+      get_current_expert_settings_state().update_agent_auto_resume_max_delay,
+    ).toHaveBeenCalledWith(600);
+    // 与已保存值相同，不重复提交。
+    expect(
+      get_current_expert_settings_state().update_agent_auto_resume_max_attempts,
+    ).not.toHaveBeenCalled();
+
+    await act(async () => {
+      set_input_value(initial_delay_input, "");
+    });
+
+    expect(initial_delay_input.getAttribute("aria-invalid")).toBe("true");
+
+    await act(async () => {
+      initial_delay_input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(push_toast_mock).toHaveBeenCalledWith(
+      "app.feedback.save_failed",
+      "expert_settings_page.feedback.agent_auto_resume_initial_delay_invalid",
     );
   });
 });

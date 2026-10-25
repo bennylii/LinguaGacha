@@ -123,6 +123,15 @@ export const ko_kr_agent_page = {
     copied: "복사됨",
     follow_latest: "최신 내용 따라가기",
   },
+  auto_resume: {
+    waiting: "자동 재시도 {attempt}회 · {seconds}초 후 시작",
+    waiting_limited: "자동 재시도 {attempt}/{max_attempts} · {seconds}초 후 시작",
+    cancel: "자동 재시도 취소",
+  },
+  auto_continue: {
+    judging: "작업 완료 여부를 확인하는 중…",
+    continuing: "작업이 완료되지 않아 자동으로 이어서 진행했습니다 ({attempt}회)",
+  },
   editing: {
     user: "내 메시지 수정 중",
     assistant: "모델 응답 수정 중",
@@ -131,7 +140,6 @@ export const ko_kr_agent_page = {
   queue: {
     no_message_text: "메시지 본문 없음",
     attachments: "첨부 파일 {count}개",
-    reorder: "드래그하여 순서 변경",
     send_now: "지금 전송",
     sending: "전송 중",
     delete: "메시지 삭제",

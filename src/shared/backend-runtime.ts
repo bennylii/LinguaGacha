@@ -1,13 +1,16 @@
 import type { PDFHostOperation } from "./pdf";
 import type { AgentImageHostOperation } from "./agent-image";
+import type { RemoteAuthRefreshOperation, RemoteLoginWindowOperation } from "./remote-auth-host";
 import type { LogError, LogErrorContext } from "./error";
 import type { LocaleKey } from "./i18n";
+import type { NetworkProxyPolicy } from "../domain/setting";
 
 /** Backend 启动完成后 main 创建窗口所需的最小可克隆快照。 */
 export type BackendRuntimeReady = Readonly<{
   apiBaseUrl: string;
   appVersion: string; // 后端启动时读取的应用版本，随 ready 交付桌面窗口
   berserkerUpdateRootDir: string;
+  networkProxy: NetworkProxyPolicy; // main 按同一设置配置 Chromium 自身的代理
 }>;
 
 /** 所有控制请求和宿主回调共用的成功/失败信封。 */
@@ -19,9 +22,13 @@ export type BackendRuntimeResult<T = unknown> =
 export type BackendRuntimeHostOperation =
   | PDFHostOperation
   | AgentImageHostOperation
+  | RemoteLoginWindowOperation
+  | RemoteAuthRefreshOperation
   | { kind: "resolve_proxy"; url: string }
   | { kind: "open_directory"; path: string }
-  | { kind: "pick_save_path"; defaultName: string };
+  | { kind: "pick_save_path"; defaultName: string }
+  | { kind: "focus_window" }
+  | { kind: "open_project_window"; project_path: string };
 
 export type BackendRuntimeDiagnosticLevel = "warning" | "error" | "fatal";
 

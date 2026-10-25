@@ -1,6 +1,10 @@
 import type { LanguageCode } from "../../../../domain/language";
 
 export const zh_cn_app = {
+  godot_pack_order: {
+    title: "资源包优先级",
+    description: "后面的资源包会覆盖前面资源包中的同名资源",
+  },
   media: {
     zoom_out: "缩小",
     zoom_in: "放大",
@@ -173,6 +177,21 @@ export const zh_cn_app = {
     language: "字字珠玑",
     logs: "日志",
   },
+  project_switcher: {
+    label: "切换工程窗口",
+    current: "当前工程",
+    no_project: "工程主页",
+    instances: "运行中的窗口",
+    no_instances: "没有其他窗口",
+    loading: "正在读取窗口 …",
+    recent: "最近工程",
+    empty_recent: "暂无最近工程",
+    open_current: "在当前窗口打开",
+    open_new: "在新窗口打开",
+    load_failed: "读取窗口列表失败 …",
+    focus_failed: "切换窗口失败 …",
+    open_failed: "打开工程窗口失败 …",
+  },
   profile: {
     status: "Ciallo～(∠・ω< )⌒✮",
     status_tooltip: "打开 GitHub 项目主页",
@@ -238,6 +257,9 @@ export const zh_cn_app = {
     },
     migration: {
       path_failed: "迁移路径失败：{SOURCE_PATH} -> {DESTINATION_PATH} …",
+    },
+    network: {
+      transport_failure: "远端请求传输失败 …",
     },
     renderer: {
       main_frame_load_failed: "渲染层主框架加载失败 …",

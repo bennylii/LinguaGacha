@@ -2,6 +2,10 @@ import type { zh_cn_app } from "../zh-CN/app";
 import type { LocaleMessageSchema } from "../../types";
 
 export const ko_kr_app = {
+  godot_pack_order: {
+    title: "리소스 팩 우선순위",
+    description: "뒤에 있는 리소스 팩이 앞에 있는 팩의 같은 이름 리소스를 덮어씁니다",
+  },
   media: {
     zoom_out: "축소",
     zoom_in: "확대",
@@ -174,6 +178,21 @@ export const ko_kr_app = {
     language: "언어",
     logs: "로그",
   },
+  project_switcher: {
+    label: "프로젝트 창 전환",
+    current: "현재 프로젝트",
+    no_project: "프로젝트 홈",
+    instances: "실행 중인 창",
+    no_instances: "다른 창이 없습니다",
+    loading: "창을 읽는 중 …",
+    recent: "최근 프로젝트",
+    empty_recent: "최근 프로젝트가 없습니다",
+    open_current: "이 창에서 열기",
+    open_new: "새 창에서 열기",
+    load_failed: "창 목록을 읽지 못했습니다 …",
+    focus_failed: "창 전환에 실패했습니다 …",
+    open_failed: "프로젝트 창을 열지 못했습니다 …",
+  },
   profile: {
     status: "Ciallo～(∠・ω< )⌒✮",
     status_tooltip: "GitHub 프로젝트 페이지 열기",
@@ -240,6 +259,9 @@ export const ko_kr_app = {
     },
     migration: {
       path_failed: "경로 이전에 실패했습니다: {SOURCE_PATH} -> {DESTINATION_PATH} …",
+    },
+    network: {
+      transport_failure: "원격 요청 전송에 실패했습니다 …",
     },
     renderer: {
       main_frame_load_failed: "렌더러 기본 프레임을 불러오지 못했습니다 …",

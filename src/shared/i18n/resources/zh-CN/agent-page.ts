@@ -121,11 +121,19 @@ export const zh_cn_agent_page = {
     copied: "已复制",
     follow_latest: "跟随最新",
   },
+  auto_resume: {
+    waiting: "自动重试第 {attempt} 次 · {seconds} 秒后开始",
+    waiting_limited: "自动重试 {attempt}/{max_attempts} · {seconds} 秒后开始",
+    cancel: "取消自动重试",
+  },
+  auto_continue: {
+    judging: "正在检查任务是否完成…",
+    continuing: "任务未完成，已自动继续（第 {attempt} 次）",
+  },
   editing: { user: "正在修改你的消息", assistant: "正在修改模型回复", queue: "正在修改排队消息" },
   queue: {
     no_message_text: "无消息正文",
     attachments: "{count} 个附件",
-    reorder: "拖动排序",
     send_now: "立即发送",
     sending: "正在发送",
     delete: "删除消息",

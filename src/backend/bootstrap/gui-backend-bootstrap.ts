@@ -2,6 +2,7 @@ import { AgentPersonalityService } from "../agent/agent-personality-service";
 import { AgentSkillsService } from "../agent/agent-skills-service";
 import type { PDFHost } from "../../shared/pdf";
 import type { AgentImageHost } from "../../shared/agent-image";
+import type { RemoteAuthHost } from "../../shared/remote-auth-host";
 import { AgentImageService } from "../agent/agent-image-service";
 import { AgentService } from "../agent/agent-service";
 import { WebSearchService } from "../agent/web-search-service";
@@ -11,6 +12,7 @@ import { ApiGatewayServer } from "../api/api-gateway-server";
 import { ApiStreamHub } from "../api/api-stream-hub";
 import { t_main_log } from "../log/log-text";
 import type { SystemProxyResolver } from "../network/system-proxy-http-client";
+import type { NetworkProxyPolicy } from "../../domain/setting";
 import type { BackendWorkerExecution } from "../worker/worker-execution";
 import { AppError } from "../../shared/error";
 import type { LogTargets } from "../../shared/log";
@@ -30,6 +32,9 @@ export interface GuiBackendBootstrapOptions {
   workspaceRuntimeDirectory: string; // 与 runner 同版本的标准 npm 环境
   openDirectory: (path: string) => Promise<void>; // Electron main 副作用端口
   pickSavePath: (defaultName: string) => Promise<string | null>; // 原生保存选择，取消返回 null
+  focusWindow?: (() => Promise<void>) | undefined; // 聚焦本实例窗口，供其他实例的切换请求调用
+  openProjectWindow?: ((projectPath: string) => Promise<void>) | undefined; // 以 --project 启动新窗口
+  remoteAuthHost?: RemoteAuthHost | undefined; // 内嵌登录窗口与续期，Electron main 提供、CLI 缺席
   workerExecution: BackendWorkerExecution; // 正式 worker_threads 与测试执行策略
 }
 
@@ -37,6 +42,7 @@ export interface GuiBackendBootstrapStartResult {
   apiBaseUrl: string;
   backendServices: BackendServices;
   readAppLanguage: () => unknown;
+  networkProxy: NetworkProxyPolicy; // 宿主据此配置 Chromium 自身的代理
 }
 
 /** GUI Backend 的完整组合根。Agent、SSE 与 Gateway 在该入口恒定存在。 */
@@ -105,11 +111,16 @@ export class GuiBackendBootstrap {
         logManager: resources.logManager,
         publishEvent: (topic, payload) => event_stream.publish(topic, payload),
         openOutputFolder: this.options.openDirectory,
+        focusWindow: this.options.focusWindow,
+        openProjectWindow: this.options.openProjectWindow,
+        remoteAuthHost: this.options.remoteAuthHost,
         pdfHost: this.options.pdfHost,
         workspaceRuntimeDirectory: this.options.workspaceRuntimeDirectory,
         workerExecution: this.options.workerExecution,
+        noveliaFetch: resources.noveliaFetch,
       });
       this.services = services;
+      await services.start_remote_services();
       const web_search = new WebSearchService(
         resources.metadata.read_version_or_default(),
         resources.logManager,
@@ -121,12 +132,11 @@ export class GuiBackendBootstrap {
       const runner = new AgentWorkspaceRunner({
         paths: resources.paths,
         runtimeDirectory: this.options.workspaceRuntimeDirectory,
-        systemProxyResolver: this.options.systemProxyResolver,
+        systemProxyResolver: resources.proxyResolver, // 子进程代理路由与后端同源
       });
       const workspace = new AgentWorkspaceService({
         images,
         paths: resources.paths,
-        settings: resources.settings,
         sessionState: services.state.session,
         cache: services.state.cache,
         proofreading: services.proofreading.query,
@@ -160,6 +170,9 @@ export class GuiBackendBootstrap {
         sessionState: services.state.session,
         runtimeGate: services.state.runtimeGate,
         webSearch: web_search.search,
+        novelChapters: (request, signal) => services.remote.chapters.list_chapters(request, signal),
+        novelChapterImport: (request, signal) =>
+          services.remote.chapters.import_chapter(request, signal),
         workspace,
         logManager: resources.logManager,
         publish: (topic, payload) => event_stream.publish(topic, payload),
@@ -181,11 +194,21 @@ export class GuiBackendBootstrap {
       this.gateway = gateway;
       const gateway_result = await gateway.start();
       this.state = "ready";
+      // 端口确定后才能写入实例注册项；注册失败只失去窗口切换能力，不应阻止启动。
+      try {
+        await services.start_instances(gateway_result.baseUrl);
+      } catch (error) {
+        resources.logManager.warning(t_main_log("app.diagnostic.lifecycle.app_start_failed"), {
+          error,
+          context: { reason: "instance_registry_start_failed" },
+        });
+      }
       services.start_model_catalog_check();
       return {
         apiBaseUrl: gateway_result.baseUrl,
         backendServices: services,
         readAppLanguage: () => resources.settings.read_app_language(),
+        networkProxy: resources.settings.read_network_proxy_policy(),
       };
     } catch (error) {
       this.state = "failed";

@@ -4,6 +4,42 @@ import type { LocaleMessageSchema } from "../../types";
 export const de_de_expert_settings_page = {
   title: "Erweitert",
   fields: {
+    agent_auto_resume_enabled: {
+      title: "Automatischer Neuversuch für Agent",
+      description:
+        "Denselben Durchlauf bei vorübergehenden Modell- oder Transportfehlern (429, 503, Verbindungsabbrüche, Zeitüberschreitungen) automatisch wiederholen, standardmäßig aktiviert" +
+        "\n" +
+        "400, 401, 403, Kontingent-, Abrechnungs- und Authentifizierungsfehler werden nie wiederholt; jeder Neuversuch startet eine neue Modellanfrage",
+    },
+    agent_auto_resume_initial_delay: {
+      title: "Erste Wartezeit vor Neuversuch (Sekunden)",
+      description:
+        "Wartezeit vor dem ersten automatischen Neuversuch; jede weitere verdoppelt sich, Standard 5 Sekunden",
+    },
+    agent_auto_resume_max_delay: {
+      title: "Maximale Wartezeit vor Neuversuch (Sekunden)",
+      description:
+        "Obergrenze für das exponentielle Backoff; danach wird in diesem Abstand weiter versucht, Standard 300 Sekunden" +
+        "\n" +
+        "Ist der Wert kleiner als die erste Wartezeit, gilt die erste Wartezeit",
+    },
+    agent_auto_resume_max_attempts: {
+      title: "Maximale Anzahl Neuversuche",
+      description:
+        "Obergrenze für aufeinanderfolgende automatische Neuversuche; 0 bedeutet unbegrenzt, Standard 0",
+    },
+    agent_auto_continue_enabled: {
+      title: "Automatisches Fortsetzen für Agent",
+      description:
+        "Nach dem erfolgreichen Abschluss eines Durchlaufs öffnet das Backend einen eigenen Prüf-Thread, um zu prüfen, ob die Aufgabe wirklich erledigt ist, und setzt sie sonst automatisch fort; standardmäßig deaktiviert" +
+        "\n" +
+        "Jede Prüfung kostet eine zusätzliche Modellanfrage; eine fehlgeschlagene Prüfung oder ein unlesbares Ergebnis zählt als erledigt, es wird also nichts automatisch fortgesetzt",
+    },
+    agent_auto_continue_max_continues: {
+      title: "Maximale Anzahl automatischer Fortsetzungen",
+      description:
+        "Obergrenze für aufeinanderfolgende automatische Fortsetzungen in einem Durchlauf; 0 bedeutet unbegrenzt, Standard 10",
+    },
     preceding_lines_threshold: {
       title: "Schwellenwert für vorhergehende Zeilen",
       description:
@@ -41,6 +77,14 @@ export const de_de_expert_settings_page = {
     },
   },
   feedback: {
+    agent_auto_resume_initial_delay_invalid:
+      "Die erste Wartezeit muss eine ganze Zahl von 1 bis 3600 Sekunden sein …",
+    agent_auto_resume_max_delay_invalid:
+      "Die maximale Wartezeit muss eine ganze Zahl von 1 bis 86400 Sekunden sein …",
+    agent_auto_resume_max_attempts_invalid:
+      "Die maximale Anzahl Neuversuche muss eine ganze Zahl von 0 bis 1000 sein …",
+    agent_auto_continue_max_continues_invalid:
+      "Die maximale Anzahl automatischer Fortsetzungen muss eine ganze Zahl von 0 bis 1000 sein …",
     preceding_lines_threshold_invalid:
       "Der Schwellenwert für vorhergehende Zeilen muss eine Zahl innerhalb des gültigen Bereichs sein …",
   },

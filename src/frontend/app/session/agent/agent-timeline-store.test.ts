@@ -56,6 +56,7 @@ it("快照替换清除旧轮次、操作状态和条目，并通知被移除条�
       status: "running",
       endedAt: null,
       averageTokensPerSecond: null,
+      failure: null,
     },
     {
       kind: "tool_call",

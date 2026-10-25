@@ -2,6 +2,10 @@ import type { zh_cn_app } from "../zh-CN/app";
 import type { LocaleMessageSchema } from "../../types";
 
 export const ja_jp_app = {
+  godot_pack_order: {
+    title: "リソースパックの優先順位",
+    description: "後のリソースパックが、前のパック内の同名リソースを上書きします",
+  },
   media: {
     zoom_out: "縮小",
     zoom_in: "拡大",
@@ -182,6 +186,21 @@ export const ja_jp_app = {
     language: "言語",
     logs: "ログ",
   },
+  project_switcher: {
+    label: "プロジェクトウィンドウを切り替え",
+    current: "現在のプロジェクト",
+    no_project: "プロジェクトホーム",
+    instances: "実行中のウィンドウ",
+    no_instances: "他のウィンドウはありません",
+    loading: "ウィンドウを読み込み中 …",
+    recent: "最近のプロジェクト",
+    empty_recent: "最近のプロジェクトはありません",
+    open_current: "このウィンドウで開く",
+    open_new: "新しいウィンドウで開く",
+    load_failed: "ウィンドウ一覧の読み込みに失敗しました …",
+    focus_failed: "ウィンドウの切り替えに失敗しました …",
+    open_failed: "プロジェクトウィンドウを開けませんでした …",
+  },
   profile: {
     status: "Ciallo～(∠・ω< )⌒✮",
     status_tooltip: "GitHub のプロジェクトページを開く",
@@ -248,6 +267,9 @@ export const ja_jp_app = {
     },
     migration: {
       path_failed: "パスを移行できませんでした：{SOURCE_PATH} -> {DESTINATION_PATH} …",
+    },
+    network: {
+      transport_failure: "リモートリクエストの転送に失敗しました …",
     },
     renderer: {
       main_frame_load_failed: "レンダラーのメインフレームを読み込めませんでした …",

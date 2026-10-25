@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentImageHostResult } from "../../shared/agent-image";
+import type { RemoteAuthHostResult } from "../../shared/remote-auth-host";
 
 import { normalize_app_language } from "../../domain/app-language";
 import { normalize_log_error, to_log_error, type LogError } from "../../shared/error";
@@ -56,7 +57,11 @@ export async function run_backend_runtime(args: {
       pending_host_requests.set(request_id, pending);
       if (signal !== undefined) {
         const abort_listener = () => {
-          if (operation.kind === "print_pdf" || operation.kind === "prepare_image") {
+          if (
+            operation.kind === "print_pdf" ||
+            operation.kind === "prepare_image" ||
+            operation.kind === "open_remote_login_window"
+          ) {
             args.port.postMessage({ type: "host_cancel", requestId: request_id });
             return; // 等窗口释放后的回包，工作区互斥仍由原调用持有。
           }
@@ -108,6 +113,19 @@ export async function run_backend_runtime(args: {
       const result = await call_host({ kind: "pick_save_path", defaultName });
       if (result !== null && (typeof result !== "string" || result === "")) {
         throw new TypeError("Invalid save path response.");
+      }
+      return result;
+    },
+    focusWindow: async () => {
+      await call_host({ kind: "focus_window" });
+    },
+    openProjectWindow: async (project_path) => {
+      await call_host({ kind: "open_project_window", project_path });
+    },
+    remoteAuthHost: async (operation, signal) => {
+      const result = (await call_host(operation, signal)) as RemoteAuthHostResult;
+      if (!is_remote_auth_result(result)) {
+        throw new TypeError("Invalid remote auth host response.");
       }
       return result;
     },
@@ -177,6 +195,7 @@ export async function run_backend_runtime(args: {
       appVersion: start_result.backendServices.app.metadata.read_version(),
       berserkerUpdateRootDir:
         start_result.backendServices.app.paths.get_berserker_update_root_dir(),
+      networkProxy: start_result.networkProxy,
     };
     args.port.postMessage({ type: "ready", data: ready });
   } catch (error) {
@@ -195,4 +214,17 @@ function to_error(error: LogError): Error {
   if (normalized.stack === undefined) delete result.stack;
   else result.stack = normalized.stack;
   return result;
+}
+
+function is_remote_auth_result(value: unknown): value is RemoteAuthHostResult {
+  if (typeof value !== "object" || value === null) return false;
+  const status = (value as { status?: unknown }).status;
+  if (
+    !["succeeded", "unauthorized", "cancelled", "timeout", "unavailable"].includes(String(status))
+  ) {
+    return false;
+  }
+  if (status !== "succeeded") return true;
+  const record = value as { token?: unknown; cookie?: unknown };
+  return typeof record.token === "string" && typeof record.cookie === "string";
 }

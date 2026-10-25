@@ -37,10 +37,12 @@ import type {
   AgentContextSnapshot,
   AgentEntry,
   AgentMessageInput,
+  AgentRunFailure,
   AgentUsageSnapshot,
   AgentEntryStatus,
 } from "../../shared/agent";
 import type { RuntimeLease } from "../runtime-operation-gate";
+import { create_agent_model_error, describe_run_failure } from "./agent-run-failure";
 import { AGENT_COMPACTION_RESERVE_TOKENS } from "../../domain/model-agent";
 import { AppError } from "../../shared/error";
 import type { PreparedAgentMessage } from "./agent-message-input";
@@ -309,7 +311,7 @@ export class AgentChat {
     void chat.harness.closed.then((end) => {
       if (end.reason === "failed") chat.failure ??= end.error;
       if (chat.failure !== undefined) {
-        chat.view.fail_round(chat.failedRound, chat.failedAt);
+        chat.view.fail_round(chat.failedRound, chat.failedAt, describe_run_failure(chat.failure));
       }
       options.onChange();
     });
@@ -703,6 +705,7 @@ export class AgentChat {
           checkpoint,
           endedAt: null,
           averageTokensPerSecond: null,
+          failure: null,
         };
     });
     execution.controller.signal.throwIfAborted();
@@ -832,7 +835,7 @@ export class AgentChat {
               if (result.status === "error") throw result.error;
             }
           }
-          throw new Error(
+          throw create_agent_model_error(
             typeof unanswered.detail === "string" ? unanswered.detail : unanswered.reason,
           );
         }
@@ -930,6 +933,7 @@ export class AgentChat {
     execution: AgentExecution,
     status: Extract<AgentEntryStatus, "success" | "error" | "stopped">,
     average: number | null,
+    failure: AgentRunFailure | null,
   ): Promise<void> {
     const roundId = execution.roundId;
     if (roundId === null) return;
@@ -939,6 +943,7 @@ export class AgentChat {
         round.status = status;
         round.endedAt = Date.now();
         round.averageTokensPerSecond = average;
+        round.failure = status === "error" ? failure : null;
       }
     });
   }
@@ -961,7 +966,7 @@ export class AgentChat {
       queue.cancel_send();
       queue.pause();
     });
-    await this.finish_round(execution, "stopped", average);
+    await this.finish_round(execution, "stopped", average, null);
     this.finish_recovery(execution);
     execution.steer = null;
   }

@@ -1,10 +1,17 @@
+import type { GodotPackOrder } from "../../shared/godot";
+import path from "node:path";
+import { godot_pack_preview, read_godot_pack_orders } from "../file/godot/source";
 import { build_source_file_parse_failure } from "../file/source-file-parse-failure-reporter";
 import type { GamePrepareExecution } from "../file/shared/game/prepare-worker";
 import { assert_source_file_paths } from "../file/source-file-paths";
 import { normalize_project_asset_path } from "../../shared/project/project-asset-paths";
 import type { SourceFileParseWarning } from "../file/file-format-types";
 import type { WorkbenchImportFilesPreview } from "../../shared/workbench/workbench-command-planner";
-import { get_section_revision, ProjectDataReader } from "./project-data-reader";
+import {
+  build_section_revisions_from_meta,
+  get_section_revision,
+  ProjectDataReader,
+} from "./project-data-reader";
 import { resolve_text_rule_type, type TextFileContext } from "../../shared/text/text-rule-type";
 import {
   normalize_batch_translation_progress,
@@ -42,12 +49,17 @@ import {
   type ProjectItemPublicRecord,
   type Item,
 } from "../../domain/item";
-import { is_json_record, read_json_record } from "../../domain/json";
+import type { RemoteRowDecision, RemoteRowPlan } from "../remote/novelia-source";
+import { REMOTE_SOURCE_META_KEY, type RemoteSourceBinding } from "../remote/remote-source";
+import { is_json_record } from "../../domain/json";
+import { normalize_setting_snapshot } from "../../domain/setting";
 import {
-  normalize_project_settings_snapshot,
-  normalize_setting_snapshot,
+  parse_project_language_patch,
+  read_project_language_settings,
+  read_project_prefilter_settings,
+  type AppPrefilterSettings,
   type ProjectSettingsSnapshot,
-} from "../../domain/setting";
+} from "../../domain/project-settings";
 import type { ProjectWriteResult } from "../../shared/project-event";
 import type { SourceFileParseFailureRecord } from "../../shared/source-file-parse-failure";
 import {
@@ -69,6 +81,30 @@ type ProjectWriteSnapshot = {
 
 type ProjectImportConflictAction = "skip" | "replace";
 
+/** 同步应用时每行的人工决定；只覆盖自动对齐结果，不改写新原文。 */
+export interface RemoteAssetRowOverride {
+  action: RemoteRowDecision;
+  dst?: string | undefined; // 提供时直接作为该行译文，空字符串表示重译
+}
+
+export interface RemoteAssetReplaceRequest {
+  assetPath: string;
+  content: string;
+  binding: RemoteSourceBinding;
+  rows: readonly RemoteRowPlan[];
+  overrides: ReadonlyMap<number, RemoteAssetRowOverride>;
+  expectedSectionRevisions: ProjectExpectedSectionRevisions;
+}
+
+const PROJECT_SETTINGS_UPDATE_SOURCE = "project_settings_update";
+// 条目、进度与项目设置都由后端从项目事实计算，请求携带这些字段视为旧载荷。
+const PROJECT_DERIVED_FIELDS = [
+  "items",
+  "translation_extras",
+  "prefilter_config",
+  "project_settings",
+];
+
 type ImportProjectFileCommand = {
   source_path: string; // 用户选中的真实文件路径，只允许慢准备阶段读取
   target_rel_path: string; // 写入 .lg asset 的相对路径，提交阶段重新做唯一性校验
@@ -88,7 +124,7 @@ export class ProjectContentService {
 
   private readonly app_setting_service: AppSettingService | null; // 文件重解析需要当前应用级格式配置；测试可为空并使用稳定默认值
 
-  private readonly native_fs: NativeFs; // 只用于显式项目路径存在性校验，.lg 写入仍归 ProjectDatabase
+  private readonly native_fs: NativeFs; // 来源解析使用宿主文件 IO，.lg 写入仍归 ProjectDatabase。
 
   private readonly log_manager: Pick<LogManager, "warning"> | null; // 记录批量文件解析失败明细，不影响事务边界
 
@@ -118,7 +154,7 @@ export class ProjectContentService {
   /** 预览只发现来源并分配目标名称，内容准备由正式导入持有。 */
   public async preview_import_files(request: JsonRecord): Promise<WorkbenchImportFilesPreview> {
     const project_path = this.session_state.require_loaded_project_path();
-    const format_service = this.create_format_service();
+    const format_service = await this.create_format_service(project_path);
     const source_paths = this.normalize_string_list(request["source_paths"]);
     const sources = await format_service.collect_source_file_entries(source_paths);
     const snapshot = await this.database.read(project_path, (reader) => ({
@@ -137,8 +173,14 @@ export class ProjectContentService {
         ? [build_source_file_parse_failure({ ...entry, error: entry.source.error })]
         : [],
     );
+    const godot_packs = entries.flatMap((entry) =>
+      entry.source.kind === "game" && entry.source.file_type === "GODOT"
+        ? [godot_pack_preview(entry.source.game)]
+        : [],
+    );
     return {
       files_revision: snapshot.files_revision,
+      ...(godot_packs.length ? { godot_packs } : {}),
       ...(failed_files.length ? { failed_files } : {}),
       files: entries.map((entry) => {
         const target = normalize_project_asset_path(entry.rel_path);
@@ -157,8 +199,51 @@ export class ProjectContentService {
    */
   public async import_files(request: JsonRecord): Promise<ProjectWriteResult> {
     const project_path = this.session_state.require_loaded_project_path();
-    return this.runtime_gate.run_project_write(async (signal) => {
-      this.assert_no_legacy_fields(request, ["items", "translation_extras", "prefilter_config"]);
+    return this.runtime_gate.run_project_write((signal) =>
+      this.import_files_in_write(project_path, request, signal),
+    );
+  }
+
+  /**
+   * Agent 工具在自身运行租约内导入一段暂存文本。
+   * 目标名按工程现有资产分配唯一名称，绝不覆盖已有文件；暂存文件生命周期由调用方负责。
+   */
+  public async import_source_file_under_agent(
+    request: { source_path: string; file_name: string },
+    signal?: AbortSignal,
+  ): Promise<{ asset_path: string; write: ProjectWriteResult }> {
+    const project_path = this.session_state.require_loaded_project_path();
+    return await this.runtime_gate.run_agent_project_write(async (combined) => {
+      const snapshot = await this.read_project_write_snapshot(project_path);
+      const asset_path = allocate_import_asset_path(request.file_name, snapshot.asset_records);
+      // Agent 写租约已排除其它写入，读到的修订就是提交时的事实。
+      const revisions = build_section_revisions_from_meta(
+        await this.database.get_all_meta(project_path),
+      );
+      const write = await this.import_files_in_write(
+        project_path,
+        {
+          files: [{ source_path: request.source_path, target_rel_path: asset_path }],
+          conflict_action: "skip",
+          expected_section_revisions: {
+            files: revisions.files ?? 0,
+            items: revisions.items ?? 0,
+          },
+        },
+        combined,
+      );
+      return { asset_path, write };
+    }, signal);
+  }
+
+  /** 导入核心：HTTP 入口与 Agent 工具共用同一条解析、预过滤与事务路径。 */
+  private async import_files_in_write(
+    project_path: string,
+    request: JsonRecord,
+    signal: AbortSignal,
+  ): Promise<ProjectWriteResult> {
+    {
+      this.assert_no_legacy_fields(request, PROJECT_DERIVED_FIELDS);
       const conflict_action = this.normalize_import_conflict_action(request["conflict_action"]);
       const file_commands = this.normalize_import_file_commands(request["files"]);
       if (file_commands.length === 0) {
@@ -191,7 +276,9 @@ export class ProjectContentService {
           });
         incoming_paths.add(key);
       }
+      const godot_orders = read_godot_pack_orders(request["godot_pack_orders"]);
       const parse_result = await this.parse_import_file_commands(
+        project_path,
         snapshot.asset_records,
         file_commands.filter(
           (file) =>
@@ -201,6 +288,7 @@ export class ProjectContentService {
             ),
         ),
         signal,
+        godot_orders,
       );
       signal.throwIfAborted();
       this.assert_project_import_has_parseable_files(parse_result);
@@ -270,10 +358,7 @@ export class ProjectContentService {
         });
       }
 
-      const settings = await this.read_project_write_settings(
-        project_path,
-        request["project_settings"],
-      );
+      const settings = await this.read_project_write_settings(project_path);
       let write_output = await this.compute_prefilter_output({
         project_path,
         files: current_files,
@@ -330,6 +415,136 @@ export class ProjectContentService {
       return parse_result.failed_files.length === 0
         ? write_result
         : { ...write_result, failed_files: parse_result.failed_files };
+    }
+  }
+
+  /**
+   * 远端整本同步以当前工程条目为语义基准：保留可匹配条目的身份、译文与人工状态，
+   * 新行分配新身份，再按当前设置重算预过滤与进度。
+   */
+  public async replace_remote_asset(
+    request: RemoteAssetReplaceRequest,
+  ): Promise<ProjectWriteResult> {
+    const project_path = this.session_state.require_loaded_project_path();
+    return await this.runtime_gate.run_project_write(async () => {
+      const snapshot = await this.read_project_write_snapshot(project_path);
+      const existing_asset = snapshot.asset_records.find(
+        (asset) => asset.path === request.assetPath,
+      );
+      if (existing_asset === undefined) {
+        throw new AppErrors.AppError("remote.source_not_bound", {
+          public_details: { reason: "asset_missing", asset_path: request.assetPath },
+        });
+      }
+      if (existing_asset.file_type !== "TXT") {
+        throw new AppErrors.AppError("remote.source_not_bound", {
+          public_details: { reason: "asset_not_text", asset_path: request.assetPath },
+        });
+      }
+      const settings = await this.read_project_write_settings(project_path);
+      const next_items = new Map<number, ProjectItemPublicRecord>();
+      const used_item_ids = new Set<number>();
+      let next_item_id = this.next_item_id_seed(snapshot.public_items_by_id);
+      for (const item of snapshot.public_items_by_id.values()) {
+        if (item.file_path === request.assetPath) continue;
+        next_items.set(item.item_id, { ...item });
+        used_item_ids.add(item.item_id);
+      }
+      for (const row of request.rows) {
+        const override = request.overrides.get(row.row);
+        const decision = override?.action ?? row.decision;
+        const previous =
+          row.old_item === null ? undefined : snapshot.public_items_by_id.get(row.old_item.item_id);
+        const can_reuse = previous !== undefined && decision !== "retranslate";
+        const previous_dst = previous?.dst ?? "";
+        const keeps_previous_dst = can_reuse && previous_dst !== "";
+        // 人工排除与预过滤跳过的条目保持原状态，不因站点有译文而恢复翻译。
+        const protected_previous =
+          previous !== undefined &&
+          (previous.status === "EXCLUDED" ||
+            previous.status === "RULE_SKIPPED" ||
+            previous.status === "LANGUAGE_SKIPPED" ||
+            previous.status === "DUPLICATED");
+        const remote_dst = row.remote_dst ?? "";
+        const use_remote =
+          override === undefined &&
+          remote_dst.trim() !== "" &&
+          !keeps_previous_dst &&
+          !protected_previous;
+        let item_id: number;
+        if (can_reuse && !used_item_ids.has(previous.item_id)) {
+          item_id = previous.item_id;
+        } else {
+          next_item_id += 1;
+          while (used_item_ids.has(next_item_id)) next_item_id += 1;
+          item_id = next_item_id;
+        }
+        used_item_ids.add(item_id);
+        const dst =
+          override?.dst ?? (keeps_previous_dst ? previous_dst : use_remote ? remote_dst : "");
+        next_items.set(item_id, {
+          item_id,
+          row_number: row.row,
+          src: row.src,
+          dst,
+          name_src: can_reuse ? previous.name_src : null,
+          name_dst: can_reuse ? previous.name_dst : null,
+          extra_field: can_reuse ? previous.extra_field : "",
+          tag: can_reuse ? previous.tag : "",
+          file_type: can_reuse ? previous.file_type : "TXT",
+          file_path: request.assetPath,
+          status:
+            override?.dst !== undefined
+              ? dst === ""
+                ? "NONE"
+                : "PROCESSED"
+              : use_remote
+                ? "PROCESSED"
+                : can_reuse
+                  ? previous.status
+                  : "NONE",
+          skip_internal_filter: can_reuse ? previous.skip_internal_filter : false,
+        });
+      }
+      const files: ProjectFileSection = {
+        ...snapshot.files,
+        [request.assetPath]: {
+          ...(snapshot.files[request.assetPath] ?? {
+            rel_path: request.assetPath,
+            sort_index: existing_asset.sort_order,
+          }),
+          rel_path: request.assetPath,
+          file_type: existing_asset.file_type,
+        },
+      };
+      const write_output = await this.compute_prefilter_output({
+        project_path,
+        files,
+        items: this.public_item_record(next_items.values()),
+        settings,
+      });
+      const meta: MutableJsonRecord = {
+        ...this.build_prefilter_reset_meta(settings, write_output),
+        [REMOTE_SOURCE_META_KEY]: request.binding as unknown as JsonValue,
+      };
+      return await this.write_store.replace_project_items_and_files({
+        projectPath: project_path,
+        expectedSectionRevisions: request.expectedSectionRevisions,
+        revisionSections: ["files", "items"],
+        source: "remote_sync",
+        updatedSections: ["files", "items"],
+        assetWrites: [
+          {
+            kind: "update",
+            path: request.assetPath,
+            content: new TextEncoder().encode(request.content),
+            fileType: existing_asset.file_type,
+            pdfDocument: null,
+          },
+        ],
+        items: build_project_item_persistent_records(write_output.items),
+        meta,
+      });
     });
   }
 
@@ -339,7 +554,7 @@ export class ProjectContentService {
   public async reset_files(request: JsonRecord): Promise<ProjectWriteResult> {
     const project_path = this.session_state.require_loaded_project_path();
     return this.runtime_gate.run_project_write(async () => {
-      this.assert_no_legacy_fields(request, ["items", "translation_extras", "prefilter_config"]);
+      this.assert_no_legacy_fields(request, PROJECT_DERIVED_FIELDS);
       const rel_paths = this.normalize_string_list(request["rel_paths"]);
       if (rel_paths.length === 0) {
         throw new AppErrors.AppError("request.validation_failed");
@@ -356,10 +571,7 @@ export class ProjectContentService {
         item.name_dst = null;
         item.status = FileFormatService.default_status(item);
       }
-      const settings = await this.read_project_write_settings(
-        project_path,
-        request["project_settings"],
-      );
+      const settings = await this.read_project_write_settings(project_path);
       const write_output = await this.compute_prefilter_output({
         project_path,
         files: snapshot.files,
@@ -390,7 +602,7 @@ export class ProjectContentService {
   public async delete_files(request: JsonRecord): Promise<ProjectWriteResult> {
     const project_path = this.session_state.require_loaded_project_path();
     return this.runtime_gate.run_project_write(async () => {
-      this.assert_no_legacy_fields(request, ["items", "translation_extras", "prefilter_config"]);
+      this.assert_no_legacy_fields(request, PROJECT_DERIVED_FIELDS);
       const rel_paths = this.normalize_string_list(request["rel_paths"]);
       if (rel_paths.length === 0) {
         throw new AppErrors.AppError("request.validation_failed");
@@ -409,10 +621,7 @@ export class ProjectContentService {
           delete items[item_id];
         }
       }
-      const settings = await this.read_project_write_settings(
-        project_path,
-        request["project_settings"],
-      );
+      const settings = await this.read_project_write_settings(project_path);
       const write_output = await this.compute_prefilter_output({
         project_path,
         files,
@@ -459,49 +668,51 @@ export class ProjectContentService {
   }
 
   /**
-   * 写入项目设置镜像；prefiltered_items 模式同时替换条目与翻译进度
+   * 修改当前项目语言；源语言变化时在同一提交内重算预过滤，目标语言只更新项目设置。
    */
-  public async align_settings(request: JsonRecord): Promise<ProjectWriteResult> {
-    const mode = String(request["mode"] ?? "").toLowerCase();
-    if (mode !== "settings_only" && mode !== "prefiltered_items") {
-      throw new AppErrors.AppError("request.validation_failed");
-    }
+  public async update_project_settings(request: JsonRecord): Promise<ProjectWriteResult> {
+    const patch = parse_project_language_patch(request);
     return this.runtime_gate.run_project_write(async () => {
-      if (mode === "prefiltered_items")
-        this.assert_no_legacy_fields(request, ["items", "translation_extras", "prefilter_config"]);
-      const project_path = this.resolve_project_path(request);
-      const settings = await this.read_project_write_settings(
+      const project_path = this.session_state.require_loaded_project_path();
+      const current = await this.read_project_write_settings(project_path);
+      const settings: ProjectSettingsSnapshot = { ...current, ...patch };
+      if (settings.source_language === current.source_language) {
+        return settings.target_language === current.target_language
+          ? { accepted: true, changes: [] }
+          : await this.write_store.apply_project_settings_meta({
+              projectPath: project_path,
+              source: PROJECT_SETTINGS_UPDATE_SOURCE,
+              meta: { target_language: settings.target_language },
+            });
+      }
+      const snapshot = await this.read_project_write_snapshot(project_path);
+      const write_output = await this.compute_prefilter_output({
         project_path,
-        request["project_settings"],
-      );
-      return await (
-        await this.prepare_settings_alignment(
-          project_path,
-          settings,
-          mode === "prefiltered_items",
-          mode === "prefiltered_items"
-            ? require_project_expected_section_revisions(request["expected_section_revisions"])
-            : undefined,
-        )
-      )();
+        files: snapshot.files,
+        items: this.public_item_record(snapshot.public_items_by_id.values()),
+        settings,
+      });
+      return await this.write_store.replace_project_items_and_files({
+        projectPath: project_path,
+        requireExpectedSectionRevisions: false,
+        revisionSections: ["project", "items"],
+        source: PROJECT_SETTINGS_UPDATE_SOURCE,
+        updatedSections: ["project", "items"],
+        items: build_project_item_persistent_records(write_output.items),
+        meta: this.build_prefilter_reset_meta(settings, write_output),
+      });
     });
   }
 
   /** 调用方持有工程写 lease；完成准备后才允许保存配置，使预过滤错误先于外部写入暴露。 */
-  public async prepare_settings_alignment(
+  public async prepare_prefilter_settings(
     project_path: string,
-    settings: ProjectSettingsSnapshot,
-    prefilter: boolean,
-    expected_section_revisions?: ProjectExpectedSectionRevisions,
+    prefilter_settings: AppPrefilterSettings,
   ): Promise<() => Promise<ProjectWriteResult>> {
-    const settings_meta = this.build_project_settings_only_meta(settings);
-    if (!prefilter) {
-      return () =>
-        this.write_store.apply_project_settings_meta({
-          projectPath: project_path,
-          meta: settings_meta,
-        });
-    }
+    const settings: ProjectSettingsSnapshot = {
+      ...(await this.read_project_write_settings(project_path)),
+      ...prefilter_settings,
+    };
     const snapshot = await this.read_project_write_snapshot(project_path);
     const write_output = await this.compute_prefilter_output({
       project_path,
@@ -512,15 +723,12 @@ export class ProjectContentService {
     return () =>
       this.write_store.replace_project_items_and_files({
         projectPath: project_path,
-        // 设置命令在 lease 内读取当前事实；来自预演的调用仍保留消费方 revision。
-        ...(expected_section_revisions === undefined
-          ? { requireExpectedSectionRevisions: false as const }
-          : { expectedSectionRevisions: expected_section_revisions }),
+        requireExpectedSectionRevisions: false,
         revisionSections: ["items"],
         source: "settings_alignment",
         updatedSections: ["items"],
         items: build_project_item_persistent_records(write_output.items),
-        meta: { ...settings_meta, ...this.build_prefilter_reset_meta(settings, write_output) },
+        meta: this.build_prefilter_reset_meta(settings, write_output),
       });
   }
 
@@ -531,18 +739,13 @@ export class ProjectContentService {
     const project_path = this.session_state.require_loaded_project_path();
     const mode = String(request["mode"] ?? "").toLowerCase();
     this.assert_no_legacy_fields(request, [
-      "items",
-      "translation_extras",
-      "prefilter_config",
+      ...PROJECT_DERIVED_FIELDS,
       "expected_section_revisions",
     ]);
     return this.runtime_gate.run_project_write(async () => {
       if (mode === "all") {
         const { items: parsed_items, warnings } = await this.reparse_all_assets(project_path);
-        const settings = await this.read_project_write_settings(
-          project_path,
-          request["project_settings"],
-        );
+        const settings = await this.read_project_write_settings(project_path);
         const snapshot = await this.read_project_write_snapshot(project_path);
         // 重建条目分配全新身份；旧行号不承担跨解析版本的内容匹配责任。
         let next_item_id = this.next_item_id_seed(snapshot.public_items_by_id);
@@ -638,11 +841,13 @@ export class ProjectContentService {
 
   /** 在来源准备前固定身份并检查完整目标集合，避免无效目标修改游戏。 */
   private async parse_import_file_commands(
+    project_path: string,
     assets: readonly ProjectAssetRecord[],
     files: readonly ImportProjectFileCommand[],
     signal: AbortSignal,
+    orders?: readonly GodotPackOrder[],
   ): Promise<SourceFileParseResult> {
-    const format_service = this.create_format_service();
+    const format_service = await this.create_format_service(project_path);
     const by_path = new Map(
       assets.map((asset) => [normalize_project_asset_path(asset.path).toLowerCase(), asset]),
     );
@@ -656,6 +861,7 @@ export class ProjectContentService {
         };
       }),
       signal,
+      orders,
     );
     const final_files = new Map<string, { path: string; file_type: string }>(by_path);
     for (const command of commands)
@@ -716,13 +922,16 @@ export class ProjectContentService {
   }
 
   /**
-   * 文件解析必须跟随当前应用格式配置；没有配置服务的单测使用稳定默认值
+   * 文件解析使用项目目标语言与当前应用格式配置
    */
-  private create_format_service(): FileFormatService {
+  private async create_format_service(project_path: string): Promise<FileFormatService> {
     const config = normalize_setting_snapshot(this.app_setting_service?.read_setting() ?? {});
+    const languages = read_project_language_settings(
+      await this.database.get_all_meta(project_path),
+    );
     return new FileFormatService(
       {
-        target_language: config.target_language,
+        target_language: languages.target_language,
         deduplication_in_bilingual: config.deduplication_in_bilingual,
         write_translated_name_fields_to_file: config.write_translated_name_fields_to_file,
       },
@@ -733,26 +942,17 @@ export class ProjectContentService {
   }
 
   /**
-   * 写入计算优先读取请求中的用户设置；缺失时回到项目 meta 镜像
+   * 写入计算只读取项目事实：项目语言，以及项目记录的应用预过滤开关
    */
   private async read_project_write_settings(
     project_path: string,
-    value: JsonValue | undefined,
   ): Promise<ProjectSettingsSnapshot> {
-    const request_settings = { ...read_json_record(value) };
     const meta = await this.database.get_all_meta(project_path);
-    const prefilter_config = { ...read_json_record(meta["prefilter_config"]) };
-    return normalize_project_settings_snapshot(
-      request_settings,
-      normalize_project_settings_snapshot(
-        meta,
-        normalize_project_settings_snapshot(prefilter_config),
-      ),
-    );
+    return { ...read_project_language_settings(meta), ...read_project_prefilter_settings(meta) };
   }
 
   /**
-   * 按本次操作的目标路径读取 asset、item 和 PDF 身份，支持打开前的设置对齐。
+   * 按本次操作的目标路径读取 asset、item 和 PDF 身份。
    */
   private async read_project_write_snapshot(project_path: string): Promise<ProjectWriteSnapshot> {
     return this.database.read(project_path, (reader) => {
@@ -844,7 +1044,7 @@ export class ProjectContentService {
   }
 
   /**
-   * 预过滤类写入重建条目状态与翻译进度，并写入当前项目设置镜像
+   * 预过滤类写入同时保存项目语言、开关处理记录与翻译进度
    */
   private build_prefilter_reset_meta(
     settings: ProjectSettingsSnapshot,
@@ -967,7 +1167,7 @@ export class ProjectContentService {
   private async reparse_all_assets(
     project_path: string,
   ): Promise<{ items: Item[]; warnings: SourceFileParseWarning[] }> {
-    const format_service = this.create_format_service();
+    const format_service = await this.create_format_service(project_path);
     const items: Item[] = [];
     const warnings: SourceFileParseWarning[] = [];
     for (const record of await this.database.get_all_asset_records(project_path)) {
@@ -990,38 +1190,6 @@ export class ProjectContentService {
       }
     }
     return { items, warnings };
-  }
-
-  /**
-   * 多数写入绑定 loaded 工程；仅打开前的 settings alignment 允许显式既有 path。
-   */
-  private resolve_project_path(request: JsonRecord): string {
-    const explicit_path = String(request["path"] ?? "").trim();
-    if (explicit_path !== "") {
-      this.assert_explicit_project_file_exists(explicit_path);
-      return explicit_path;
-    }
-    return this.session_state.require_loaded_project_path();
-  }
-
-  /**
-   * 显式 path 来自打开前设置对齐，必须先确认旧工程存在，避免 SQLite 静默创建空库
-   */
-  private assert_explicit_project_file_exists(project_path: string): void {
-    if (!this.native_fs.exists(project_path)) {
-      throw new AppErrors.AppError("project.not_found", {
-        public_details: {
-          filename: project_path.split(/[\\/]/u).at(-1) ?? "",
-        },
-      });
-    }
-  }
-
-  /**
-   * 只写项目设置镜像时使用的受限 meta 白名单
-   */
-  private build_project_settings_only_meta(value: JsonValue | undefined): MutableJsonRecord {
-    return normalize_project_settings_snapshot(value) as unknown as MutableJsonRecord;
   }
 
   /**
@@ -1067,5 +1235,30 @@ export class ProjectContentService {
     return Array.isArray(value)
       ? value.map((item) => String(item)).filter((item) => item !== "")
       : [];
+  }
+}
+
+/**
+ * Agent 导入只新增不覆盖：目标名与现有资产做大小写不敏感比较，冲突时追加序号。
+ */
+function allocate_import_asset_path(
+  file_name: string,
+  asset_records: readonly ProjectAssetRecord[],
+): string {
+  const safe_name = path.basename(file_name);
+  if (safe_name === "" || safe_name !== file_name || safe_name === "." || safe_name === "..") {
+    throw new AppErrors.AppError("request.validation_failed", {
+      diagnostic_context: { reason: "invalid_import_file_name", file_name },
+    });
+  }
+  const existing = new Set(
+    asset_records.map((record) => normalize_project_asset_path(record.path).toLowerCase()),
+  );
+  const candidate = normalize_project_asset_path(safe_name);
+  if (!existing.has(candidate.toLowerCase())) return candidate;
+  const parsed = path.parse(candidate);
+  for (let suffix = 2; ; suffix += 1) {
+    const renamed = `${parsed.name}_${suffix}${parsed.ext}`;
+    if (!existing.has(renamed.toLowerCase())) return renamed;
   }
 }

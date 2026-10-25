@@ -4,6 +4,18 @@ import type { LocaleMessageSchema } from "../../types";
 export const de_de_project_page = {
   title: "Projekt-Startseite",
   create: {
+    mode: {
+      label: "Projektquelle",
+      files: "Lokale Dateien",
+      novel: "Roman-URL",
+    },
+    remote: {
+      url_placeholder: "URL einer n.novelia.cc-Romanseite einfügen",
+      check: "Prüfen",
+      hint: "Die Prüfung liest Titel und Kapitelzahl; beim Erstellen wird der ganze Roman heruntergeladen und importiert.",
+      chapters: "{COUNT} Kapitel",
+      check_failed: "Romaninformationen konnten nicht gelesen werden …",
+    },
     title: "Projekt erstellen",
     subtitle: "Quelle wählen und eigenständiges .lg-Projekt erstellen",
     drop_title: "Klicken oder Quelldatei hierher ziehen",
@@ -19,6 +31,7 @@ export const de_de_project_page = {
       translation_prompt: "Übersetzungs-Prompt",
     },
     action: "Projekt erstellen",
+    language_dialog_title: "Projektsprachen",
   },
   open: {
     title: "Projekt öffnen",

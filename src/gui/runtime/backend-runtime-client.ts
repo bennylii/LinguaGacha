@@ -1,5 +1,6 @@
 import type { AgentImageHost } from "../../shared/agent-image";
 import type { PDFHost } from "../../shared/pdf";
+import type { RemoteAuthHost } from "../../shared/remote-auth-host";
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
 
@@ -49,6 +50,9 @@ export class BackendRuntimeClient {
       resolveProxy: (url: string) => Promise<string>;
       openDirectory: (path: string) => Promise<void>;
       pickSavePath: (defaultName: string) => Promise<string | null>;
+      focusWindow: () => Promise<void>;
+      openProjectWindow: (projectPath: string) => Promise<void>;
+      remoteAuthHost?: RemoteAuthHost;
       onUnexpectedExit: (error: Error) => void;
     },
   ) {}
@@ -195,6 +199,17 @@ export class BackendRuntimeClient {
           break;
         case "pick_save_path":
           data = await this.options.pickSavePath(operation.defaultName);
+          break;
+        case "focus_window":
+          data = await this.options.focusWindow();
+          break;
+        case "open_project_window":
+          data = await this.options.openProjectWindow(operation.project_path);
+          break;
+        case "open_remote_login_window":
+        case "remote_auth_refresh":
+          if (!this.options.remoteAuthHost) throw new Error("Remote auth host missing.");
+          data = await this.options.remoteAuthHost(operation, controller.signal);
           break;
       }
       result = { ok: true, data };

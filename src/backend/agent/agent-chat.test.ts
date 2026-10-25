@@ -317,8 +317,8 @@ async function open(store: AgentChatStorage) {
   });
   return { chat, provider, models, append };
 }
-/** 经产品轮次入口提交并结算，供内存与磁盘场景共用。 */
-async function talk(chat: AgentChat, text: string) {
+/** 经产品轮次入口提交并运行，结算由调用方决定。 */
+async function start_round(chat: AgentChat, text: string) {
   const execution: AgentExecution = {
     controller: new AbortController(),
     stop_reason: null,
@@ -341,10 +341,35 @@ async function talk(chat: AgentChat, text: string) {
     "round",
   );
   await chat.run(input, execution);
-  await chat.finish_round(execution, "success", null);
+  return execution;
+}
+
+/** 经产品轮次入口提交并结算，供内存与磁盘场景共用。 */
+async function talk(chat: AgentChat, text: string) {
+  const execution = await start_round(chat, text);
+  await chat.finish_round(execution, "success", null, null);
   chat.execution = null;
   return execution;
 }
+
+it("失败轮次保存原因摘要，后续成功结算清空", async () => {
+  const { chat, provider } = await create_chat();
+  provider.setResponses([fauxAssistantMessage("回答"), fauxAssistantMessage("再答")]);
+  const failure = { status: 400, detail: "Upstream request failed: [security_audit_fail]" };
+  const execution = await start_round(chat, "第一问");
+  await chat.finish_round(execution, "error", null, failure);
+  expect(chat.state.rounds[execution.roundId!]).toMatchObject({ status: "error", failure });
+  expect(chat.entries.find((entry) => entry.kind === "user_message")).toMatchObject({
+    status: "error",
+    failure,
+  });
+
+  chat.execution = null;
+  const next = await start_round(chat, "第二问");
+  await chat.finish_round(next, "success", null, null);
+  expect(chat.state.rounds[next.roundId!]).toMatchObject({ status: "success", failure: null });
+  chat.execution = null;
+});
 
 it("既有身份重开恢复历史，无模型时可修订助手，后续请求采用修订内容", async () => {
   const { database, file } = await project();
@@ -551,6 +576,7 @@ it("遗留工具任务只执行 SDK 取消收尾，恢复后保留公开工具�
         status: "running",
         endedAt: null,
         averageTokensPerSecond: null,
+        failure: null,
       };
     },
   });
@@ -667,7 +693,7 @@ it("用户修订在 SDK 受理后切换历史，采用本次模型与思考等�
   expect(chat.state.commands.revision!.status).toBe("accepted");
   expect(chat.state.activeConversationId).not.toBe(active);
   await chat.run(accepted, execution);
-  await chat.finish_round(execution, "success", null);
+  await chat.finish_round(execution, "success", null, null);
   chat.execution = null;
   expect(respond).toHaveBeenCalledOnce();
   expect(respond.mock.calls[0]![1]?.reasoning).toBe("high");

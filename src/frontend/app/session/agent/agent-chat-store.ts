@@ -27,6 +27,7 @@ import type {
   AgentQuestion,
   AgentQuestionResponse,
   AgentQueuedInput,
+  AgentRunFailure,
   AgentChatEvent,
   AgentChatChange,
   AgentChatSnapshot,
@@ -35,6 +36,8 @@ import type {
   AgentSkillSnapshot,
   AgentToolEntry,
   AgentTokenSpeedSnapshot,
+  AgentAutoResumeSnapshot,
+  AgentAutoContinueSnapshot,
   AgentUsageSnapshot,
   AgentWriteApprovalDecision,
 } from "@shared/agent";
@@ -78,6 +81,8 @@ export type AgentControlsSlice = Readonly<{
   pendingDecision: AgentPendingDecision | null;
   context: AgentContextSnapshot;
   usage: AgentUsageSnapshot;
+  autoResume: AgentAutoResumeSnapshot | null;
+  autoContinue: AgentAutoContinueSnapshot | null;
   transport: AgentTransportState;
   command: AgentCommand;
 }>;
@@ -129,6 +134,8 @@ const EMPTY_CONTROLS: AgentControlsSlice = {
   pendingDecision: null,
   context: { tokens: null, compactable: false, limits: null },
   usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  autoResume: null,
+  autoContinue: null,
   transport: "restoring",
   command: null,
 };
@@ -342,6 +349,13 @@ export class AgentChatStore {
       next.usage.output === this.controls.usage.output &&
       next.usage.cacheRead === this.controls.usage.cacheRead &&
       next.usage.cacheWrite === this.controls.usage.cacheWrite &&
+      next.autoResume?.roundId === this.controls.autoResume?.roundId &&
+      next.autoResume?.attempt === this.controls.autoResume?.attempt &&
+      next.autoResume?.maxAttempts === this.controls.autoResume?.maxAttempts &&
+      next.autoResume?.retryAt === this.controls.autoResume?.retryAt &&
+      next.autoContinue?.roundId === this.controls.autoContinue?.roundId &&
+      next.autoContinue?.attempt === this.controls.autoContinue?.attempt &&
+      next.autoContinue?.phase === this.controls.autoContinue?.phase &&
       next.transport === this.controls.transport &&
       next.command === this.controls.command
     ) {
@@ -441,6 +455,8 @@ export class AgentChatStore {
         pendingDecision: snapshot.pendingDecision,
         context: snapshot.context,
         usage: snapshot.usage,
+        autoResume: snapshot.autoResume,
+        autoContinue: snapshot.autoContinue,
       };
       this.sync_countdown();
       this.emit("queue");
@@ -520,6 +536,12 @@ export class AgentChatStore {
         break;
       case "usage":
         this.set_controls({ usage: change.usage });
+        break;
+      case "auto_resume":
+        this.set_controls({ autoResume: change.autoResume });
+        break;
+      case "auto_continue":
+        this.set_controls({ autoContinue: change.autoContinue });
         break;
       case "input_queue":
         this.queue = { inputQueue: change.inputQueue };
@@ -788,9 +810,9 @@ export class AgentChatStore {
     );
   };
 
-  /** 仅运行中的会话接受停止请求。 */
+  /** 运行中或等待自动重试时接受停止；等待期后端状态是空闲，停止语义为取消等待。 */
   private readonly stop = async (): Promise<void> => {
-    if (this.controls.state !== "running") return;
+    if (this.controls.state !== "running" && this.controls.autoResume === null) return;
     await this.execute_command("stop", () => api_fetch<AgentCommandAck>("/api/agent/stop"));
   };
 
@@ -881,6 +903,8 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
   const input_queue = normalize_input_queue(record["inputQueue"]);
   const doing = normalize_doing(record["doing"]);
   const token_speed = normalize_token_speed(record["tokenSpeed"]);
+  const auto_resume = normalize_auto_resume(record["autoResume"]);
+  const auto_continue = normalize_auto_continue(record["autoContinue"]);
   const context = normalize_context(record["context"]);
   const usage = normalize_usage(record["usage"]);
   if (
@@ -889,7 +913,9 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
     doing === undefined ||
     context === null ||
     usage === null ||
-    token_speed === undefined
+    token_speed === undefined ||
+    auto_resume === undefined ||
+    auto_continue === undefined
   ) {
     throw new TypeError("Agent snapshot is invalid.");
   }
@@ -905,6 +931,8 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
     context,
     usage,
     tokenSpeed: token_speed,
+    autoResume: auto_resume,
+    autoContinue: auto_continue,
   };
 }
 
@@ -953,6 +981,16 @@ function normalize_agent_change(value: unknown): AgentChatChange | null {
       const token_speed = normalize_token_speed(record["tokenSpeed"]);
       return token_speed === undefined ? null : { type: "token_speed", tokenSpeed: token_speed };
     }
+    case "auto_resume": {
+      const auto_resume = normalize_auto_resume(record["autoResume"]);
+      return auto_resume === undefined ? null : { type: "auto_resume", autoResume: auto_resume };
+    }
+    case "auto_continue": {
+      const auto_continue = normalize_auto_continue(record["autoContinue"]);
+      return auto_continue === undefined
+        ? null
+        : { type: "auto_continue", autoContinue: auto_continue };
+    }
     case "context": {
       const context = normalize_context(record["context"]);
       return context === null ? null : { type: "context", context };
@@ -983,6 +1021,51 @@ function normalize_token_speed(value: unknown): AgentTokenSpeedSnapshot | undefi
     speed >= 0
     ? { roundId: round_id, tokensPerSecond: speed }
     : undefined;
+}
+
+/** 自动重试状态只存在于等待期，必须带倒计时；重试开始后后端发布空快照。 */
+function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null | undefined {
+  if (value === null) return null;
+  if (!is_json_record(value)) return undefined;
+  const round_id = value["roundId"];
+  const attempt = value["attempt"];
+  const max_attempts = value["maxAttempts"];
+  const retry_at = value["retryAt"];
+  if (
+    typeof round_id !== "string" ||
+    round_id === "" ||
+    typeof attempt !== "number" ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    (max_attempts !== null &&
+      (typeof max_attempts !== "number" ||
+        !Number.isSafeInteger(max_attempts) ||
+        max_attempts < attempt)) ||
+    typeof retry_at !== "number" ||
+    !Number.isSafeInteger(retry_at) ||
+    retry_at < 0
+  )
+    return undefined;
+  return { roundId: round_id, attempt, maxAttempts: max_attempts, retryAt: retry_at };
+}
+
+/** 自动继续状态只接受轮次身份、正次与两个已知相位，非法事件由 `revision` 缺口恢复。 */
+function normalize_auto_continue(value: unknown): AgentAutoContinueSnapshot | null | undefined {
+  if (value === null) return null;
+  if (!is_json_record(value)) return undefined;
+  const round_id = value["roundId"];
+  const attempt = value["attempt"];
+  const phase = value["phase"];
+  if (
+    typeof round_id !== "string" ||
+    round_id === "" ||
+    typeof attempt !== "number" ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    (phase !== "judging" && phase !== "continuing")
+  )
+    return undefined;
+  return { roundId: round_id, attempt, phase };
 }
 
 /** 累计用量必须完整且非负，非法事件由 `revision` 缺口恢复。 */
@@ -1132,6 +1215,7 @@ function normalize_entry(value: unknown): AgentEntry[] {
       return [{ ...base, delivery: "steer", status: "success", endedAt: ended_at }];
     }
     const average_speed = value["averageTokensPerSecond"];
+    const failure = normalize_run_failure(value["failure"]);
     if (
       value["delivery"] !== "round" ||
       (ended_at !== null && (typeof ended_at !== "number" || !Number.isInteger(ended_at))) ||
@@ -1140,7 +1224,8 @@ function normalize_entry(value: unknown): AgentEntry[] {
         (status === "running" ||
           typeof average_speed !== "number" ||
           !Number.isFinite(average_speed) ||
-          average_speed < 0))
+          average_speed < 0)) ||
+      failure === undefined
     ) {
       return [];
     }
@@ -1151,6 +1236,7 @@ function normalize_entry(value: unknown): AgentEntry[] {
         status,
         endedAt: ended_at,
         averageTokensPerSecond: average_speed,
+        failure,
       },
     ];
   }
@@ -1203,6 +1289,18 @@ function normalize_entry_status(value: unknown): AgentEntryStatus | null {
   return value === "running" || value === "success" || value === "error" || value === "stopped"
     ? value
     : null;
+}
+
+/** 失败摘要只服务行内展示；缺失表示没有失败，形状非法由调用方丢弃整个条目。 */
+function normalize_run_failure(value: unknown): AgentRunFailure | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (!is_json_record(value)) return undefined;
+  const status = value["status"];
+  const detail = value["detail"];
+  if (status !== null && (typeof status !== "number" || !Number.isInteger(status)))
+    return undefined;
+  if (typeof detail !== "string") return undefined;
+  return { status, detail };
 }
 
 /** 会话公开运行、停止收尾与空闲状态，非法值触发完整恢复。 */

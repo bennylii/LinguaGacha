@@ -16,7 +16,6 @@ import { is_runtime_busy } from "@frontend/app/state/runtime-activity-store";
 
 import {
   create_workbench_delete_files_plan,
-  create_workbench_planner_settings,
   create_workbench_reorder_plan,
   create_workbench_reset_file_plan,
   type WorkbenchCommandPlanningState,
@@ -214,6 +213,7 @@ function resolve_workbench_selection_after_snapshot(args: {
 }
 
 export type UseWorkbenchPageStateResult = {
+  godot_pack_order: ReturnType<typeof useWorkbenchImportFilesFlow>["godot_pack_order"];
   cache_status: "idle" | "refreshing" | "ready" | "error";
   consumed_revisions: ProjectDataSectionRevisions;
   required_sections: ProjectDataSection[];
@@ -253,7 +253,6 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
     commit_project_write,
     refresh_batch_translation,
     refresh_project_snapshot,
-    settings_snapshot,
   } = useDesktopState();
   const project_change_signal = useProjectChangeSignal();
   const runtime_snapshot = useRuntimeSnapshot();
@@ -276,11 +275,6 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
   const workbench_change_seq = useMemo(() => {
     return resolveProjectChangeSeqForSections(project_change_signal, WORKBENCH_REFRESH_SECTIONS);
   }, [project_change_signal]);
-  // 工作台文件写入共享同一份窄设置镜像，避免各入口重复拼命令字段。
-  const planner_settings = useMemo(
-    () => create_workbench_planner_settings(settings_snapshot),
-    [settings_snapshot],
-  );
   const previous_project_path_ref = useRef("");
   const refresh_generation_ref = useRef(0);
   const snapshot_ref = useRef(snapshot);
@@ -557,7 +551,6 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
     project_identity: project_snapshot.loaded ? project_snapshot.path : "",
     dialog_state,
     get_planning_state: get_workbench_planning_state,
-    planner_settings,
     run_modal_progress_toast,
     run_project_file_write,
     set_dialog_state: set_dialog_state,
@@ -722,7 +715,6 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
         const reset_plan = create_workbench_reset_file_plan({
           state: get_workbench_planning_state(),
           rel_path: target_rel_path,
-          settings: planner_settings,
         });
         await run_project_file_write(reset_plan, async (body) => {
           return await api_fetch<ProjectWriteResultPayload>("/api/workbench/file/reset", body);
@@ -740,7 +732,6 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
         const delete_plan = create_workbench_delete_files_plan({
           state: get_workbench_planning_state(),
           rel_paths: current_dialog_state.target_rel_paths,
-          settings: planner_settings,
         });
         await run_project_file_write(delete_plan, async (body) => {
           return await api_fetch<ProjectWriteResultPayload>("/api/workbench/file/delete", body);
@@ -800,6 +791,7 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
   }
 
   return {
+    godot_pack_order: import_files_flow.godot_pack_order,
     cache_status,
     consumed_revisions,
     required_sections: WORKBENCH_REQUIRED_SECTIONS,

@@ -25,6 +25,7 @@ const running: RoundEntry = {
   createdAt: 0,
   endedAt: null,
   averageTokensPerSecond: null,
+  failure: null,
 };
 let root: Root;
 let container: HTMLDivElement;

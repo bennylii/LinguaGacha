@@ -1,6 +1,39 @@
 export const zh_cn_expert_settings_page = {
   title: "专家设置",
   fields: {
+    agent_auto_resume_enabled: {
+      title: "Agent 自动重试",
+      description:
+        "模型或传输出现瞬时故障（429、503、连接中断、超时等）时自动重试同一轮次，默认启用" +
+        "\n" +
+        "400、401、403、配额、账单和鉴权错误不会重试；每次重试都会发起新的模型请求",
+    },
+    agent_auto_resume_initial_delay: {
+      title: "首次重试间隔（秒）",
+      description: "第 1 次自动重试前的等待时间，之后每次按 2 倍增长，默认 5 秒",
+    },
+    agent_auto_resume_max_delay: {
+      title: "最长重试间隔（秒）",
+      description:
+        "指数退避的等待上限，达到后按该间隔持续重试，默认 300 秒" +
+        "\n" +
+        "小于首次重试间隔时按首次重试间隔执行",
+    },
+    agent_auto_resume_max_attempts: {
+      title: "最大重试次数",
+      description: "连续自动重试的次数上限，填 0 表示不限次数，默认 0",
+    },
+    agent_auto_continue_enabled: {
+      title: "Agent 自动继续",
+      description:
+        "一轮任务成功结束后，由后端开启独立的判定线程检查任务是否真的做完，未做完时自动发出继续，默认禁用" +
+        "\n" +
+        "每次判定都会额外发起一次模型请求；判定失败或结论无法解析时按已完成处理，不会自动继续",
+    },
+    agent_auto_continue_max_continues: {
+      title: "最大自动继续次数",
+      description: "单轮任务内连续自动继续的次数上限，填 0 表示不限次数，默认 10",
+    },
     preceding_lines_threshold: {
       title: "参考上文行数阈值",
       description: "每个翻译任务最多可携带的参考上文的行数，默认禁用",
@@ -37,6 +70,10 @@ export const zh_cn_expert_settings_page = {
     },
   },
   feedback: {
+    agent_auto_resume_initial_delay_invalid: "首次重试间隔必须是 1 到 3600 之间的整数秒 …",
+    agent_auto_resume_max_delay_invalid: "最长重试间隔必须是 1 到 86400 之间的整数秒 …",
+    agent_auto_resume_max_attempts_invalid: "最大重试次数必须是 0 到 1000 之间的整数 …",
+    agent_auto_continue_max_continues_invalid: "最大自动继续次数必须是 0 到 1000 之间的整数 …",
     preceding_lines_threshold_invalid: "参考上文行数阈值必须填写为有效范围内的数字 …",
   },
 } as const;

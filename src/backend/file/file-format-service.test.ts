@@ -1,3 +1,4 @@
+import { read_resource } from "./godot/resource";
 import { create_godot_fixture, godot_pack_fixture } from "../../test/godot-fixture";
 import { read_godot_metadata } from "./godot/item";
 import { read_translation } from "./godot/translation";
@@ -33,6 +34,29 @@ function create_service(): FileFormatService {
 }
 
 describe("FileFormatService", () => {
+  it("已展开游戏的零包预览也检查正式执行前新增的包", async () => {
+    using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-empty-pack-preview-"));
+    const native = new NativeFs(),
+      service = create_service();
+    for (const [name, bytes] of create_godot_fixture())
+      native.write_file_sync(path.join(temp.path, name), bytes);
+    const preview = await service.summarize_source_files([temp.path]);
+    expect(preview.godot_packs?.[0]?.external_pcks).toEqual([]);
+    native.write_file_sync(
+      path.join(temp.path, "extra.pck"),
+      godot_pack_fixture(create_godot_fixture()),
+    );
+    await expect(
+      service.collect_source_file_entries([temp.path], undefined, [
+        { game_root: temp.path, ordered_pcks: [] },
+      ]),
+    ).rejects.toMatchObject({
+      code: "request.validation_failed",
+      public_details: { action: "refresh_godot_packs" },
+    });
+    expect(native.exists(path.join(temp.path, "backup_lg"))).toBe(false);
+  });
+
   it("JSON 分发保留编码、标准语法和已保存格式身份的接受范围", async () => {
     const service = create_service();
     const encoded = iconv.encode(JSON.stringify({ café: "élève" }), "windows-1252");
@@ -452,6 +476,11 @@ it("产品门面完成来源摘要、准备、容器、翻译与导出，原稿�
     files = create_godot_fixture();
   native.write_file_sync(path.join(root, "game.pck"), godot_pack_fixture(files));
   const service = new FileFormatService({ target_language: "ZH" }, create_pdf_execution(), native);
+  const carrier = path.join(root, "game.pck");
+  const [unsupported] = await service.discover_import_sources([
+    { source_path: carrier, rel_path: "game.pck" },
+  ]);
+  expect(unsupported!.source).toEqual({ kind: "file", format: undefined });
   expect(await service.summarize_source_files([root])).toMatchObject({
     source_file_count: 1,
     format_hit_counts: { godot: 1 },
@@ -475,7 +504,9 @@ it("产品门面完成来源摘要、准备、容器、翻译与导出，原稿�
   });
   const output = path.join(out, "game/messages.translation");
   expect(
-    read_translation(fs.readFileSync(output)).slots.some((slot) => slot.text === "产品译文"),
+    read_translation(read_resource(fs.readFileSync(output))).slots.some(
+      (slot) => slot.text === "产品译文",
+    ),
   ).toBe(true);
   expect(
     fs

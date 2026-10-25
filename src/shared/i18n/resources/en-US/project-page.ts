@@ -4,6 +4,18 @@ import type { LocaleMessageSchema } from "../../types";
 export const en_us_project_page = {
   title: "Project Home",
   create: {
+    mode: {
+      label: "Project source",
+      files: "Local files",
+      novel: "Novel URL",
+    },
+    remote: {
+      url_placeholder: "Paste an n.novelia.cc novel page URL",
+      check: "Check",
+      hint: "Check reads the title and chapter count; creation downloads the whole novel and imports it.",
+      chapters: "{COUNT} chapters",
+      check_failed: "Failed to read novel information …",
+    },
     title: "Create Project",
     subtitle: "Select source to create a self-contained .lg project",
     drop_title: "Click or Drag Source File",
@@ -19,6 +31,7 @@ export const en_us_project_page = {
       translation_prompt: "Translation Prompt",
     },
     action: "Create Project",
+    language_dialog_title: "Project Languages",
   },
   open: {
     title: "Open Project",

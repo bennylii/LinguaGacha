@@ -121,6 +121,15 @@ export const en_us_agent_page = {
     copied: "Copied",
     follow_latest: "Follow latest",
   },
+  auto_resume: {
+    waiting: "Auto retry attempt {attempt} · starts in {seconds}s",
+    waiting_limited: "Auto retry {attempt}/{max_attempts} · starts in {seconds}s",
+    cancel: "Cancel auto retry",
+  },
+  auto_continue: {
+    judging: "Checking whether the task is finished…",
+    continuing: "Task not finished, continued automatically (attempt {attempt})",
+  },
   editing: {
     user: "Editing your message",
     assistant: "Editing the model response",
@@ -129,7 +138,6 @@ export const en_us_agent_page = {
   queue: {
     no_message_text: "No message text",
     attachments: "{count} attachments",
-    reorder: "Drag to reorder",
     send_now: "Send now",
     sending: "Sending",
     delete: "Delete message",

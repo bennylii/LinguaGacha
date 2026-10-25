@@ -1,11 +1,13 @@
 import { resolve_workspace_runtime_directory } from "../native/workspace-runtime";
 import { app, BrowserWindow, session, shell } from "electron";
+import { spawn } from "node:child_process";
 import path from "node:path";
 
 import * as AppErrors from "../shared/error";
 import { create_pdf_host } from "../native/pdf-host";
 import { prepare_agent_image } from "../native/agent-image-host";
 import type { BackendRuntimeReady } from "../shared/backend-runtime";
+import type { NetworkProxyPolicy } from "../domain/setting";
 import { register_desktop_ipc_handlers } from "./shell/desktop-ipc-host";
 import { pick_save_path } from "./shell/path-dialog";
 import {
@@ -15,6 +17,7 @@ import {
   create_main_window,
 } from "./shell/desktop-window-host";
 import { type LogWindowHost } from "./shell/log-window-host";
+import { create_remote_login_window_host } from "./shell/remote-login-window-host";
 import { install_main_fatal_error_handler } from "./shell/main-fatal-error-handler";
 import { try_show_native_error_dialog } from "./shell/native-error-dialog";
 import {
@@ -27,7 +30,10 @@ import { BackendRuntimeClient } from "./runtime/backend-runtime-client";
 export interface GuiEntryOptions {
   desktopBundleDir: string; // 产品入口解析出的桌面 bundle 根目录
   backendRuntimeWorkerEntryUrl: URL;
+  initialProjectPath?: string | null; // 新窗口由 --project 预加载的工程
 }
+
+const PROXY_BYPASS_RULES = "localhost,127.0.0.1,[::1]"; // 本机回环固定直连，与后端路由保持一致
 
 /**
  * 启动 Electron GUI 入口；模块导入本身不注册 Electron 事件，便于顶层 index 分发 CLI。
@@ -76,6 +82,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
       app.isPackaged ? "build/dist/fonts" : "public/fonts",
     ),
   });
+  const remote_login_window_host = create_remote_login_window_host();
   const backend_runtime = new BackendRuntimeClient({
     workerEntryUrl: options.backendRuntimeWorkerEntryUrl,
     appRoot: app_root,
@@ -83,11 +90,30 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     workspaceRuntimeDirectory: workspace_runtime_directory,
     pdfHost: pdf_host,
     imageHost: prepare_agent_image,
+    remoteAuthHost: remote_login_window_host,
     resolveProxy: (url) => session.defaultSession.resolveProxy(url),
     openDirectory: open_directory,
     pickSavePath: async (default_name) => {
       const result = await pick_save_path(win, null, default_name, []);
       return result.canceled ? null : (result.paths[0] ?? null);
+    },
+    focusWindow: async () => {
+      const target = win;
+      if (target === null || target.isDestroyed()) return;
+      if (target.isMinimized()) target.restore();
+      target.show();
+      target.focus();
+    },
+    openProjectWindow: async (project_path) => {
+      // 开发态 process.execPath 是 Electron 可执行文件，必须显式带上应用目录。
+      const args = process.defaultApp
+        ? [app.getAppPath(), "--project", project_path]
+        : ["--project", project_path];
+      const child = spawn(process.execPath, args, {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
     },
     onUnexpectedExit: (error) => {
       try_show_native_error_dialog("LinguaGacha 后端异常退出", error.message);
@@ -110,6 +136,22 @@ export function run_gui_entry(options: GuiEntryOptions): void {
   };
 
   /**
+   * 按设置里的代理模式配置 Chromium 自身的网络栈；后端出站请求另按同一设置逐次解析。
+   */
+  async function apply_network_proxy(policy: NetworkProxyPolicy): Promise<void> {
+    if (policy.mode === "proxy") {
+      // setProxy 使用 Chromium 代理规则格式（host:port），不是 resolveProxy 返回的 PAC 格式。
+      await session.defaultSession.setProxy({
+        mode: "fixed_servers",
+        proxyRules: policy.address,
+        proxyBypassRules: PROXY_BYPASS_RULES,
+      });
+      return;
+    }
+    await session.defaultSession.setProxy({ mode: policy.mode === "direct" ? "direct" : "system" });
+  }
+
+  /**
    * 窗口在 Backend ready 后创建，API 地址与版本共用该启动快照。
    */
   function require_backend_ready(): BackendRuntimeReady {
@@ -120,6 +162,31 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     }
 
     return backend_ready;
+  }
+
+  /**
+   * 新窗口在 renderer 首次读取快照前打开 --project，避免首屏先显示工程主页。
+   * 打开失败仍继续启动；工程主页会保留可见的错误入口。
+   */
+  async function open_initial_project(api_base_url: string): Promise<void> {
+    const project_path = options.initialProjectPath?.trim() ?? "";
+    if (project_path === "") return;
+    try {
+      const response = await fetch(`${api_base_url}/api/session/project/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: project_path }),
+      });
+      if (!response.ok)
+        throw new Error(`Initial project open failed: ${response.status.toString()}.`);
+    } catch (error) {
+      await record_host_diagnostic({
+        level: "warning",
+        messageKey: "app.diagnostic.lifecycle.app_start_failed",
+        error,
+        context: { reason: "initial_project_open_failed", project_path },
+      });
+    }
   }
 
   /**
@@ -194,6 +261,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
           await backend_runtime.stop();
         } finally {
           await pdf_host.dispose();
+          await remote_login_window_host.dispose();
         }
         await launch_update?.();
       } catch (error) {
@@ -233,6 +301,8 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     try {
       const backend_start_result = await backend_runtime.start();
       backend_ready = backend_start_result;
+      // 后端出站请求已按设置逐次解析；此处让 Chromium 自身（更新检查与下载）使用同一设置。
+      await apply_network_proxy(backend_start_result.networkProxy);
       desktop_update_service = new DesktopUpdateService({
         appRoot: app_root,
         updateRootDir: backend_start_result.berserkerUpdateRootDir,
@@ -250,6 +320,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
         recordHostDiagnostic: record_host_diagnostic,
       });
       register_runtime_ipc_handlers();
+      await open_initial_project(backend_start_result.apiBaseUrl);
       // Backend、更新器和 IPC 完整就绪后才允许 macOS Dock 恢复窗口。
       app.on("activate", () => {
         if (shutdown_promise === null && (win === null || win.isDestroyed())) {

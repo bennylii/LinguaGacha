@@ -156,6 +156,7 @@ vi.mock("@frontend/app/session/agent/agent-chat-context", () => ({
     pendingDecision: page_state.current.pendingDecision,
     context: page_state.current.context,
     usage: page_state.current.usage,
+    autoResume: page_state.current.autoResume,
     transport: page_state.current.transport,
     command: page_state.current.command,
   }),
@@ -887,6 +888,24 @@ describe("AgentConversation", () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
+  it("自动续跑等待的取消入口复用停止命令", async () => {
+    const stop = vi.fn();
+    const view = await render_page({
+      stop,
+      entries: [user_entry("user-error", "最新任务", "error", 0, 2_000)],
+      autoResume: {
+        roundId: "user-error",
+        attempt: 1,
+        maxAttempts: 5,
+        retryAt: Date.now() + 5_000,
+      },
+    });
+    const cancel = view.querySelector<HTMLButtonElement>(".agent-auto-resume-entry button");
+    expect(cancel).not.toBeNull();
+    await act(async () => cancel?.click());
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
   it("workspace_apply 运行期间把不可停止状态传给操作栏", async () => {
     const stop = vi.fn();
     const view = await render_page({
@@ -1360,6 +1379,8 @@ function build_state(overrides: Partial<AgentPageState> = {}): AgentPageState {
     doing: null,
     context: { tokens: null, compactable: false, limits: null },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    autoResume: null,
+    autoContinue: null,
     transport: "ready",
     command: null,
     input: {
@@ -1414,6 +1435,7 @@ function user_entry(
     status,
     createdAt,
     endedAt,
+    failure: null,
   };
 }
 

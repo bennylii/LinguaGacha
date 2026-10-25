@@ -3,6 +3,41 @@ import type { LocaleMessageSchema } from "../../types";
 export const ko_kr_expert_settings_page = {
   title: "전문가 설정",
   fields: {
+    agent_auto_resume_enabled: {
+      title: "Agent 자동 재시도",
+      description:
+        "모델 또는 전송의 일시적인 오류(429, 503, 연결 끊김, 시간 초과 등)에서 같은 라운드를 자동으로 재시도합니다. 기본적으로 사용합니다" +
+        "\n" +
+        "400, 401, 403, 할당량, 결제, 인증 오류는 재시도하지 않습니다. 재시도할 때마다 새 모델 요청을 보냅니다",
+    },
+    agent_auto_resume_initial_delay: {
+      title: "첫 재시도 간격(초)",
+      description:
+        "첫 자동 재시도 전 대기 시간입니다. 이후에는 2배씩 늘어납니다. 기본값은 5초입니다",
+    },
+    agent_auto_resume_max_delay: {
+      title: "최대 재시도 간격(초)",
+      description:
+        "지수 백오프 대기 시간의 상한입니다. 도달하면 이 간격으로 계속 재시도합니다. 기본값은 300초입니다" +
+        "\n" +
+        "첫 재시도 간격보다 작으면 첫 재시도 간격을 사용합니다",
+    },
+    agent_auto_resume_max_attempts: {
+      title: "최대 재시도 횟수",
+      description: "연속 자동 재시도의 상한입니다. 0은 무제한을 뜻합니다. 기본값은 0입니다",
+    },
+    agent_auto_continue_enabled: {
+      title: "Agent 자동 계속",
+      description:
+        "라운드가 성공적으로 끝난 뒤 백엔드가 별도의 판정 스레드로 작업이 정말 끝났는지 확인하고, 끝나지 않았다면 자동으로 계속합니다. 기본적으로 사용하지 않습니다" +
+        "\n" +
+        "판정마다 모델 요청이 1회 추가됩니다. 판정이 실패하거나 결과를 읽을 수 없으면 완료로 간주하므로 자동으로 계속되지 않습니다",
+    },
+    agent_auto_continue_max_continues: {
+      title: "최대 자동 계속 횟수",
+      description:
+        "한 라운드 안에서 연속으로 자동 계속하는 횟수의 상한입니다. 0은 무제한을 뜻합니다. 기본값은 10입니다",
+    },
     preceding_lines_threshold: {
       title: "참고할 앞선 문맥의 최대 줄 수",
       description:
@@ -41,6 +76,14 @@ export const ko_kr_expert_settings_page = {
     },
   },
   feedback: {
+    agent_auto_resume_initial_delay_invalid:
+      "첫 재시도 간격은 1에서 3600 사이의 정수 초로 입력해 주세요 …",
+    agent_auto_resume_max_delay_invalid:
+      "최대 재시도 간격은 1에서 86400 사이의 정수 초로 입력해 주세요 …",
+    agent_auto_resume_max_attempts_invalid:
+      "최대 재시도 횟수는 0에서 1000 사이의 정수로 입력해 주세요 …",
+    agent_auto_continue_max_continues_invalid:
+      "최대 자동 계속 횟수는 0에서 1000 사이의 정수로 입력해 주세요 …",
     preceding_lines_threshold_invalid:
       "앞선 문맥의 최대 줄 수에 유효한 범위의 숫자를 입력해 주세요 …",
   },

@@ -5,9 +5,10 @@ import {
   type EntryRecord,
   type SubmissionRecord,
 } from "@earendil-works/pi-durable";
-import type { JsonRecord } from "../../domain/json";
+import type { JsonRecord, JsonValue } from "../../domain/json";
+import { is_json_record } from "../../domain/json";
 import type { AgentInputCommandKind, AgentInputCommandStatus } from "../../shared/agent";
-import type { AgentEntryStatus, AgentMessageInput } from "../../shared/agent";
+import type { AgentEntryStatus, AgentMessageInput, AgentRunFailure } from "../../shared/agent";
 import type { AgentInputQueueState } from "./agent-input-queue";
 import { AppError } from "../../shared/error";
 import { normalize_agent_message_input } from "../../shared/agent";
@@ -50,6 +51,7 @@ export type AgentRoundRecord = {
   checkpoint: EntryId;
   endedAt: number | null;
   averageTokensPerSecond: number | null;
+  failure: AgentRunFailure | null; // 只有失败终态携带原因摘要，供轮次行内展示
 };
 
 /** 产品命令记录受理事实，SDK submission 持有执行终态。 */
@@ -76,7 +78,7 @@ export type AgentChatData = {
 /** 产品事实按 `chatId` 保存，SDK 历史分叉共享队列和命令受理记录。 */
 export const AgentChatDoc = defineDocFamily<AgentChatData, null>({
   kind: "linguagacha.chat",
-  version: 2,
+  version: 3,
   scope: "session",
   family: true,
   initial: () => ({
@@ -90,8 +92,23 @@ export const AgentChatDoc = defineDocFamily<AgentChatData, null>({
     compactionStartedAt: {},
   }),
   migrate: (value, fromVersion) => {
-    if (fromVersion !== 1) throw new AppError("file.invalid_structure");
+    if (fromVersion !== 1 && fromVersion !== 2) throw new AppError("file.invalid_structure");
     // 旧任务没有起始时间事实，迁移只建立空索引。
-    return { ...value, compactionStartedAt: {} } as AgentChatData;
+    const previous: JsonRecord = fromVersion === 1 ? { ...value, compactionStartedAt: {} } : value;
+    return {
+      ...previous,
+      rounds: with_round_failures(previous["rounds"] ?? {}),
+    } as AgentChatData;
   },
 });
+
+/** 旧轮次没有失败摘要，迁移补齐空值使投影与当前形状一致。 */
+function with_round_failures(rounds: JsonValue): JsonValue {
+  if (!is_json_record(rounds)) return rounds;
+  return Object.fromEntries(
+    Object.entries(rounds).map(([id, round]) => [
+      id,
+      is_json_record(round) ? { ...round, failure: round["failure"] ?? null } : round,
+    ]),
+  );
+}

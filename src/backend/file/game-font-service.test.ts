@@ -19,6 +19,24 @@ import { u32 } from "./godot/binary";
 const native = new NativeFs();
 const OVERRIDE = '[gui]\ntheme/custom_font="res://lg_font.fontdata"\n';
 
+it.each(["inspect", "apply"] as const)("%s 拒绝直接包入口且不准备或写入游戏", async (method) => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-font-package-input-"));
+  const root = path.join(temp.path, "game");
+  const game_path = path.join(root, "game.pck");
+  const pack = godot_pack_fixture(create_godot_fixture());
+  native.write_file_sync(game_path, pack);
+  const font_path = path.join(temp.path, "font.ttf");
+  fs.writeFileSync(font_path, font_fixture([{ text: "Test" }]));
+  const execute = vi.fn(new GamePrepareWorker(null, native).run);
+  const service = new GameFontService(new RuntimeOperationGate(), execute, native);
+  await expect(service[method]({ game_path, font_path })).rejects.toMatchObject({
+    code: "file.invalid_structure",
+  });
+  expect(execute).not.toHaveBeenCalled();
+  expect(fs.readdirSync(root)).toEqual(["game.pck"]);
+  expect(fs.readFileSync(game_path).equals(pack)).toBe(true);
+});
+
 it.each(["pck", "embedded"])("Godot %s 字体接入、载体备份与重复换字体", async (kind) => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-font-godot-"));
   const root = path.join(temp.path, "game");
@@ -225,4 +243,39 @@ it("支持混合大小写扩展名并备份已有同名字体", async () => {
   expect(
     fs.readdirSync(root).filter((name) => name.toLowerCase() === existing.toLowerCase()),
   ).toEqual([existing]);
+});
+
+it("字体检查只读返回包顺序，修改使用同一确认顺序", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-font-pack-order-"));
+  const game = path.join(temp.path, "game"),
+    font_path = path.join(temp.path, "font.ttf");
+  fs.writeFileSync(font_path, font_fixture([{ text: "Font" }]));
+  for (const [name, text] of [
+    ["game.pck", "base"],
+    ["patch.pck", "patch"],
+  ])
+    native.write_file_sync(
+      path.join(game, name!),
+      godot_pack_fixture(new Map([...create_godot_fixture(), ["main.gd", Buffer.from(text!)]])),
+    );
+  const worker = new GamePrepareWorker(null, native),
+    service = new GameFontService(new RuntimeOperationGate(), worker.run, native);
+  const request = { game_path: game, font_path };
+  expect(await service.inspect(request)).toMatchObject({
+    godot_packs: [{ game_root: game, external_pcks: ["game.pck", "patch.pck"] }],
+  });
+  expect(fs.readdirSync(game).sort()).toEqual(["game.pck", "patch.pck"]);
+  await expect(
+    service.apply({
+      ...request,
+      godot_pack_orders: [{ game_root: game, ordered_pcks: ["game.pck"] }],
+    }),
+  ).rejects.toMatchObject({ code: "request.validation_failed" });
+  expect(fs.existsSync(path.join(game, "backup_lg"))).toBe(false);
+  await service.apply({
+    ...request,
+    godot_pack_orders: [{ game_root: game, ordered_pcks: ["patch.pck", "game.pck"] }],
+  });
+  expect(fs.readFileSync(path.join(game, "main.gd"), "utf8")).toBe("base");
+  await worker.dispose();
 });

@@ -4,10 +4,10 @@ export const ko_kr_basic_settings_page = {
   title: "기본 설정",
   fields: {
     source_language: {
-      description: "현재 프로젝트의 입력 텍스트 언어를 설정합니다",
+      description: "입력 텍스트 언어를 설정합니다",
     },
     target_language: {
-      description: "현재 프로젝트의 출력 텍스트 언어를 설정합니다",
+      description: "출력 텍스트 언어를 설정합니다",
     },
     project_save_mode: {
       title: "프로젝트 파일 저장 위치",
@@ -29,9 +29,25 @@ export const ko_kr_basic_settings_page = {
       description:
         "모델 응답을 기다리는 최대 시간(초)입니다. 시간 내에 응답이 없으면 작업을 실패로 처리합니다",
     },
+    network_proxy_mode: {
+      title: "네트워크 프록시",
+      description:
+        "모델 요청과 웹 검색에 프록시를 사용하는 방식을 설정합니다. 변경 사항은 이후 요청에 바로 적용됩니다",
+      options: {
+        system: "시스템 프록시 사용",
+        proxy: "프록시 직접 지정",
+        direct: "직접 연결",
+      },
+    },
+    network_proxy_address: {
+      title: "프록시 주소",
+      description:
+        "프록시를 직접 지정할 때 사용하는 주소입니다. 호스트:포트 형식이며 예: 127.0.0.1:6789",
+    },
   },
   feedback: {
     request_timeout_invalid: "요청 제한 시간에 유효한 범위의 숫자를 입력해 주세요 …",
     pick_directory_failed: "폴더를 선택하지 못했습니다. 지정 저장 폴더를 다시 선택해 주세요 …",
+    network_proxy_address_invalid: "프록시 주소는 호스트:포트 형식으로 입력해 주세요 …",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_basic_settings_page>;

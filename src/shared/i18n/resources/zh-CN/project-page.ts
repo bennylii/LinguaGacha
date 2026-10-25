@@ -1,6 +1,18 @@
 export const zh_cn_project_page = {
   title: "工程主页",
   create: {
+    mode: {
+      label: "新建来源",
+      files: "本地文件",
+      novel: "小说地址",
+    },
+    remote: {
+      url_placeholder: "粘贴 n.novelia.cc 小说页面地址",
+      check: "检测",
+      hint: "检测后会读取作品标题与章节数；创建时自动下载整本并导入。",
+      chapters: "{COUNT} 章",
+      check_failed: "读取小说信息失败 …",
+    },
     title: "新建工程",
     subtitle: "选择源文件创建 .lg 工程文件，创建完成后即不再需要源文件",
     drop_title: "点击或拖拽源文件",
@@ -16,6 +28,7 @@ export const zh_cn_project_page = {
       translation_prompt: "翻译提示词",
     },
     action: "创建工程",
+    language_dialog_title: "工程语言",
   },
   open: {
     title: "打开工程",

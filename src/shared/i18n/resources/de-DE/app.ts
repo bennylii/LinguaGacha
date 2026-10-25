@@ -2,6 +2,11 @@ import { zh_cn_app } from "../zh-CN/app";
 import type { LocaleMessageSchema } from "../../types";
 
 export const de_de_app = {
+  godot_pack_order: {
+    title: "Priorität der Ressourcenpakete",
+    description:
+      "Spätere Ressourcenpakete überschreiben gleichnamige Ressourcen aus früheren Paketen",
+  },
   media: {
     zoom_out: "Verkleinern",
     zoom_in: "Vergrößern",
@@ -185,6 +190,21 @@ export const de_de_app = {
     language: "Sprache",
     logs: "Protokolle",
   },
+  project_switcher: {
+    label: "Projektfenster wechseln",
+    current: "Aktuelles Projekt",
+    no_project: "Projektstart",
+    instances: "Laufende Fenster",
+    no_instances: "Keine weiteren Fenster",
+    loading: "Fenster werden gelesen …",
+    recent: "Letzte Projekte",
+    empty_recent: "Keine letzten Projekte",
+    open_current: "In diesem Fenster öffnen",
+    open_new: "In neuem Fenster öffnen",
+    load_failed: "Fensterliste konnte nicht gelesen werden …",
+    focus_failed: "Fensterwechsel fehlgeschlagen …",
+    open_failed: "Projektfenster konnte nicht geöffnet werden …",
+  },
   profile: {
     status: "Ciallo～(∠・ω< )⌒✮",
     status_tooltip: "GitHub-Repository öffnen",
@@ -255,6 +275,9 @@ export const de_de_app = {
     },
     migration: {
       path_failed: "Fehler beim Migrieren des Pfads: {SOURCE_PATH} -> {DESTINATION_PATH} …",
+    },
+    network: {
+      transport_failure: "Transport der Remote-Anfrage fehlgeschlagen …",
     },
     renderer: {
       main_frame_load_failed: "Renderer-Hauptframe konnte nicht geladen werden …",

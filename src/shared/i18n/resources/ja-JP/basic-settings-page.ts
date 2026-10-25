@@ -4,10 +4,10 @@ export const ja_jp_basic_settings_page = {
   title: "基本設定",
   fields: {
     source_language: {
-      description: "現在のプロジェクトの入力テキストの言語を設定します",
+      description: "入力テキストの言語を設定します",
     },
     target_language: {
-      description: "現在のプロジェクトの出力テキストの言語を設定します",
+      description: "出力テキストの言語を設定します",
     },
     project_save_mode: {
       title: "プロジェクトファイルの保存先",
@@ -28,9 +28,25 @@ export const ja_jp_basic_settings_page = {
       description:
         "モデルの応答を待つ最長時間（秒）です。時間内に応答がない場合、タスクは失敗となります",
     },
+    network_proxy_mode: {
+      title: "ネットワークプロキシ",
+      description:
+        "モデルへのリクエストとウェブ検索でプロキシを使う方法を設定します。変更は以降のリクエストにすぐ反映されます",
+      options: {
+        system: "システムのプロキシに従う",
+        proxy: "プロキシを指定",
+        direct: "直接接続",
+      },
+    },
+    network_proxy_address: {
+      title: "プロキシアドレス",
+      description:
+        "プロキシを指定する場合に使うアドレスです。ホスト:ポート の形式で、例: 127.0.0.1:6789",
+    },
   },
   feedback: {
     request_timeout_invalid: "タイムアウトには有効な範囲の数値を入力してください …",
     pick_directory_failed: "フォルダーを選択できませんでした。固定の保存先を選び直してください …",
+    network_proxy_address_invalid: "プロキシアドレスは ホスト:ポート の形式で入力してください …",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_basic_settings_page>;

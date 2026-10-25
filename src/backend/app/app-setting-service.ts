@@ -1,9 +1,13 @@
 import type { SettingsSnapshotResponse } from "../../shared/settings";
-import type { SettingSnapshot } from "../../domain/setting";
+import type { NetworkProxyPolicy, SettingSnapshot } from "../../domain/setting";
 import type { JsonRecord, JsonValue } from "../../domain/json";
 import { AppPathService } from "./app-path-service";
 import { JsonTool } from "../../shared/utils/json-tool";
-import { Setting } from "../../domain/setting";
+import {
+  Setting,
+  normalize_network_proxy_address,
+  normalize_network_proxy_mode,
+} from "../../domain/setting";
 import { NativeFs, default_native_fs } from "../../native/native-fs";
 
 interface AppSettingsStreamPublisher {
@@ -41,7 +45,7 @@ export class AppSettingService {
   }
 
   /**
-   * 设置同进程入口的临时覆盖值；CLI 语言参数需要影响任务快照，但不能改写 GUI 配置文件。
+   * 设置同进程入口的临时覆盖值，供 CLI 调整预设与输出选项。
    */
   public set_transient_overrides(overrides: JsonRecord | null): void {
     this.transient_overrides = overrides === null ? null : { ...overrides };
@@ -115,12 +119,12 @@ export class AppSettingService {
   }
 
   /**
-   * 持久化完整设置对象，并同步刷新运行期缓存。
+   * 持久化完整设置对象，并同步刷新运行期缓存；多实例共用 userdata 时以原子替换避免截断。
    */
   public save_setting(setting: JsonRecord): void {
     const config_path = this.paths.get_config_path();
     const normalized_setting = Setting.from_json(setting);
-    this.native_fs.write_file_sync(
+    this.native_fs.write_file_atomic(
       config_path,
       JsonTool.stringifyStrict(normalized_setting.to_json(), { indent: 4 }),
     );
@@ -139,6 +143,17 @@ export class AppSettingService {
    */
   public read_app_language(): JsonValue {
     return this.read_setting_entity().to_json()["app_language"] ?? "ZH";
+  }
+
+  /**
+   * 出站请求按此策略解析路由；每次请求重新读取，改设置后下一次请求即生效。
+   */
+  public read_network_proxy_policy(): NetworkProxyPolicy {
+    const setting = this.read_setting_entity().to_json();
+    return {
+      mode: normalize_network_proxy_mode(setting["network_proxy_mode"]),
+      address: normalize_network_proxy_address(setting["network_proxy_address"]),
+    };
   }
 
   /**

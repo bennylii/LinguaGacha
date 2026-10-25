@@ -39,6 +39,12 @@ export type AgentContextSnapshot = JsonRecord & {
 /** 每个时间线条目独立持有结果。会话 state 不再复制轮次终态。 */
 export type AgentEntryStatus = "running" | "success" | "error" | "stopped";
 
+/** 失败轮次的原因摘要；没拿到 HTTP 响应时状态码为空，`detail` 保留原始说明。 */
+export type AgentRunFailure = JsonRecord & {
+  status: number | null;
+  detail: string;
+};
+
 /** 待审批写入的结构化变更摘要。按业务种类统计受影响对象数量。 */
 export type AgentPendingWriteSummary = Readonly<{
   pages: number; // 本批实际变化的 PDF 原页数
@@ -195,6 +201,7 @@ export type AgentEntry = JsonRecord &
               status: AgentEntryStatus;
               endedAt: number | null;
               averageTokensPerSecond: number | null; // 终态生成均速，运行中或没有有效统计时为空。
+              failure: AgentRunFailure | null; // 最近一次失败原因；成功、停止或开始自动重试后清空。
             }
           | { delivery: "steer"; status: "success"; endedAt: number }
         ))
@@ -213,6 +220,21 @@ export type AgentEntry = JsonRecord &
 export type AgentTokenSpeedSnapshot =
   | (JsonRecord & { roundId: string; tokensPerSecond: number })
   | null;
+
+/** 可重试失败后的自动重试等待；重试开始后快照清除，轮次只按运行中展示。 */
+export type AgentAutoResumeSnapshot = JsonRecord & {
+  roundId: string;
+  attempt: number; // 从 1 开始
+  maxAttempts: number | null; // 空表示不限次数
+  retryAt: number; // 后端时钟绝对毫秒
+};
+
+/** 轮次成功结束后的完成度判定状态；`judging` 表示正在判定，`continuing` 表示判定后已发出继续。 */
+export type AgentAutoContinueSnapshot = JsonRecord & {
+  roundId: string;
+  attempt: number; // 从 1 开始
+  phase: "judging" | "continuing";
+};
 
 /** 当前产品对话累计的模型用量，历史修订后仍保留已发生的消耗。 */
 export type AgentUsageSnapshot = JsonRecord & {
@@ -235,6 +257,8 @@ export type AgentChatSnapshot = JsonRecord & {
   context: AgentContextSnapshot;
   usage: AgentUsageSnapshot;
   tokenSpeed: AgentTokenSpeedSnapshot;
+  autoResume: AgentAutoResumeSnapshot | null;
+  autoContinue: AgentAutoContinueSnapshot | null;
 };
 
 /** 写命令只确认后端受理到的事件边界，公开事实继续由事件同步。 */
@@ -260,6 +284,8 @@ export type AgentChatChange = JsonRecord &
     | { type: "input_queue"; inputQueue: AgentInputQueueSnapshot }
     | { type: "doing"; doing: string | null }
     | { type: "token_speed"; tokenSpeed: AgentTokenSpeedSnapshot }
+    | { type: "auto_resume"; autoResume: AgentAutoResumeSnapshot | null }
+    | { type: "auto_continue"; autoContinue: AgentAutoContinueSnapshot | null }
     | { type: "context"; context: AgentContextSnapshot }
     | { type: "usage"; usage: AgentUsageSnapshot }
   );
