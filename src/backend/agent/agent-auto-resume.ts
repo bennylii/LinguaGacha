@@ -50,8 +50,15 @@ export function auto_resume_delay_ms(attempt: number, policy: AgentAutoResumePol
 /**
  * 复用 SDK 的唯一可重试分类，避免界面或运行时另立一套状态码规则。
  * 分类器只读取 `stopReason` 与 `errorMessage`，这里用最小适配对象隔离完整消息形状。
+ *
+ * SDK 对无法识别的 `finish_reason` 统一映射为 `Provider finish_reason: <reason>`；
+ * 网关把传输失败也写成 finish_reason 时文本不命中任何瞬时模式，这里补充判定。
+ * 内容过滤是确定性拒绝，重试没有意义，保持不可重试。
  */
+const RETRYABLE_FINISH_REASON_PATTERN = /^Provider finish_reason: (?!content_filter\b)/iu;
+
 export function is_retryable_model_error(message: string): boolean {
+  if (RETRYABLE_FINISH_REASON_PATTERN.test(message.trim())) return true;
   return isRetryableAssistantError({
     stopReason: "error",
     errorMessage: message,

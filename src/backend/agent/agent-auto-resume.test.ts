@@ -80,6 +80,9 @@ describe("Agent 自动续跑", () => {
     "500: Internal Server Error",
     "Selected model is at capacity",
     "Connection error.",
+    "Provider finish_reason: error",
+    "Provider finish_reason: network_error",
+    "Provider finish_reason: unstable_gateway",
   ])("瞬时模型或传输故障可续跑：%s", (message) => {
     expect(is_retryable_model_error(message)).toBe(true);
   });
@@ -95,6 +98,7 @@ describe("Agent 自动续跑", () => {
     "subscription_sharing_usage_limit_exceeded",
     "GoUsageLimitError",
     "FreeUsageLimitError",
+    "Provider finish_reason: content_filter",
   ])("确定性或额度错误不续跑：%s", (message) => {
     expect(is_retryable_model_error(message)).toBe(false);
   });
