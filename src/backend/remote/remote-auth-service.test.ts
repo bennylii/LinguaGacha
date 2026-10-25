@@ -194,7 +194,7 @@ describe("RemoteAuthService login", () => {
     expect(auth_host).toHaveBeenCalledWith(
       {
         kind: "open_remote_login_window",
-        url: "https://auth.novelia.cc/?app=n&theme=light",
+        url: "https://n.novelia.cc/?app=n&theme=light",
         origin: DEFAULT_NOVELIA_ORIGIN,
       },
       expect.any(AbortSignal),
@@ -220,19 +220,21 @@ describe("RemoteAuthService login", () => {
     });
   });
 
-  it("取消登录会中止在途的宿主调用", async () => {
+  it("取消登录按空闲快照结算且不落盘凭据", async () => {
     const auth_host = vi.fn(
       async (_operation: unknown, signal?: AbortSignal): Promise<RemoteAuthHostResult> =>
         await new Promise<RemoteAuthHostResult>((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
         }),
     );
-    const { service } = create_service({ auth_host });
+    const { service, credentials } = create_service({ auth_host });
 
     const pending = service.login({});
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     await service.cancel_login();
-    await expect(pending).rejects.toMatchObject({ message: "remote login cancelled" });
+    const snapshot = await pending;
+    expect(snapshot.login).toEqual({ running: false, origin: null, started_at: null });
+    expect(credentials.save_token).not.toHaveBeenCalled();
     expect(auth_host).toHaveBeenCalledOnce();
   });
 });

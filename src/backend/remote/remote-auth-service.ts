@@ -156,7 +156,7 @@ export class RemoteAuthService {
       const result = await this.auth_host(
         {
           kind: "open_remote_login_window",
-          url: build_auth_login_url(origin, body["theme"] === "dark" ? "dark" : "light"),
+          url: build_login_window_url(origin, body["theme"] === "dark" ? "dark" : "light"),
           origin,
         },
         controller.signal,
@@ -172,6 +172,10 @@ export class RemoteAuthService {
         });
         this.last_refresh_at.set(origin, Date.now());
       }
+    } catch (error) {
+      // 用户取消与超时都是本次尝试的终态：取消原因归属 worker，落入下方统一回快照。
+      // 其余错误照常上抛。
+      if (!controller.signal.aborted) throw error;
     } finally {
       clearTimeout(timeout);
       this.login_attempt = null;
@@ -262,12 +266,13 @@ function read_source(value: JsonValue | undefined): NoveliaCredentialSource | nu
   return value === "bridge" || value === "manual" ? value : null;
 }
 
-function build_auth_login_url(origin: string, theme: "dark" | "light"): string {
-  const auth_origin = derive_novelia_auth_origin(origin);
-  if (auth_origin === null) {
-    throw new AppError("remote.invalid_url", { public_details: { origin } });
-  }
-  return `${auth_origin}/?app=n&theme=${theme}`;
+/**
+ * 登录表单在站点自身的「登录/注册」对话框里；auth 域只承担注册与会话续期，
+ * 会话 Cookie 由站点登录流程写入 auth 域。窗口因此打开站点入口。
+ */
+function build_login_window_url(origin: string, theme: "dark" | "light"): string {
+  const site_origin = new URL(origin).origin;
+  return `${site_origin}/?app=n&theme=${theme}`;
 }
 
 function build_auth_refresh_url(origin: string): string {
