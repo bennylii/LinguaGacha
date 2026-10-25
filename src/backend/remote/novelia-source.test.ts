@@ -185,6 +185,47 @@ describe("read_remote_translations", () => {
 });
 
 describe("align_remote_documents", () => {
+  it("旧格式快照对齐新导出格式时按空行吸收排版差异", () => {
+    // 上游 2026-10 起导出在每个章节标题前加两个空行；旧工程的快照没有这些行。
+    const next = [
+      "Book",
+      "",
+      "",
+      "",
+      "# C1",
+      "a",
+      "b",
+      "",
+      "",
+      "# C2",
+      "c",
+      "",
+      "",
+      "# C3",
+      "d",
+    ].join("\n");
+    const plan = align_remote_documents({
+      previous_text: BOOK,
+      next_text: next,
+      old_items: old_items_from(BOOK),
+    });
+
+    expect(plan.stats).toMatchObject({
+      added: 6, // 三个标题前各两个空行
+      modified: 0,
+      removed: 0,
+      would_lose: 0,
+      inherited: 9,
+    });
+    const heading = plan.rows.find((row) => row.src === "# C2");
+    expect(heading).toMatchObject({ decision: "preserve", old_item: { dst: "T5" } });
+    const body = plan.rows.find((row) => row.src === "c");
+    expect(body).toMatchObject({ decision: "preserve", old_item: { dst: "T6" } });
+    expect(
+      plan.rows.filter((row) => row.decision === "retranslate" && row.src === ""),
+    ).toHaveLength(6);
+  });
+
   it("行数变化时按内容保留未变章节的条目身份与译文", () => {
     const next = ["Book", "", "# C1", "a", "x", "b", "# C2", "c", "# C3", "d"].join("\n");
     const plan = align_remote_documents({
