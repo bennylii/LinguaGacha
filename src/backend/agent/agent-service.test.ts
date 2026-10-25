@@ -4161,7 +4161,9 @@ describe("AgentService", () => {
   });
 
   it("阻塞自动压缩失败结束本轮并暂停队列，下一轮可以重试", async () => {
-    const { service, read_items, log_append } = await create_service();
+    // 关闭自动续跑，让本用例专注手动重试语义，也避免等待定时器抢跑恢复失败轮次。
+    const { service, read_items, log_append, set_auto_resume_settings } = await create_service();
+    set_auto_resume_settings({ agent_auto_resume_enabled: false });
     await prepare_long_tool_history(service, read_items);
     fake_agent_state.mode = "tool_compaction";
     fake_agent_state.summary_failures_remaining = 100;
@@ -4210,6 +4212,57 @@ describe("AgentService", () => {
       service.get_snapshot().entries.find((entry) => entry.id === failed_compaction?.id)?.status,
     ).toBe("error");
     expect(fake_agent_state.prompts.at(-1)).toBe("下一轮");
+  });
+
+  it("上下文压缩失败按固定上限自动续跑并在摘要恢复后完成", async () => {
+    vi.useFakeTimers();
+    const { service, read_items } = await create_service();
+    await prepare_long_tool_history(service, read_items);
+    fake_agent_state.mode = "tool_compaction";
+    fake_agent_state.summary_failures_remaining = 100;
+
+    await service.send_message({ text: "检查长条目", attachments: [] });
+    await wait_for_idle(service);
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1, maxAttempts: 3 });
+
+    fake_agent_state.summary_failures_remaining = 0;
+    fake_agent_state.mode = "success";
+    await vi.advanceTimersByTimeAsync(5_000);
+    await wait_for_idle(service);
+
+    expect(
+      service.get_snapshot().entries.findLast((entry) => entry.kind === "context_compaction"),
+    ).toMatchObject({ status: "success" });
+    expect(
+      service.get_snapshot().entries.findLast((entry) => entry.kind === "user_message"),
+    ).toMatchObject({ text: "检查长条目", status: "success", failure: null });
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+  });
+
+  it("压缩失败持续发生时最多自动重试三次", async () => {
+    vi.useFakeTimers();
+    const { service, read_items, log_append } = await create_service();
+    await prepare_long_tool_history(service, read_items);
+    fake_agent_state.mode = "tool_compaction";
+    fake_agent_state.summary_failures_remaining = 100;
+
+    await service.send_message({ text: "检查长条目", attachments: [] });
+    await wait_for_idle(service);
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1, maxAttempts: 3 });
+
+    // 重试与失败在同一批定时器中级联，直到固定上限耗尽后不再安排。
+    await vi.runAllTimersAsync();
+    await wait_for_idle(service);
+
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoResume: null });
+    const failed_summaries = log_append.mock.calls
+      .map(([payload]) => payload)
+      .filter(
+        (payload) =>
+          payload.content.event === "compaction_end" && payload.content.status === "error",
+      );
+    // 首次失败加上三次重试，共四次压缩失败。
+    expect(failed_summaries).toHaveLength(4);
   });
 
   it("同一事件循环的第二条消息异步拒绝", async () => {

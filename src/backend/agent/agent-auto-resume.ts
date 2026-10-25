@@ -17,6 +17,12 @@ export type AgentAutoResumePolicy = {
   maxAttempts: number; // 0 表示不限
 };
 
+/**
+ * 压缩失败的重试上限独立于用户设置：摘要消耗模型额度，
+ * 持续失败时不允许沿用「不限次数」的模型故障策略。
+ */
+export const AGENT_COMPACTION_RESUME_MAX_ATTEMPTS = 3;
+
 /** 读取设置快照中的自动重试策略，缺失或非法值由领域归一化回默认。 */
 export function read_agent_auto_resume_policy(setting: JsonRecord): AgentAutoResumePolicy {
   return {

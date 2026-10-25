@@ -21,7 +21,11 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { isDeepStrictEqual } from "node:util";
 import { AgentChat, type AgentExecution } from "./agent-chat";
 import { AgentModelError, describe_run_failure } from "./agent-run-failure";
-import { auto_resume_delay_ms, read_agent_auto_resume_policy } from "./agent-auto-resume";
+import {
+  AGENT_COMPACTION_RESUME_MAX_ATTEMPTS,
+  auto_resume_delay_ms,
+  read_agent_auto_resume_policy,
+} from "./agent-auto-resume";
 import {
   is_agent_auto_continue_exhausted,
   read_agent_auto_continue_policy,
@@ -1001,6 +1005,9 @@ export class AgentService {
         this.cancel_auto_continue();
         if (failure instanceof AgentModelError && failure.retryable) {
           this.schedule_auto_resume(chat, execution.roundId);
+        } else if (failure instanceof AgentCompactionError) {
+          // 压缩失败同样续跑：重试轮次会重新触发阻塞压缩；上限独立固定，避免摘要无界消耗额度。
+          this.schedule_auto_resume(chat, execution.roundId, AGENT_COMPACTION_RESUME_MAX_ATTEMPTS);
         } else {
           // 确定性失败不再重试，清掉上一轮自动重试留下的“正在重试”状态。
           this.cancel_auto_resume();
@@ -1037,14 +1044,23 @@ export class AgentService {
       }
     }
   }
-  /** 只对 SDK 已认定为可重试的模型故障安排外层自动重试，并按轮次累计次数。 */
-  private schedule_auto_resume(chat: AgentChat, round_id: string | null): void {
+  /**
+   * 只对可重试的模型故障与上下文压缩失败安排外层自动重试，并按轮次累计次数。
+   * `retry_cap` 由压缩失败传入：有效上限取用户设置与该上限的较小值，用户设置的更小上限仍然生效。
+   */
+  private schedule_auto_resume(chat: AgentChat, round_id: string | null, retry_cap?: number): void {
     if (round_id === null || this.disposed || chat.sealed) return;
     const policy = read_agent_auto_resume_policy(this.settings.read_setting());
     const had_snapshot = this.auto_resume_snapshot !== null;
     this.cancel_auto_resume(false);
     const attempt = (this.auto_resume_attempts.get(round_id) ?? 0) + 1;
-    if (!policy.enabled || (policy.maxAttempts > 0 && attempt > policy.maxAttempts)) {
+    const max_attempts =
+      retry_cap === undefined
+        ? policy.maxAttempts
+        : policy.maxAttempts > 0
+          ? Math.min(policy.maxAttempts, retry_cap)
+          : retry_cap;
+    if (!policy.enabled || (max_attempts > 0 && attempt > max_attempts)) {
       if (had_snapshot) this.publish_snapshot();
       return;
     }
@@ -1053,7 +1069,7 @@ export class AgentService {
     this.auto_resume_snapshot = {
       roundId: round_id,
       attempt,
-      maxAttempts: policy.maxAttempts > 0 ? policy.maxAttempts : null,
+      maxAttempts: max_attempts > 0 ? max_attempts : null,
       retryAt: Date.now() + delay,
     };
     this.auto_resume_timer = setTimeout(() => {
@@ -1076,9 +1092,13 @@ export class AgentService {
     )
       return;
     this.auto_resume_timer = null;
-    // 等待期间关闭开关或调低次数上限时，本次等待直接失效。
+    // 等待期间关闭开关或调低次数上限时，本次等待直接失效；快照内的压缩上限不随后续设置放宽。
     const policy = read_agent_auto_resume_policy(this.settings.read_setting());
-    if (!policy.enabled || (policy.maxAttempts > 0 && attempt > policy.maxAttempts)) {
+    if (
+      !policy.enabled ||
+      (policy.maxAttempts > 0 && attempt > policy.maxAttempts) ||
+      (waiting.maxAttempts !== null && attempt > waiting.maxAttempts)
+    ) {
       this.cancel_auto_resume();
       return;
     }
