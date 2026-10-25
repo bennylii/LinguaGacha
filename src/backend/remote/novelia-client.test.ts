@@ -395,7 +395,6 @@ describe("NoveliaClient 工作区", () => {
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
       glossaryId: "g1",
       paragraphsZh: ["A"],
-      sakuraVersion: "0.9",
     });
   });
 
@@ -519,7 +518,6 @@ describe("NoveliaClient 文库", () => {
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
       glossaryId: "g1",
       paragraphsZh: ["A"],
-      sakuraVersion: "0.9",
     });
   });
 

@@ -247,10 +247,10 @@ export class NoveliaClient {
       ref.kind === "web"
         ? `/api/novel/${encodeURIComponent(ref.provider_id)}/${encodeURIComponent(ref.novel_id)}/translate-v2/${TRANSLATOR_ID}/chapter/${encodeURIComponent(chapter.chapter_id)}`
         : `${build_wenku_chapter_task_path(ref, chapter).replace(/\/chapter-task\//u, "/chapter/")}`;
+    // 站点上传体只认翻译器身份、术语表与整章译文；sakuraVersion 仅 Sakura 翻译器使用。
     const body = JSON.stringify({
       glossaryId: translation.glossary_id,
       paragraphsZh: translation.paragraphs_zh,
-      sakuraVersion: "0.9",
     } satisfies Record<string, unknown>);
     let last_error: unknown = null;
     for (let attempt = 0; attempt < UPLOAD_RETRY_ATTEMPTS; attempt += 1) {
