@@ -64,6 +64,7 @@ describe("ProjectSwitcher", () => {
     current_project_path: string;
     recent_projects: Array<{ path: string; name: string }>;
     on_open_in_current_window: (project_path: string) => Promise<void>;
+    on_create_project?: () => void;
   }): Promise<void> {
     container = document.createElement("div");
     document.body.append(container);
@@ -75,6 +76,7 @@ describe("ProjectSwitcher", () => {
             current_project_path={args.current_project_path}
             recent_projects={args.recent_projects}
             on_open_in_current_window={args.on_open_in_current_window}
+            on_create_project={args.on_create_project ?? vi.fn()}
           />
         </LocaleProvider>,
       );
@@ -101,6 +103,27 @@ describe("ProjectSwitcher", () => {
     if (item === undefined) throw new Error(`未找到菜单项：${text}`);
     return item;
   }
+
+  it("从菜单进入新建工程，不触发工程窗口操作", async () => {
+    const on_open_in_current_window = vi.fn(async () => {});
+    const on_create_project = vi.fn();
+    await mount_switcher({
+      current_project_path: "E:/projects/demo.lg",
+      recent_projects: [],
+      on_open_in_current_window,
+      on_create_project,
+    });
+
+    await open_menu();
+    await act(async () => {
+      find_menu_item("新建工程").click();
+    });
+
+    expect(on_create_project).toHaveBeenCalledOnce();
+    expect(on_open_in_current_window).not.toHaveBeenCalled();
+    expect(api_fetch_mock).not.toHaveBeenCalledWith("/api/app/instances/open", expect.anything());
+    expect(api_fetch_mock).not.toHaveBeenCalledWith("/api/app/instances/focus", expect.anything());
+  });
 
   it("展示当前工程并聚焦其他运行窗口", async () => {
     await mount_switcher({

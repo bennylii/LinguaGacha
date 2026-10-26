@@ -1,5 +1,5 @@
 import { type JSX, useCallback, useState } from "react";
-import { ChevronsUpDown, FolderKanban } from "lucide-react";
+import { ChevronsUpDown, FilePlus, FolderKanban } from "lucide-react";
 
 import { api_fetch } from "@frontend/app/desktop/desktop-api";
 import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
@@ -36,6 +36,7 @@ type ProjectSwitcherProps = {
   current_project_path: string;
   recent_projects: readonly ProjectSwitcherRecentProject[];
   on_open_in_current_window: (project_path: string) => Promise<void>;
+  on_create_project: () => void;
 };
 
 /** 从 .lg 路径取展示名，工程主页等无路径场景由调用文案兜底。 */
@@ -124,6 +125,12 @@ export function ProjectSwitcher(props: ProjectSwitcherProps): JSX.Element {
         matchTriggerWidth={false}
         className="topbar__project-menu"
       >
+        <AppDropdownMenuItem onClick={props.on_create_project}>
+          <FilePlus size={16} aria-hidden="true" />
+          {t("app.project_switcher.create")}
+        </AppDropdownMenuItem>
+
+        <AppDropdownMenuSeparator />
         <AppDropdownMenuGroup>
           <AppDropdownMenuLabel>{t("app.project_switcher.current")}</AppDropdownMenuLabel>
           <AppDropdownMenuItem disabled>

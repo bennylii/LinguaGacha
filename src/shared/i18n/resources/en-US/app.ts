@@ -182,6 +182,7 @@ export const en_us_app = {
     logs: "Logs",
   },
   project_switcher: {
+    create: "New project",
     label: "Switch project window",
     current: "Current project",
     no_project: "Project Home",

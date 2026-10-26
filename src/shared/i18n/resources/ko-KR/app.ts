@@ -179,6 +179,7 @@ export const ko_kr_app = {
     logs: "로그",
   },
   project_switcher: {
+    create: "새 프로젝트",
     label: "프로젝트 창 전환",
     current: "현재 프로젝트",
     no_project: "프로젝트 홈",

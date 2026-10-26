@@ -178,6 +178,7 @@ export const zh_cn_app = {
     logs: "日志",
   },
   project_switcher: {
+    create: "新建工程",
     label: "切换工程窗口",
     current: "当前工程",
     no_project: "工程主页",

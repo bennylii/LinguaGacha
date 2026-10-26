@@ -581,6 +581,9 @@ function AppContent(): JSX.Element {
                 current_project_path={project_snapshot.loaded ? project_snapshot.path : ""}
                 recent_projects={settings_snapshot.recent_projects}
                 on_open_in_current_window={handle_switch_project}
+                on_create_project={() => {
+                  handle_select_route("project-home");
+                }}
               />
             }
           />

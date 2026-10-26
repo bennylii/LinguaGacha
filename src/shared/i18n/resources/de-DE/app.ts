@@ -191,6 +191,7 @@ export const de_de_app = {
     logs: "Protokolle",
   },
   project_switcher: {
+    create: "Neues Projekt",
     label: "Projektfenster wechseln",
     current: "Aktuelles Projekt",
     no_project: "Projektstart",

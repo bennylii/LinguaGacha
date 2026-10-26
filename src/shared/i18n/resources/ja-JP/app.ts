@@ -187,6 +187,7 @@ export const ja_jp_app = {
     logs: "ログ",
   },
   project_switcher: {
+    create: "新規プロジェクト",
     label: "プロジェクトウィンドウを切り替え",
     current: "現在のプロジェクト",
     no_project: "プロジェクトホーム",
