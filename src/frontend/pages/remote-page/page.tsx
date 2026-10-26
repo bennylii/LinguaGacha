@@ -12,6 +12,7 @@ import { Textarea } from "@frontend/shadcn/textarea";
 import { SegmentedToggle } from "@frontend/shadcn/segmented-toggle";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@frontend/shadcn/card";
 import { AppButton } from "@frontend/widgets/app-button";
+import { SegmentedProgress } from "@frontend/widgets/segmented-progress/segmented-progress";
 import { format_local_timestamp } from "@shared/utils/format-local-timestamp";
 import "@frontend/pages/remote-page/remote-page.css";
 
@@ -116,16 +117,14 @@ type RemoteAlignPreview = {
 type RemoteWorkspaceChapter = {
   chapter_id: string;
   title: string;
-  state: "pending" | "working" | "uploaded" | "skipped" | "failed";
-  existing: number;
-  translated: number;
+  state: "pending" | "reading" | "uploading" | "uploaded" | "skipped" | "failed";
+  ready: number;
   missing: number;
   message: string | null;
 };
 
 type RemoteWorkspaceSnapshot = {
   status: "idle" | "running" | "completed" | "failed" | "cancelled";
-  mode: "missing" | "all" | null;
   started_at: string | null;
   finished_at: string | null;
   error: string | null;
@@ -134,14 +133,11 @@ type RemoteWorkspaceSnapshot = {
     uploaded: number;
     skipped: number;
     failed: number;
-    existing: number;
-    translated: number;
   };
   chapters: RemoteWorkspaceChapter[];
 };
 
 type SyncMode = "add_only" | "auto" | "manual";
-type WorkspaceMode = "missing" | "all";
 
 type RowOverride = { action: "keep" | "retranslate"; src_hash: string };
 
@@ -154,7 +150,7 @@ const REMOTE_TRANSLATION_BLOCKED_STATUSES = new Set([
 ]);
 
 /**
- * 远程小说页：站点凭据、工程绑定与同步、工作区提交集中在一个入口。
+ * 远程小说页：站点凭据、工程绑定与同步、工作区上传集中在一个入口。
  * 页面只消费 API 事实；预览暂存在后端内存，应用时必须携带同一 stash。
  */
 export function RemotePage(): JSX.Element {
@@ -173,10 +169,12 @@ export function RemotePage(): JSX.Element {
   const [overrides, set_overrides] = useState<Map<number, RowOverride>>(() => new Map());
   const [sync_mode, set_sync_mode] = useState<SyncMode>("auto");
   const [is_sync_busy, set_is_sync_busy] = useState(false);
-  const [is_workspace_busy, set_is_workspace_busy] = useState(false);
+  const [is_workspace_starting, set_is_workspace_starting] = useState(false);
+  const [is_workspace_cancelling, set_is_workspace_cancelling] = useState(false);
   // 桥接凭据指纹只在 SSE 推送里比较，首次读取不会误报“已接收”。
   const bridge_fingerprint = useRef<string | null>(null);
   const login_running = is_login_busy || auth?.login.status === "running";
+  const workspace_running = workspace?.status === "running";
 
   /** 所有认证快照都经同一入口落状态，SSE 推送时才比较桥接凭据变化。 */
   const apply_auth = useCallback(
@@ -215,7 +213,6 @@ export function RemotePage(): JSX.Element {
       {},
     );
     set_workspace(payload.remote_workspace);
-    set_is_workspace_busy(payload.remote_workspace.status === "running");
   }, []);
 
   const refresh_all = useCallback(async (): Promise<void> => {
@@ -241,12 +238,10 @@ export function RemotePage(): JSX.Element {
         const payload = JSON.parse(event.data) as {
           remote_workspace?: RemoteWorkspaceSnapshot;
         };
-        if (payload.remote_workspace !== undefined) {
-          set_workspace(payload.remote_workspace);
-          set_is_workspace_busy(payload.remote_workspace.status === "running");
-        }
+        if (payload.remote_workspace !== undefined) set_workspace(payload.remote_workspace);
       } catch {
-        // 事件损坏时保持当前快照，下一次轮询或操作会重新读取。
+        // 事件损坏时定向补读，界面不依赖下一次事件或用户操作。
+        void refresh_workspace().catch(() => undefined);
       }
     };
     const handle_auth = (event: MessageEvent<string>): void => {
@@ -266,7 +261,7 @@ export function RemotePage(): JSX.Element {
       event_source.removeEventListener("remote_auth.snapshot_changed", handle_auth);
       event_source.close();
     };
-  }, [apply_auth, refresh_all, refresh_auth, t]);
+  }, [apply_auth, refresh_all, refresh_auth, refresh_workspace, t]);
 
   async function import_token(): Promise<void> {
     if (token_input.trim() === "" || is_auth_busy) return;
@@ -432,36 +427,51 @@ export function RemotePage(): JSX.Element {
   }
 
   /** 只上传工程已完成的本地译文；逐章进度由 SSE 快照推进。 */
-  async function start_workspace(mode: WorkspaceMode): Promise<void> {
-    if (is_workspace_busy) return;
-    set_is_workspace_busy(true);
+  async function start_workspace(): Promise<void> {
+    if (workspace_running || is_workspace_starting) return;
+    set_is_workspace_starting(true);
     try {
       const payload = await api_fetch<{ remote_workspace: RemoteWorkspaceSnapshot }>(
         "/api/remote/workspace/start",
-        { mode },
+        {},
       );
       set_workspace(payload.remote_workspace);
     } catch (error) {
-      set_is_workspace_busy(false);
       push_error_toast(t("remote_page.workspace.start_failed"), error);
+    } finally {
+      set_is_workspace_starting(false);
     }
   }
 
   async function cancel_workspace(): Promise<void> {
+    if (is_workspace_cancelling) return;
+    set_is_workspace_cancelling(true);
     try {
       const payload = await api_fetch<{ remote_workspace: RemoteWorkspaceSnapshot }>(
         "/api/remote/workspace/cancel",
         {},
       );
       set_workspace(payload.remote_workspace);
-      set_is_workspace_busy(false);
     } catch (error) {
-      push_error_toast(t("remote_page.workspace.start_failed"), error);
+      push_error_toast(t("remote_page.workspace.cancel_failed"), error);
+    } finally {
+      set_is_workspace_cancelling(false);
     }
   }
 
   const active_credential =
     auth?.origins.find((credential) => credential.origin === origin_input.trim()) ?? null;
+  const workspace_totals = workspace?.totals ?? {
+    chapters: 0,
+    uploaded: 0,
+    skipped: 0,
+    failed: 0,
+  };
+  const workspace_processed =
+    workspace_totals.uploaded + workspace_totals.skipped + workspace_totals.failed;
+  const workspace_completion =
+    workspace_totals.chapters === 0 ? 0 : (workspace_processed / workspace_totals.chapters) * 100;
+  const workspace_preparing = workspace_running === true && workspace_totals.chapters === 0;
 
   return (
     <div className="remote-page page-shell">
@@ -877,35 +887,42 @@ export function RemotePage(): JSX.Element {
           <div className="remote-page__actions">
             <AppButton
               type="button"
-              disabled={is_workspace_busy || source?.binding === null}
+              disabled={
+                workspace_running ||
+                is_workspace_starting ||
+                source === null ||
+                source.binding === null
+              }
               onClick={() => {
-                void start_workspace("missing");
+                void start_workspace();
               }}
             >
-              <Send data-icon="inline-start" />
-              {t("remote_page.workspace.start_missing")}
+              {is_workspace_starting ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <Send data-icon="inline-start" />
+              )}
+              {t("remote_page.workspace.start")}
             </AppButton>
-            <AppButton
-              type="button"
-              variant="outline"
-              disabled={is_workspace_busy || source?.binding === null}
-              onClick={() => {
-                void start_workspace("all");
-              }}
-            >
-              {t("remote_page.workspace.start_all")}
-            </AppButton>
-            <AppButton
-              type="button"
-              variant="ghost"
-              disabled={workspace?.status !== "running"}
-              onClick={() => {
-                void cancel_workspace();
-              }}
-            >
-              {t("remote_page.workspace.cancel")}
-            </AppButton>
+            {workspace_running || is_workspace_cancelling ? (
+              <AppButton
+                type="button"
+                variant="outline"
+                disabled={is_workspace_cancelling}
+                onClick={() => {
+                  void cancel_workspace();
+                }}
+              >
+                {is_workspace_cancelling ? (
+                  <Spinner data-icon="inline-start" />
+                ) : (
+                  <X data-icon="inline-start" />
+                )}
+                {t("remote_page.workspace.cancel")}
+              </AppButton>
+            ) : null}
           </div>
+          <p className="remote-page__hint">{t("remote_page.workspace.cancel_hint")}</p>
 
           {workspace === null ? null : (
             <>
@@ -925,37 +942,89 @@ export function RemotePage(): JSX.Element {
                   {t("remote_page.workspace.failed")}: <strong>{workspace.totals.failed}</strong>
                 </span>
               </div>
-              {workspace.error === null ? null : (
-                <p className="remote-page__warning">{workspace.error}</p>
+
+              {workspace_preparing ? (
+                <p className="remote-page__hint">
+                  <Spinner data-icon="inline-start" />
+                  {t("remote_page.workspace.preparing")}
+                </p>
+              ) : workspace.totals.chapters === 0 ? null : (
+                <div className="remote-page__progress">
+                  <div className="remote-page__progress-head">
+                    <span>
+                      {t("remote_page.workspace.progress")
+                        .replace("{DONE}", String(workspace_processed))
+                        .replace("{TOTAL}", String(workspace.totals.chapters))}
+                    </span>
+                    <span>{workspace_completion.toFixed(0)}%</span>
+                  </div>
+                  <SegmentedProgress
+                    stats={{
+                      total_items: workspace.totals.chapters,
+                      completed_count: workspace.totals.uploaded,
+                      failed_count: workspace.totals.failed,
+                      pending_count: Math.max(workspace.totals.chapters - workspace_processed, 0),
+                      skipped_count: workspace.totals.skipped,
+                      completion_percent: workspace_completion,
+                    }}
+                    labels={{
+                      skipped: t("remote_page.workspace.skipped"),
+                      failed: t("remote_page.workspace.failed"),
+                      completed: t("remote_page.workspace.uploaded"),
+                      pending: t("remote_page.workspace.chapter_state.pending"),
+                      total: t("remote_page.workspace.total"),
+                    }}
+                  />
+                </div>
               )}
+
+              {workspace.status === "failed" && workspace.error !== null ? (
+                <p className="remote-page__warning">
+                  {t("remote_page.workspace.error_hint").replace("{ERROR}", workspace.error)}
+                </p>
+              ) : null}
               <ul className="remote-page__chapters">
                 {workspace.chapters.map((chapter) => (
                   <li key={chapter.chapter_id} className="remote-page__workspace-chapter">
                     <span className="remote-page__chapter-title">
                       {chapter.title === "" ? chapter.chapter_id : chapter.title}
                     </span>
+                    {chapter.state === "reading" || chapter.state === "uploading" ? (
+                      <Spinner />
+                    ) : null}
                     <Badge
                       tone={
                         chapter.state === "uploaded"
                           ? "success"
                           : chapter.state === "failed"
                             ? "failure"
-                            : "neutral"
+                            : chapter.state === "skipped"
+                              ? "warning"
+                              : "neutral"
                       }
                     >
                       {t(`remote_page.workspace.chapter_state.${chapter.state}`)}
                     </Badge>
                     <span className="remote-page__chapter-meta">
-                      {t("remote_page.workspace.existing").replace(
-                        "{COUNT}",
-                        String(chapter.existing),
-                      )}
-                      {" · "}
-                      {t("remote_page.workspace.translated").replace(
-                        "{COUNT}",
-                        String(chapter.translated),
-                      )}
-                      {chapter.message === null ? "" : ` · ${chapter.message}`}
+                      {t("remote_page.workspace.ready").replace("{READY}", String(chapter.ready))}
+                      {chapter.missing > 0
+                        ? ` · ${t("remote_page.workspace.missing").replace(
+                            "{MISSING}",
+                            String(chapter.missing),
+                          )}`
+                        : ""}
+                      {chapter.message === null
+                        ? ""
+                        : ` · ${
+                            chapter.message === "local_translation_incomplete"
+                              ? t(
+                                  "remote_page.workspace.chapter_message.local_translation_incomplete",
+                                )
+                              : t("remote_page.workspace.chapter_error").replace(
+                                  "{ERROR}",
+                                  chapter.message,
+                                )
+                          }`}
                     </span>
                   </li>
                 ))}

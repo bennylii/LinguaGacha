@@ -121,8 +121,8 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.postJson("/api/remote/novel/sync", async (body) => ({
     result: (await remote.sources.apply_sync_request(body)) as unknown as JsonValue,
   }));
-  context.postJson("/api/remote/workspace/start", async (body) => ({
-    remote_workspace: (await remote.workspace.start(body)) as unknown as JsonValue,
+  context.postJson("/api/remote/workspace/start", async () => ({
+    remote_workspace: (await remote.workspace.start()) as unknown as JsonValue,
   }));
   context.postJson("/api/remote/workspace/cancel", async () => ({
     remote_workspace: (await remote.workspace.cancel()) as unknown as JsonValue,

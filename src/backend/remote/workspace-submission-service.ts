@@ -1,18 +1,10 @@
-import type { JsonRecord } from "../../domain/json";
-import { Model } from "../../domain/model";
-import { normalize_setting_snapshot } from "../../domain/setting";
 import { AppError } from "../../shared/error/app-error";
-import { random_id } from "../../shared/utils/identifier";
-import type { AppSettingService } from "../app/app-setting-service";
-import type { LLMClientPort } from "../llm/llm-types";
-import { resolve_model_for_usage } from "../model/model-config-resolver";
 import type { ProjectDatabase } from "../database/database-operations";
 import type { RuntimeOperationGate, RuntimeLease } from "../runtime-operation-gate";
 import type { ProjectSessionState } from "../project/project-session-state";
 import type { NoveliaClient, RemoteWorkspaceChapter } from "./novelia-client";
 import { call_with_credential_refresh } from "./credential-refresh";
 import {
-  is_missing_remote_translation,
   normalize_match_line,
   parse_novel_url,
   split_remote_document,
@@ -24,29 +16,29 @@ import {
   type RemoteSourceBinding,
 } from "./remote-source";
 
-const MAX_BATCH_LINES = 80;
-const MAX_BATCH_CHARS = 4_000;
 const MAX_CHAPTER_FAILURES = 5;
-const TRANSLATION_ATTEMPTS = 2;
 const SEARCH_WINDOW = 50;
 
-export type RemoteWorkspaceMode = "missing" | "all";
 export type RemoteWorkspaceStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
-export type RemoteWorkspaceChapterState = "pending" | "working" | "uploaded" | "skipped" | "failed";
+export type RemoteWorkspaceChapterState =
+  | "pending"
+  | "reading"
+  | "uploading"
+  | "uploaded"
+  | "skipped"
+  | "failed";
 
 export interface RemoteWorkspaceChapterProgress {
   chapter_id: string;
   title: string;
   state: RemoteWorkspaceChapterState;
-  existing: number; // 站点旧译或工程已完成译文
-  translated: number; // 本次模型补译行数
-  missing: number; // 未能取得译文的行数
+  ready: number; // 工程中已完成且非空的本地译文行数
+  missing: number; // 工程中尚未完成或为空的译文行数
   message: string | null;
 }
 
 export interface RemoteWorkspaceSnapshot {
   status: RemoteWorkspaceStatus;
-  mode: RemoteWorkspaceMode | null;
   started_at: string | null;
   finished_at: string | null;
   error: string | null;
@@ -55,8 +47,6 @@ export interface RemoteWorkspaceSnapshot {
     uploaded: number;
     skipped: number;
     failed: number;
-    existing: number;
-    translated: number;
   };
   chapters: RemoteWorkspaceChapterProgress[];
 }
@@ -65,9 +55,7 @@ export interface RemoteWorkspaceSubmissionServiceOptions {
   database: ProjectDatabase;
   session_state: ProjectSessionState;
   runtime_gate: RuntimeOperationGate;
-  settings: Pick<AppSettingService, "read_setting">;
   client: NoveliaClient;
-  llm: LLMClientPort;
   /** 收到认证拒绝时触发登录链路的 token 续期；CLI 缺席。 */
   refresh_credentials?: ((origin: string) => Promise<boolean>) | undefined;
 }
@@ -86,17 +74,14 @@ interface RunningSubmission {
 }
 
 /**
- * 把工程译文提交到站点的 GPT 工作区。
- * 单章按“站点旧译 → 工程已完成译文 → 当前模型补译”的顺序补全，
- * 任一行缺失就跳过该章上传，避免提交长度不一致的数组。
+ * 把工程本地译文提交到站点的 GPT 工作区。
+ * 单章只用工程中已完成的本地译文；任一行缺失就跳过该章，不调用模型补译。
  */
 export class RemoteWorkspaceSubmissionService {
   private readonly database: ProjectDatabase;
   private readonly session_state: ProjectSessionState;
   private readonly runtime_gate: RuntimeOperationGate;
-  private readonly settings: Pick<AppSettingService, "read_setting">;
   private readonly client: NoveliaClient;
-  private readonly llm: LLMClientPort;
   private readonly refresh_credentials: ((origin: string) => Promise<boolean>) | null;
   private readonly listeners = new Set<(snapshot: RemoteWorkspaceSnapshot) => void>();
   private snapshot: RemoteWorkspaceSnapshot = create_idle_snapshot();
@@ -106,9 +91,7 @@ export class RemoteWorkspaceSubmissionService {
     this.database = options.database;
     this.session_state = options.session_state;
     this.runtime_gate = options.runtime_gate;
-    this.settings = options.settings;
     this.client = options.client;
-    this.llm = options.llm;
     this.refresh_credentials = options.refresh_credentials ?? null;
   }
 
@@ -121,13 +104,9 @@ export class RemoteWorkspaceSubmissionService {
     return () => this.listeners.delete(listener);
   }
 
-  /** 启动前先确认绑定；实际工作区读取与翻译在后台执行。 */
-  public async start(body: JsonRecord): Promise<RemoteWorkspaceSnapshot> {
+  /** 启动前先确认绑定；实际工作区读取与上传在后台执行。 */
+  public async start(): Promise<RemoteWorkspaceSnapshot> {
     if (this.running !== null) throw new AppError("runtime.busy");
-    const mode = body["mode"] ?? "missing";
-    if (mode !== "missing" && mode !== "all") {
-      throw new AppError("request.validation_failed", { public_details: { field: "mode" } });
-    }
     const project_path = this.session_state.require_loaded_project_path();
     const meta = await this.database.get_all_meta(project_path);
     const binding = read_remote_source_binding(meta[REMOTE_SOURCE_META_KEY]);
@@ -138,11 +117,10 @@ export class RemoteWorkspaceSubmissionService {
     this.snapshot = {
       ...create_idle_snapshot(),
       status: "running",
-      mode,
       started_at: new Date().toISOString(),
     };
     this.publish();
-    const completion = this.execute(project_path, binding, mode, controller.signal)
+    const completion = this.execute(project_path, binding, controller.signal)
       .catch((error: unknown) => {
         this.snapshot = {
           ...this.snapshot,
@@ -176,7 +154,6 @@ export class RemoteWorkspaceSubmissionService {
   private async execute(
     project_path: string,
     binding: RemoteSourceBinding,
-    mode: RemoteWorkspaceMode,
     signal: AbortSignal,
   ): Promise<void> {
     const ref = parse_novel_url(binding.url);
@@ -192,8 +169,7 @@ export class RemoteWorkspaceSubmissionService {
         chapter_id: chapter.chapter_id,
         title: chapter.title,
         state: "pending",
-        existing: 0,
-        translated: 0,
+        ready: 0,
         missing: 0,
         message: null,
       })),
@@ -202,7 +178,7 @@ export class RemoteWorkspaceSubmissionService {
     let consecutive_failures = 0;
     for (const [index, chapter] of workspace.chapters.entries()) {
       signal.throwIfAborted();
-      this.update_chapter(index, { state: "working" });
+      this.update_chapter(index, { state: "reading" });
       try {
         const partner = chapter_partners.get(index) ?? null;
         const outcome = await this.process_chapter({
@@ -210,38 +186,30 @@ export class RemoteWorkspaceSubmissionService {
           chapter,
           asset_chapter: partner,
           asset_items,
-          mode,
-          glossary: workspace.glossary,
           signal,
+          on_uploading: (progress) => {
+            this.update_chapter(index, { state: "uploading", ...progress });
+          },
         });
-        this.update_totals(outcome);
+        this.update_totals(outcome.uploaded);
         this.update_chapter(index, {
           state: outcome.uploaded ? "uploaded" : "skipped",
-          existing: outcome.existing,
-          translated: outcome.translated,
+          ready: outcome.ready,
           missing: outcome.missing,
           message: outcome.message,
         });
-        if (outcome.uploaded) consecutive_failures = 0;
-        else if (outcome.failed) consecutive_failures += 1;
-        if (consecutive_failures >= MAX_CHAPTER_FAILURES) {
-          throw new AppError("remote.fetch_failed", {
-            message: "Too many consecutive workspace chapter failures.",
-            public_details: { consecutive_failures },
-          });
-        }
+        consecutive_failures = 0;
       } catch (error) {
         if (signal.aborted) throw error;
         consecutive_failures += 1;
-        this.update_chapter(index, {
-          state: "failed",
-          message: error instanceof AppError ? error.code : "remote.fetch_failed",
-        });
         this.snapshot = {
           ...this.snapshot,
           totals: { ...this.snapshot.totals, failed: this.snapshot.totals.failed + 1 },
         };
-        this.publish();
+        this.update_chapter(index, {
+          state: "failed",
+          message: error instanceof AppError ? error.code : "remote.fetch_failed",
+        });
         if (consecutive_failures >= MAX_CHAPTER_FAILURES) throw error;
       }
     }
@@ -259,14 +227,11 @@ export class RemoteWorkspaceSubmissionService {
     chapter: RemoteWorkspaceChapter;
     asset_chapter: RemoteChapter | null;
     asset_items: readonly AssetItem[];
-    mode: RemoteWorkspaceMode;
-    glossary: Record<string, string>;
     signal: AbortSignal;
+    on_uploading: (progress: { ready: number; missing: number }) => void;
   }): Promise<{
     uploaded: boolean;
-    failed: boolean;
-    existing: number;
-    translated: number;
+    ready: number;
     missing: number;
     message: string | null;
   }> {
@@ -282,74 +247,32 @@ export class RemoteWorkspaceSubmissionService {
     if (paragraphs.length === 0) {
       return {
         uploaded: false,
-        failed: false,
-        existing: 0,
-        translated: 0,
+        ready: 0,
         missing: 0,
         message: null,
       };
     }
     const mapped = map_paragraph_items(paragraphs, args.asset_chapter, args.asset_items);
-    const site_old =
-      task.old_paragraph_zh !== null && task.old_paragraph_zh.length === paragraphs.length
-        ? task.old_paragraph_zh
-        : null;
-    const resolved: Array<string | null> = Array.from({ length: paragraphs.length }, () => null);
-    let existing = 0;
-    const missing_indexes: number[] = [];
-    for (let index = 0; index < paragraphs.length; index += 1) {
-      if (args.mode === "missing") {
-        const from_site = site_old?.[index]?.trim() ?? "";
-        // 站点旧译可能是“gpt翻译缺失。”这类缺失标记，按缺失处理并交给模型补译。
-        if (from_site !== "" && !is_missing_remote_translation(from_site)) {
-          resolved[index] = from_site;
-          existing += 1;
-          continue;
-        }
-        const item = mapped[index] ?? null;
-        if (item !== null && item.status === "PROCESSED" && item.dst.trim() !== "") {
-          resolved[index] = item.dst;
-          existing += 1;
-          continue;
-        }
-      }
-      missing_indexes.push(index);
-    }
-    let translated = 0;
-    if (missing_indexes.length > 0) {
-      const translated_map = await this.translate_missing({
-        paragraphs,
-        indexes: missing_indexes,
-        glossary: task.glossary,
-        signal: args.signal,
-      });
-      if (translated_map === null) {
-        return {
-          uploaded: false,
-          failed: true,
-          existing,
-          translated: 0,
-          missing: missing_indexes.length,
-          message: "translation_incomplete",
-        };
-      }
-      for (const index of missing_indexes) {
-        const text = translated_map.get(index);
-        if (text === undefined || text.trim() === "") {
-          return {
-            uploaded: false,
-            failed: true,
-            existing,
-            translated,
-            missing: missing_indexes.length,
-            message: "translation_incomplete",
-          };
-        }
-        resolved[index] = text;
-        translated += 1;
+    const paragraphs_zh: string[] = [];
+    let missing = 0;
+    for (const item of mapped) {
+      if (item !== null && item.status === "PROCESSED" && item.dst.trim() !== "") {
+        paragraphs_zh.push(item.dst);
+      } else {
+        paragraphs_zh.push("");
+        missing += 1;
       }
     }
-    const paragraphs_zh = resolved.map((value) => value ?? "");
+    const ready = paragraphs.length - missing;
+    if (missing > 0) {
+      return {
+        uploaded: false,
+        ready,
+        missing,
+        message: "local_translation_incomplete",
+      };
+    }
+    args.on_uploading({ ready, missing });
     try {
       await call_with_credential_refresh(this.refresh_credentials, args.ref.origin, () =>
         this.client.write_chapter_translation(
@@ -380,88 +303,10 @@ export class RemoteWorkspaceSubmissionService {
     }
     return {
       uploaded: true,
-      failed: false,
-      existing,
-      translated,
+      ready,
       missing: 0,
       message: null,
     };
-  }
-
-  /**
-   * 按行分块翻译；单块失败时递归二分，直到单行仍失败才返回 null。
-   */
-  private async translate_missing(args: {
-    paragraphs: readonly string[];
-    indexes: readonly number[];
-    glossary: Record<string, string>;
-    signal: AbortSignal;
-  }): Promise<Map<number, string> | null> {
-    const settings = this.settings.read_setting();
-    // 模型配置不在 SettingSnapshot 中，先按原始设置解析，再冻结公开设置快照。
-    const raw_model = resolve_model_for_usage(settings, "translation");
-    if (raw_model === null) throw new AppError("model.not_found");
-    const config_snapshot = normalize_setting_snapshot(settings);
-    const model = Model.from_json(raw_model, "").to_json();
-    const result = new Map<number, string>();
-    for (const batch of build_batches(args.indexes, args.paragraphs)) {
-      const texts = batch.map((index) => args.paragraphs[index] ?? "");
-      const translated = await this.translate_batch({
-        texts,
-        glossary: args.glossary,
-        model,
-        config_snapshot,
-        signal: args.signal,
-      });
-      if (translated === null) return null;
-      for (const [offset, index] of batch.entries()) {
-        result.set(index, translated[offset] ?? "");
-      }
-    }
-    return result;
-  }
-
-  private async translate_batch(args: {
-    texts: readonly string[];
-    glossary: Record<string, string>;
-    model: ReturnType<typeof Model.from_json> extends never ? never : JsonRecord;
-    config_snapshot: JsonRecord;
-    signal: AbortSignal;
-  }): Promise<string[] | null> {
-    const is_sakura = String(args.model["api_format"] ?? "") === "SakuraLLM";
-    for (let attempt = 0; attempt < TRANSLATION_ATTEMPTS; attempt += 1) {
-      args.signal.throwIfAborted();
-      const response = await this.llm.request(
-        {
-          run_id: random_id(12),
-          work_unit_id: random_id(12),
-          model: args.model,
-          config_snapshot: args.config_snapshot,
-          messages: build_translation_messages(args.texts, args.glossary, is_sakura),
-        },
-        args.signal,
-      );
-      if (response.cancelled) return null;
-      if (response.request_error !== undefined || response.timeout) continue;
-      const parsed = parse_translation_output(
-        response.response_result,
-        args.texts.length,
-        is_sakura,
-      );
-      if (parsed !== null) return parsed;
-    }
-    if (args.texts.length <= 1) return null;
-    const middle = Math.ceil(args.texts.length / 2);
-    const left = await this.translate_batch({
-      ...args,
-      texts: args.texts.slice(0, middle),
-    });
-    if (left === null) return null;
-    const right = await this.translate_batch({
-      ...args,
-      texts: args.texts.slice(middle),
-    });
-    return right === null ? null : [...left, ...right];
   }
 
   private async read_asset_text(project_path: string, asset_path: string): Promise<string> {
@@ -506,22 +351,14 @@ export class RemoteWorkspaceSubmissionService {
     this.publish();
   }
 
-  private update_totals(outcome: {
-    uploaded: boolean;
-    failed: boolean;
-    existing: number;
-    translated: number;
-  }): void {
+  private update_totals(uploaded: boolean): void {
     const totals = this.snapshot.totals;
     this.snapshot = {
       ...this.snapshot,
       totals: {
         ...totals,
-        uploaded: totals.uploaded + (outcome.uploaded ? 1 : 0),
-        skipped: totals.skipped + (!outcome.uploaded && !outcome.failed ? 1 : 0),
-        failed: totals.failed + (outcome.failed ? 1 : 0),
-        existing: totals.existing + outcome.existing,
-        translated: totals.translated + outcome.translated,
+        uploaded: totals.uploaded + (uploaded ? 1 : 0),
+        skipped: totals.skipped + (uploaded ? 0 : 1),
       },
     };
   }
@@ -536,11 +373,10 @@ export class RemoteWorkspaceSubmissionService {
 function create_idle_snapshot(): RemoteWorkspaceSnapshot {
   return {
     status: "idle",
-    mode: null,
     started_at: null,
     finished_at: null,
     error: null,
-    totals: { chapters: 0, uploaded: 0, skipped: 0, failed: 0, existing: 0, translated: 0 },
+    totals: { chapters: 0, uploaded: 0, skipped: 0, failed: 0 },
     chapters: [],
   };
 }
@@ -638,88 +474,6 @@ function map_paragraph_items(
     } else {
       result.push(null);
     }
-  }
-  return result;
-}
-
-/** 按行数与字符预算切块，保持原始顺序。 */
-function build_batches(indexes: readonly number[], paragraphs: readonly string[]): number[][] {
-  const batches: number[][] = [];
-  let current: number[] = [];
-  let chars = 0;
-  for (const index of indexes) {
-    const size = (paragraphs[index] ?? "").length;
-    if (
-      current.length > 0 &&
-      (current.length >= MAX_BATCH_LINES || chars + size > MAX_BATCH_CHARS)
-    ) {
-      batches.push(current);
-      current = [];
-      chars = 0;
-    }
-    current.push(index);
-    chars += size;
-  }
-  if (current.length > 0) batches.push(current);
-  return batches;
-}
-
-function build_translation_messages(
-  texts: readonly string[],
-  glossary: Record<string, string>,
-  is_sakura: boolean,
-): Array<{ role: "system" | "user"; content: string }> {
-  const glossary_lines = Object.entries(glossary)
-    .filter(([source]) => texts.some((text) => text.includes(source)))
-    .slice(0, 200)
-    .map(([source, target]) => `${source}=${target}`);
-  const glossary_block =
-    glossary_lines.length === 0 ? "" : `\n术语表（必须沿用）：\n${glossary_lines.join("\n")}\n`;
-  if (is_sakura) {
-    return [
-      { role: "system", content: "请将下面的日文逐行翻译成简体中文，只输出译文。" },
-      { role: "user", content: texts.join("\n") },
-    ];
-  }
-  return [
-    {
-      role: "system",
-      content:
-        "你是专业的日文小说翻译。把每个编号行翻译成简体中文，保持编号和行数完全一致。" +
-        "输出格式为 `#N: 译文`，不要合并、拆分、省略或解释。" +
-        glossary_block,
-    },
-    {
-      role: "user",
-      content: texts.map((text, index) => `#${index + 1}: ${text}`).join("\n"),
-    },
-  ];
-}
-
-/** 编号输出按序号取值；缺失或多余行都判为失败，交给上层重试。 */
-function parse_translation_output(
-  output: string,
-  expected: number,
-  is_sakura: boolean,
-): string[] | null {
-  if (is_sakura) {
-    const lines = output.split(/\r?\n/u).filter((line) => line.trim() !== "");
-    return lines.length === expected ? lines : null;
-  }
-  const values = new Map<number, string>();
-  for (const line of output.split(/\r?\n/u)) {
-    const matched = /^\s*#?\s*(\d+)\s*[:：]\s?(.*)$/u.exec(line);
-    if (matched === null) continue;
-    const index = Number(matched[1]);
-    if (!Number.isSafeInteger(index) || index < 1 || index > expected) continue;
-    values.set(index, matched[2] ?? "");
-  }
-  if (values.size !== expected) return null;
-  const result: string[] = [];
-  for (let index = 1; index <= expected; index += 1) {
-    const value = values.get(index);
-    if (value === undefined || value.trim() === "") return null;
-    result.push(value.trim());
   }
   return result;
 }

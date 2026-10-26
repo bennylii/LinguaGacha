@@ -4,16 +4,18 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { JsonRecord, JsonValue } from "../../domain/json";
+import type { JsonValue } from "../../domain/json";
+import { AppError } from "../../shared/error/app-error";
 import { ProjectDatabase } from "../database/database-operations";
-import type { LLMClientPort, LLMRequestResult } from "../llm/llm-types";
-import type { AppSettingService } from "../app/app-setting-service";
 import { ProjectSessionState } from "../project/project-session-state";
 import { RuntimeOperationGate } from "../runtime-operation-gate";
 import type { NoveliaClient, RemoteChapterTask, RemoteWorkspace } from "./novelia-client";
 import { parse_novel_url, sha256_text } from "./novelia-source";
 import { build_remote_source_binding, REMOTE_SOURCE_META_KEY } from "./remote-source";
-import { RemoteWorkspaceSubmissionService } from "./workspace-submission-service";
+import {
+  RemoteWorkspaceSubmissionService,
+  type RemoteWorkspaceSnapshot,
+} from "./workspace-submission-service";
 
 const NOVEL_URL = "https://n.novelia.cc/novel/kakuyomu/12345";
 const ASSET_PATH = "テスト小説.txt";
@@ -24,16 +26,15 @@ interface Fixture {
   database: ProjectDatabase;
   write_chapter_translation: ReturnType<typeof vi.fn>;
   read_chapter_task: ReturnType<typeof vi.fn>;
-  request_llm: ReturnType<typeof vi.fn>;
 }
 
-/** 工作区、项目条目与模型端口都可注入，用例只声明影响提交结果的事实。 */
+/** 工作区、项目条目与上传端口都可注入，用例只声明影响提交结果的事实。 */
 async function create_fixture(options: {
   workspace: RemoteWorkspace;
   tasks: RemoteChapterTask[];
   items?: Array<{ src: string; dst: string; status: string }>;
-  settings?: JsonRecord;
   translation_error?: Error;
+  task_error?: Error;
   pending_task?: boolean;
   novel_url?: string;
 }): Promise<Fixture> {
@@ -51,8 +52,8 @@ async function create_fixture(options: {
     synced_at: "2026-10-20T00:00:00.000Z",
   });
   const items = options.items ?? [
-    { src: "本文一", dst: "", status: "NONE" },
-    { src: "本文二", dst: "", status: "NONE" },
+    { src: "本文一", dst: "工程一", status: "PROCESSED" },
+    { src: "本文二", dst: "工程二", status: "PROCESSED" },
   ];
   await database.transaction(lg_path, (writer) => {
     writer.add_asset(lg_path, ASSET_PATH, Buffer.from(ASSET_TEXT), "TXT", null);
@@ -80,6 +81,7 @@ async function create_fixture(options: {
         _options: unknown,
         signal?: AbortSignal,
       ): Promise<RemoteChapterTask> => {
+        if (options.task_error !== undefined) throw options.task_error;
         if (options.pending_task === true) {
           return await new Promise<RemoteChapterTask>((_resolve, reject) => {
             signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -94,32 +96,17 @@ async function create_fixture(options: {
       if (options.translation_error !== undefined) throw options.translation_error;
     }),
   };
-  const request_llm = vi.fn(async (): Promise<LLMRequestResult> => ({
-    response_think: "",
-    response_result: "#1: 模型二",
-    input_tokens: 0,
-    reasoning_tokens: 0,
-    output_tokens: 0,
-    cancelled: false,
-    timeout: false,
-  }));
-  const settings = {
-    read_setting: () => options.settings ?? {},
-  } as Pick<AppSettingService, "read_setting">;
   const service = new RemoteWorkspaceSubmissionService({
     database,
     session_state,
     runtime_gate: new RuntimeOperationGate(),
-    settings,
     client: client as unknown as NoveliaClient,
-    llm: { request: request_llm } as unknown as LLMClientPort,
   });
   return {
     service,
     database,
     write_chapter_translation: client.write_chapter_translation,
     read_chapter_task: client.read_chapter_task,
-    request_llm,
   };
 }
 
@@ -176,37 +163,57 @@ afterEach(async () => {
 });
 
 describe("RemoteWorkspaceSubmissionService", () => {
-  it("已有译文优先：站点旧译覆盖工程译文，工程完成译文补齐缺失行", async () => {
+  it("只上传工程中已完成的本地译文，不采用站点旧译", async () => {
     const fixture = await create_fixture({
       workspace: workspace(1),
-      tasks: [task({ old_paragraph_zh: ["站点一", ""] })],
-      items: [
-        { src: "本文一", dst: "工程一", status: "PROCESSED" },
-        { src: "本文二", dst: "工程二", status: "PROCESSED" },
-      ],
+      tasks: [task({ old_paragraph_zh: ["站点一", "站点二"] })],
     });
     try {
-      await fixture.service.start({ mode: "missing" });
+      await fixture.service.start();
       await wait_for_status(fixture.service, "completed");
 
-      expect(fixture.request_llm).not.toHaveBeenCalled();
       expect(fixture.write_chapter_translation).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ chapter_id: "chapter-1" }),
-        { glossary_id: "glossary-1", paragraphs_zh: ["站点一", "工程二"] },
+        { glossary_id: "glossary-1", paragraphs_zh: ["工程一", "工程二"] },
         expect.any(AbortSignal),
       );
       expect(fixture.service.get_snapshot()).toMatchObject({
         status: "completed",
-        mode: "missing",
-        totals: { chapters: 1, uploaded: 1, skipped: 0, failed: 0, existing: 2, translated: 0 },
+        totals: { chapters: 1, uploaded: 1, skipped: 0, failed: 0 },
+        chapters: [{ state: "uploaded", ready: 2, missing: 0, message: null }],
       });
     } finally {
       await fixture.database.close();
     }
   });
 
-  it("缺少译文时调用当前翻译模型补译", async () => {
+  it("逐章发布 reading、uploading 与 uploaded 进度", async () => {
+    const fixture = await create_fixture({
+      workspace: workspace(1),
+      tasks: [task()],
+    });
+    const snapshots: RemoteWorkspaceSnapshot[] = [];
+    const unsubscribe = fixture.service.subscribe((snapshot) => snapshots.push(snapshot));
+    try {
+      await fixture.service.start();
+      await wait_for_status(fixture.service, "completed");
+      unsubscribe();
+
+      const states = new Set(
+        snapshots.flatMap((snapshot) => snapshot.chapters.map((chapter) => chapter.state)),
+      );
+      expect(states).toEqual(new Set(["pending", "reading", "uploading", "uploaded"]));
+      const first_uploaded = snapshots.find((snapshot) =>
+        snapshot.chapters.some((chapter) => chapter.state === "uploaded"),
+      );
+      expect(first_uploaded?.totals.uploaded).toBe(1);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("本地译文缺行时跳过该章并记录缺失行数", async () => {
     const fixture = await create_fixture({
       workspace: workspace(1),
       tasks: [task()],
@@ -214,29 +221,42 @@ describe("RemoteWorkspaceSubmissionService", () => {
         { src: "本文一", dst: "工程一", status: "PROCESSED" },
         { src: "本文二", dst: "", status: "NONE" },
       ],
-      settings: {
-        models: [{ id: "model-1", model_id: "test-model" }],
-        model_selection: { translation: "model-1" },
-      },
     });
     try {
-      await fixture.service.start({ mode: "missing" });
+      await fixture.service.start();
       await wait_for_status(fixture.service, "completed");
 
-      expect(fixture.request_llm).toHaveBeenCalledOnce();
-      const request = fixture.request_llm.mock.calls[0]![0] as {
-        messages: Array<{ content: string }>;
-      };
-      expect(request.messages.at(-1)?.content).toBe("#1: 本文二");
-      expect(fixture.write_chapter_translation).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.anything(),
-        { glossary_id: "glossary-1", paragraphs_zh: ["工程一", "模型二"] },
-        expect.any(AbortSignal),
-      );
+      expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
       expect(fixture.service.get_snapshot()).toMatchObject({
         status: "completed",
-        totals: { uploaded: 1, existing: 1, translated: 1 },
+        totals: { chapters: 1, uploaded: 0, skipped: 1, failed: 0 },
+        chapters: [
+          { state: "skipped", ready: 1, missing: 1, message: "local_translation_incomplete" },
+        ],
+      });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("未完成的本地译文不参与上传", async () => {
+    const fixture = await create_fixture({
+      workspace: workspace(1),
+      tasks: [task()],
+      items: [
+        { src: "本文一", dst: "草稿一", status: "PROCESSING" },
+        { src: "本文二", dst: "草稿二", status: "PROCESSING" },
+      ],
+    });
+    try {
+      await fixture.service.start();
+      await wait_for_status(fixture.service, "completed");
+
+      expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+      expect(fixture.service.get_snapshot().chapters[0]).toMatchObject({
+        state: "skipped",
+        ready: 0,
+        missing: 2,
       });
     } finally {
       await fixture.database.close();
@@ -247,26 +267,21 @@ describe("RemoteWorkspaceSubmissionService", () => {
     let upload_attempts = 0;
     const fixture = await create_fixture({
       workspace: workspace(1),
-      tasks: [
-        task({ old_paragraph_zh: ["站点一", "站点二"] }),
-        task({ old_paragraph_zh: ["站点一", "站点二"], glossary_id: "glossary-2" }),
-      ],
-      items: [],
-      settings: {},
+      tasks: [task(), task({ glossary_id: "glossary-2" })],
     });
     try {
       fixture.write_chapter_translation.mockImplementation(async () => {
         upload_attempts += 1;
         if (upload_attempts === 1) throw new Error("glossary changed");
       });
-      await fixture.service.start({ mode: "missing" });
+      await fixture.service.start();
       await wait_for_status(fixture.service, "completed");
 
       expect(upload_attempts).toBe(2);
       expect(fixture.write_chapter_translation).toHaveBeenLastCalledWith(
         expect.anything(),
         expect.anything(),
-        { glossary_id: "glossary-2", paragraphs_zh: ["站点一", "站点二"] },
+        { glossary_id: "glossary-2", paragraphs_zh: ["工程一", "工程二"] },
         expect.any(AbortSignal),
       );
       expect(fixture.service.get_snapshot().chapters[0]?.state).toBe("uploaded");
@@ -279,15 +294,14 @@ describe("RemoteWorkspaceSubmissionService", () => {
     const fixture = await create_fixture({
       workspace: workspace(6),
       tasks: [task()],
-      items: [],
-      settings: {},
+      task_error: new AppError("remote.fetch_failed"),
     });
     try {
-      await fixture.service.start({ mode: "missing" });
+      await fixture.service.start();
       await wait_for_status(fixture.service, "failed");
 
       const snapshot = fixture.service.get_snapshot();
-      expect(snapshot.error).toBe("model.not_found");
+      expect(snapshot.error).toBe("remote.fetch_failed");
       expect(snapshot.totals.failed).toBe(5);
       expect(snapshot.chapters.slice(0, 5).map((chapter) => chapter.state)).toEqual([
         "failed",
@@ -302,7 +316,7 @@ describe("RemoteWorkspaceSubmissionService", () => {
     }
   });
 
-  it("文库形态提交：缺失标记按缺失补译且章节任务不带 sync", async () => {
+  it("文库形态提交：读取章节任务不带 sync", async () => {
     const fixture = await create_fixture({
       novel_url: "https://n.novelia.cc/wenku/12345",
       workspace: {
@@ -311,37 +325,19 @@ describe("RemoteWorkspaceSubmissionService", () => {
           { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一章", translated: false },
         ],
       },
-      tasks: [task({ old_paragraph_zh: ["站点一", "gpt翻译缺失。"] })],
-      items: [
-        { src: "本文一", dst: "工程一", status: "PROCESSED" },
-        { src: "本文二", dst: "", status: "NONE" },
-      ],
-      settings: {
-        models: [{ id: "model-1", model_id: "test-model" }],
-        model_selection: { translation: "model-1" },
-      },
+      tasks: [task()],
     });
     try {
-      await fixture.service.start({ mode: "missing" });
+      await fixture.service.start();
       await wait_for_status(fixture.service, "completed");
 
-      // 文库章节来自已上传分卷，读取任务不带 sync 参数（网页为 true）。
       expect(fixture.read_chapter_task).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
         { sync: false },
         expect.any(AbortSignal),
       );
-      expect(fixture.write_chapter_translation).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.anything(),
-        { glossary_id: "glossary-1", paragraphs_zh: ["站点一", "模型二"] },
-        expect.any(AbortSignal),
-      );
-      expect(fixture.service.get_snapshot()).toMatchObject({
-        status: "completed",
-        totals: { uploaded: 1, existing: 1, translated: 1 },
-      });
+      expect(fixture.service.get_snapshot().totals.uploaded).toBe(1);
     } finally {
       await fixture.database.close();
     }
@@ -351,15 +347,13 @@ describe("RemoteWorkspaceSubmissionService", () => {
     const fixture = await create_fixture({
       workspace: workspace(1),
       tasks: [task()],
-      items: [],
-      settings: {},
       pending_task: true,
     });
     try {
-      await fixture.service.start({ mode: "missing" });
+      await fixture.service.start();
       await vi.waitFor(
         () => {
-          expect(fixture.service.get_snapshot().chapters[0]?.state).toBe("working");
+          expect(fixture.service.get_snapshot().chapters[0]?.state).toBe("reading");
         },
         { timeout: 3_000, interval: 10 },
       );

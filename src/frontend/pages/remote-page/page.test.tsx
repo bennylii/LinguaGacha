@@ -76,7 +76,6 @@ const SOURCE_SNAPSHOT = {
 
 const WORKSPACE_SNAPSHOT = {
   status: "idle",
-  mode: null,
   started_at: null,
   finished_at: null,
   error: null,
@@ -85,8 +84,6 @@ const WORKSPACE_SNAPSHOT = {
     uploaded: 0,
     skipped: 0,
     failed: 0,
-    existing: 0,
-    translated: 0,
   },
   chapters: [],
 };
@@ -338,7 +335,7 @@ describe("RemotePage", () => {
     expect(push_toast_mock).toHaveBeenCalledWith("success", expect.stringContaining("同步完成"));
   });
 
-  it("手动导入 token 后展示末位并允许启动工作区提交", async () => {
+  it("手动导入 token 后展示末位并上传工程译文", async () => {
     api_fetch_mock.mockImplementation(async (path: string) => {
       if (path === "/api/remote/auth/status") return { auth: AUTH_SNAPSHOT };
       if (path === "/api/remote/source/read") return { source: SOURCE_SNAPSHOT };
@@ -355,6 +352,7 @@ describe("RemotePage", () => {
                 token_tail: "wxyz",
                 updated_at: "2026-10-02T11:00:00",
                 source: "manual",
+                expired: false,
               },
             ],
           },
@@ -365,7 +363,7 @@ describe("RemotePage", () => {
           remote_workspace: {
             ...WORKSPACE_SNAPSHOT,
             status: "running",
-            mode: "missing",
+            totals: { chapters: 1, uploaded: 0, skipped: 0, failed: 0 },
           },
         };
       }
@@ -394,13 +392,13 @@ describe("RemotePage", () => {
     expect(page.textContent).toContain("尾号 wxyz");
 
     await act(async () => {
-      get_button_by_text(page, "补译缺失并提交").click();
+      get_button_by_text(page, "上传工程译文").click();
     });
 
-    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/workspace/start", {
-      mode: "missing",
-    });
-    expect(page.textContent).toContain("提交中");
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/workspace/start", {});
+    expect(page.textContent).toContain("上传中");
+    expect(page.textContent).toContain("已处理 0/1 章");
+    expect(get_button_by_text(page, "停止上传")).toBeInstanceOf(HTMLButtonElement);
   });
 
   it("通过内嵌窗口登录并保存登录来源凭据", async () => {
@@ -588,6 +586,136 @@ describe("RemotePage", () => {
     expect(push_toast_mock).toHaveBeenCalledTimes(1);
     expect(push_toast_mock).toHaveBeenCalledWith("success", "桥接已接收站点凭据");
     expect(page.textContent).toContain("尾号 brdg");
+  });
+
+  it("事件流推送逐章上传进度并区分跳过与失败", async () => {
+    const page = await mount_page();
+
+    await act(async () => {
+      emit("remote_workspace.snapshot_changed", {
+        remote_workspace: {
+          status: "running",
+          started_at: "2026-10-04T09:00:00",
+          finished_at: null,
+          error: null,
+          totals: { chapters: 3, uploaded: 1, skipped: 1, failed: 0 },
+          chapters: [
+            {
+              chapter_id: "chapter-1",
+              title: "第一章",
+              state: "uploaded",
+              ready: 10,
+              missing: 0,
+              message: null,
+            },
+            {
+              chapter_id: "chapter-2",
+              title: "第二章",
+              state: "skipped",
+              ready: 5,
+              missing: 2,
+              message: "local_translation_incomplete",
+            },
+            {
+              chapter_id: "chapter-3",
+              title: "第三章",
+              state: "uploading",
+              ready: 8,
+              missing: 0,
+              message: null,
+            },
+          ],
+        },
+      });
+    });
+
+    expect(page.textContent).toContain("已处理 2/3 章");
+    expect(page.textContent).toContain("67%");
+    expect(page.textContent).toContain("本地译文 10 行");
+    expect(page.textContent).toContain("本地译文 5 行 · 缺失 2 行 · 本地译文不完整，已跳过");
+    expect(page.textContent).toContain("停止上传");
+    const progress = page.querySelector('[role="progressbar"]');
+    expect(progress?.getAttribute("aria-valuenow")).toBe("66.67");
+
+    await act(async () => {
+      emit("remote_workspace.snapshot_changed", {
+        remote_workspace: {
+          status: "completed",
+          started_at: "2026-10-04T09:00:00",
+          finished_at: "2026-10-04T09:05:00",
+          error: null,
+          totals: { chapters: 3, uploaded: 2, skipped: 1, failed: 0 },
+          chapters: [
+            {
+              chapter_id: "chapter-1",
+              title: "第一章",
+              state: "uploaded",
+              ready: 10,
+              missing: 0,
+              message: null,
+            },
+            {
+              chapter_id: "chapter-2",
+              title: "第二章",
+              state: "skipped",
+              ready: 5,
+              missing: 2,
+              message: "local_translation_incomplete",
+            },
+            {
+              chapter_id: "chapter-3",
+              title: "第三章",
+              state: "uploaded",
+              ready: 8,
+              missing: 0,
+              message: null,
+            },
+          ],
+        },
+      });
+    });
+
+    expect(page.textContent).toContain("已完成");
+    expect(page.textContent).toContain("已处理 3/3 章");
+    expect(page.textContent).not.toContain("停止上传");
+  });
+
+  it("停止上传后不把取消原因显示为失败", async () => {
+    const page = await mount_page();
+
+    await act(async () => {
+      emit("remote_workspace.snapshot_changed", {
+        remote_workspace: {
+          status: "cancelled",
+          started_at: "2026-10-04T09:00:00",
+          finished_at: "2026-10-04T09:02:00",
+          error: "cancelled",
+          totals: { chapters: 2, uploaded: 1, skipped: 0, failed: 0 },
+          chapters: [
+            {
+              chapter_id: "chapter-1",
+              title: "第一章",
+              state: "uploaded",
+              ready: 10,
+              missing: 0,
+              message: null,
+            },
+            {
+              chapter_id: "chapter-2",
+              title: "第二章",
+              state: "pending",
+              ready: 0,
+              missing: 0,
+              message: null,
+            },
+          ],
+        },
+      });
+    });
+
+    expect(page.textContent).toContain("已停止");
+    expect(page.textContent).not.toContain("失败原因");
+    expect(page.textContent).not.toContain("停止上传");
   });
 
   it("事件流重连后补读快照", async () => {
