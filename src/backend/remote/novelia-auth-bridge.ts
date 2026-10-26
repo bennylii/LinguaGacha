@@ -20,6 +20,8 @@ export interface NoveliaAuthBridgeStatus {
 export interface NoveliaAuthBridgeOptions {
   credentials: NoveliaCredentialStore;
   log?: Pick<LogManager, "info" | "warning">;
+  /** 凭据文件写入后通知认证快照发布；桥接本身不持有认证服务。 */
+  on_credentials_changed?: () => void;
   port_start?: number; // 默认从 ntr-toolbox 的 7331 开始顺延
   port_end?: number;
 }
@@ -31,6 +33,7 @@ export interface NoveliaAuthBridgeOptions {
 export class NoveliaAuthBridge {
   private readonly credentials: NoveliaCredentialStore;
   private readonly log: Pick<LogManager, "info" | "warning"> | null;
+  private readonly on_credentials_changed: (() => void) | null;
   private readonly port_start: number;
   private readonly port_end: number;
   private server: Server | null = null;
@@ -41,6 +44,7 @@ export class NoveliaAuthBridge {
   public constructor(options: NoveliaAuthBridgeOptions) {
     this.credentials = options.credentials;
     this.log = options.log ?? null;
+    this.on_credentials_changed = options.on_credentials_changed ?? null;
     this.port_start = options.port_start ?? DEFAULT_PORT_START;
     this.port_end = options.port_end ?? DEFAULT_PORT_END;
   }
@@ -177,6 +181,7 @@ export class NoveliaAuthBridge {
       const raw_token =
         read_body_string(body, "token") ?? read_header(request, "authorization") ?? "";
       const status = this.credentials.save_token({ origin, raw_token, source: "bridge" });
+      this.on_credentials_changed?.();
       const workers = Array.isArray(body["workers"]) ? body["workers"].length : 0;
       respond_json(response, 200, {
         ok: true,

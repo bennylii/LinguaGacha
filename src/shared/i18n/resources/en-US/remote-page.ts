@@ -21,6 +21,11 @@ export const en_us_remote_page = {
       "The login window is open; credentials are saved and refreshed automatically when done.",
     login_succeeded: "Logged in; credential saved",
     login_failed: "Login failed …",
+    logged_in: "Logged in",
+    logged_out: "Not logged in",
+    login_cancelled: "Login cancelled",
+    login_timed_out: "Login timed out; try again",
+    login_unavailable: "Login did not complete; try again",
     expired: "Expired, log in again",
     clear: "Clear this site",
     clear_all: "Clear all",
@@ -33,6 +38,7 @@ export const en_us_remote_page = {
       login: "login",
     },
     bridge: {
+      loading: "Reading bridge status …",
       running: "Bridge listening",
       stopped: "Bridge stopped",
       stopped_hint:
@@ -40,6 +46,12 @@ export const en_us_remote_page = {
       enable: "Enable bridge",
       disable: "Disable bridge",
       failed: "Failed to toggle the bridge …",
+      enabling: "Enabling bridge …",
+      disabling: "Disabling bridge …",
+      started: "Bridge enabled",
+      stopped_toast: "Bridge disabled",
+      received: "Bridge received site credentials",
+      failed_status: "Bridge failed to start",
     },
   },
   source: {

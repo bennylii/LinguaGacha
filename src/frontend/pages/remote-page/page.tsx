@@ -1,4 +1,4 @@
-import { type JSX, useCallback, useEffect, useState } from "react";
+import { type JSX, useCallback, useEffect, useRef, useState } from "react";
 import { CloudDownload, LogIn, RefreshCw, Send, ShieldCheck, Unlink, X } from "lucide-react";
 
 import { api_fetch, open_event_stream } from "@frontend/app/desktop/desktop-api";
@@ -23,6 +23,8 @@ type RemoteCredential = {
   expired: boolean;
 };
 
+type RemoteLoginStatus = "idle" | "running" | "succeeded" | "cancelled" | "timeout" | "unavailable";
+
 type RemoteAuth = {
   default_origin: string;
   origins: RemoteCredential[];
@@ -36,7 +38,7 @@ type RemoteAuth = {
     };
   };
   login: {
-    running: boolean;
+    status: RemoteLoginStatus;
     origin: string | null;
     started_at: string | null;
   };
@@ -164,6 +166,7 @@ export function RemotePage(): JSX.Element {
   const [token_input, set_token_input] = useState("");
   const [origin_input, set_origin_input] = useState("");
   const [is_auth_busy, set_is_auth_busy] = useState(false);
+  const [bridge_pending, set_bridge_pending] = useState<"enable" | "disable" | null>(null);
   const [is_login_busy, set_is_login_busy] = useState(false);
   const [preview, set_preview] = useState<RemoteSyncPreview | null>(null);
   const [align, set_align] = useState<RemoteAlignPreview | null>(null);
@@ -171,14 +174,35 @@ export function RemotePage(): JSX.Element {
   const [sync_mode, set_sync_mode] = useState<SyncMode>("auto");
   const [is_sync_busy, set_is_sync_busy] = useState(false);
   const [is_workspace_busy, set_is_workspace_busy] = useState(false);
-  // 登录请求在窗口关闭前一直挂起；快照里的 running 让 SSE 也能反映登录中。
-  const login_running = is_login_busy || (auth?.login.running ?? false);
+  // 桥接凭据指纹只在 SSE 推送里比较，首次读取不会误报“已接收”。
+  const bridge_fingerprint = useRef<string | null>(null);
+  const login_running = is_login_busy || auth?.login.status === "running";
+
+  /** 所有认证快照都经同一入口落状态，SSE 推送时才比较桥接凭据变化。 */
+  const apply_auth = useCallback(
+    (next: RemoteAuth, notify_bridge: boolean): void => {
+      set_auth(next);
+      const fingerprint = next.origins
+        .filter((credential) => credential.source === "bridge")
+        .map(
+          (credential) => `${credential.origin}|${credential.token_tail}|${credential.updated_at}`,
+        )
+        .sort()
+        .join(",");
+      const previous = bridge_fingerprint.current;
+      bridge_fingerprint.current = fingerprint;
+      if (notify_bridge && previous !== null && previous !== fingerprint) {
+        push_toast("success", t("remote_page.auth.bridge.received"));
+      }
+    },
+    [t],
+  );
 
   const refresh_auth = useCallback(async (): Promise<void> => {
     const payload = await api_fetch<{ auth: RemoteAuth }>("/api/remote/auth/status", {});
-    set_auth(payload.auth);
+    apply_auth(payload.auth, false);
     set_origin_input((current) => (current === "" ? payload.auth.default_origin : current));
-  }, []);
+  }, [apply_auth]);
 
   const refresh_source = useCallback(async (): Promise<void> => {
     const payload = await api_fetch<{ source: RemoteSource }>("/api/remote/source/read", {});
@@ -203,6 +227,15 @@ export function RemotePage(): JSX.Element {
       push_error_toast(t("remote_page.load_failed"), error);
     });
     const event_source = open_event_stream();
+    let opened_before = false;
+    // 断线重连后补读一次，避免错过重连窗口内的快照。
+    const handle_open = (): void => {
+      if (!opened_before) {
+        opened_before = true;
+        return;
+      }
+      void refresh_all().catch(() => undefined);
+    };
     const handle_workspace = (event: MessageEvent<string>): void => {
       try {
         const payload = JSON.parse(event.data) as {
@@ -219,19 +252,21 @@ export function RemotePage(): JSX.Element {
     const handle_auth = (event: MessageEvent<string>): void => {
       try {
         const payload = JSON.parse(event.data) as { auth?: RemoteAuth };
-        if (payload.auth !== undefined) set_auth(payload.auth);
+        if (payload.auth !== undefined) apply_auth(payload.auth, true);
       } catch {
-        // 事件损坏时保持当前快照，下一次操作会重新读取。
+        void refresh_auth().catch(() => undefined);
       }
     };
+    event_source.addEventListener("open", handle_open);
     event_source.addEventListener("remote_workspace.snapshot_changed", handle_workspace);
     event_source.addEventListener("remote_auth.snapshot_changed", handle_auth);
     return () => {
+      event_source.removeEventListener("open", handle_open);
       event_source.removeEventListener("remote_workspace.snapshot_changed", handle_workspace);
       event_source.removeEventListener("remote_auth.snapshot_changed", handle_auth);
       event_source.close();
     };
-  }, [refresh_all, t]);
+  }, [apply_auth, refresh_all, refresh_auth, t]);
 
   async function import_token(): Promise<void> {
     if (token_input.trim() === "" || is_auth_busy) return;
@@ -241,7 +276,7 @@ export function RemotePage(): JSX.Element {
         origin: origin_input.trim(),
         token: token_input,
       });
-      set_auth(payload.auth);
+      apply_auth(payload.auth, false);
       set_token_input("");
       push_toast("success", t("remote_page.auth.imported"));
     } catch (error) {
@@ -259,7 +294,7 @@ export function RemotePage(): JSX.Element {
         "/api/remote/auth/clear",
         all ? {} : { origin: origin_input.trim() },
       );
-      set_auth(payload.auth);
+      apply_auth(payload.auth, false);
     } catch (error) {
       push_error_toast(t("remote_page.auth.clear_failed"), error);
     } finally {
@@ -268,17 +303,31 @@ export function RemotePage(): JSX.Element {
   }
 
   async function toggle_bridge(enabled: boolean): Promise<void> {
-    if (is_auth_busy) return;
-    set_is_auth_busy(true);
+    if (is_auth_busy || bridge_pending !== null) return;
+    set_bridge_pending(enabled ? "enable" : "disable");
     try {
       const payload = await api_fetch<{ auth: RemoteAuth }>("/api/remote/auth/bridge", {
         enabled,
       });
-      set_auth(payload.auth);
+      apply_auth(payload.auth, false);
+      push_toast(
+        "success",
+        enabled ? t("remote_page.auth.bridge.started") : t("remote_page.auth.bridge.stopped_toast"),
+      );
     } catch (error) {
       push_error_toast(t("remote_page.auth.bridge.failed"), error);
     } finally {
-      set_is_auth_busy(false);
+      set_bridge_pending(null);
+    }
+  }
+
+  /** 登录结果由后端终态决定：窗口关闭、超时和不可用都不再提示成功。 */
+  function notify_login_result(status: RemoteLoginStatus): void {
+    if (status === "succeeded") push_toast("success", t("remote_page.auth.login_succeeded"));
+    else if (status === "cancelled") push_toast("info", t("remote_page.auth.login_cancelled"));
+    else if (status === "timeout") push_toast("warning", t("remote_page.auth.login_timed_out"));
+    else if (status === "unavailable") {
+      push_toast("warning", t("remote_page.auth.login_unavailable"));
     }
   }
 
@@ -291,8 +340,8 @@ export function RemotePage(): JSX.Element {
         origin: origin_input.trim(),
         theme: resolved_theme,
       });
-      set_auth(payload.auth);
-      push_toast("success", t("remote_page.auth.login_succeeded"));
+      apply_auth(payload.auth, false);
+      notify_login_result(payload.auth.login.status);
     } catch (error) {
       push_error_toast(t("remote_page.auth.login_failed"), error);
     } finally {
@@ -300,10 +349,11 @@ export function RemotePage(): JSX.Element {
     }
   }
 
+  /** 取消只结束登录窗口；终态提示由挂起的登录请求统一给出。 */
   async function cancel_login(): Promise<void> {
     try {
       const payload = await api_fetch<{ auth: RemoteAuth }>("/api/remote/auth/login/cancel", {});
-      set_auth(payload.auth);
+      apply_auth(payload.auth, false);
     } catch (error) {
       push_error_toast(t("remote_page.auth.login_failed"), error);
     }
@@ -381,6 +431,7 @@ export function RemotePage(): JSX.Element {
     }
   }
 
+  /** 只上传工程已完成的本地译文；逐章进度由 SSE 快照推进。 */
   async function start_workspace(mode: WorkspaceMode): Promise<void> {
     if (is_workspace_busy) return;
     set_is_workspace_busy(true);
@@ -409,6 +460,9 @@ export function RemotePage(): JSX.Element {
     }
   }
 
+  const active_credential =
+    auth?.origins.find((credential) => credential.origin === origin_input.trim()) ?? null;
+
   return (
     <div className="remote-page page-shell">
       <header className="remote-page__header">
@@ -429,28 +483,52 @@ export function RemotePage(): JSX.Element {
               placeholder={auth?.default_origin ?? "https://n.novelia.cc"}
               onChange={(event) => set_origin_input(event.target.value)}
             />
-            <Badge tone={auth?.bridge.status.running ? "success" : "neutral"}>
-              {auth?.bridge.status.running
-                ? t("remote_page.auth.bridge.running")
-                : t("remote_page.auth.bridge.stopped")}
+            <Badge
+              tone={
+                auth === null
+                  ? "neutral"
+                  : auth.bridge.status.running
+                    ? "success"
+                    : auth.bridge.enabled
+                      ? "warning"
+                      : "neutral"
+              }
+            >
+              {auth === null
+                ? t("remote_page.auth.bridge.loading")
+                : auth.bridge.status.running
+                  ? t("remote_page.auth.bridge.running")
+                  : auth.bridge.enabled
+                    ? t("remote_page.auth.bridge.failed_status")
+                    : t("remote_page.auth.bridge.stopped")}
             </Badge>
             <AppButton
               type="button"
               variant="outline"
               size="sm"
-              disabled={is_auth_busy}
+              disabled={is_auth_busy || bridge_pending !== null || auth === null}
               onClick={() => {
                 void toggle_bridge(auth?.bridge.enabled === false);
               }}
             >
+              {bridge_pending === null ? null : <Spinner data-icon="inline-start" />}
               {auth?.bridge.enabled === false
                 ? t("remote_page.auth.bridge.enable")
                 : t("remote_page.auth.bridge.disable")}
             </AppButton>
           </div>
           <p className="remote-page__hint">
-            {auth?.bridge.status.address ?? t("remote_page.auth.bridge.stopped_hint")}
-            {auth?.bridge.status.error ? ` · ${auth.bridge.status.error}` : ""}
+            {auth === null
+              ? t("remote_page.auth.bridge.loading")
+              : bridge_pending === "enable"
+                ? t("remote_page.auth.bridge.enabling")
+                : bridge_pending === "disable"
+                  ? t("remote_page.auth.bridge.disabling")
+                  : auth.bridge.status.running
+                    ? (auth.bridge.status.address ?? t("remote_page.auth.bridge.stopped_hint"))
+                    : auth.bridge.enabled
+                      ? `${t("remote_page.auth.bridge.failed_status")}${auth.bridge.status.error === null ? "" : ` · ${auth.bridge.status.error}`}`
+                      : t("remote_page.auth.bridge.stopped_hint")}
           </p>
 
           <div className="remote-page__actions">
@@ -461,9 +539,28 @@ export function RemotePage(): JSX.Element {
                 void start_login();
               }}
             >
-              <LogIn data-icon="inline-start" />
+              {login_running ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <LogIn data-icon="inline-start" />
+              )}
               {t("remote_page.auth.login")}
             </AppButton>
+            <Badge
+              tone={
+                active_credential === null
+                  ? "neutral"
+                  : active_credential.expired
+                    ? "warning"
+                    : "success"
+              }
+            >
+              {active_credential === null
+                ? t("remote_page.auth.logged_out")
+                : active_credential.expired
+                  ? t("remote_page.auth.expired")
+                  : t("remote_page.auth.logged_in")}
+            </Badge>
             {login_running ? (
               <AppButton
                 type="button"

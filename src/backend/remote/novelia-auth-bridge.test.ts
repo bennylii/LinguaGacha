@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NoveliaAuthBridge } from "./novelia-auth-bridge";
 import { NoveliaCredentialStore } from "./novelia-credential-store";
@@ -88,6 +88,27 @@ describe("NoveliaAuthBridge", () => {
     });
     expect(JSON.stringify(payload)).not.toContain("eyJhbGciOiJIUzI1NiJ9.abc.def");
     expect(store.read_token("https://n.novelia.cc")).toBe("eyJhbGciOiJIUzI1NiJ9.abc.def");
+  });
+
+  it("接收凭据后通知认证快照发布", async () => {
+    const changed = vi.fn();
+    bridge = new NoveliaAuthBridge({ credentials: store, on_credentials_changed: changed });
+    await bridge.start();
+    const base = bridge.get_status().address;
+
+    await fetch(`${base}/auth`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://n.novelia.cc" },
+      body: JSON.stringify({ token: "abc", origin: "https://n.novelia.cc" }),
+    });
+    expect(changed).toHaveBeenCalledOnce();
+
+    await fetch(`${base}/auth`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://evil.example" },
+      body: JSON.stringify({ token: "abc", origin: "https://evil.example" }),
+    });
+    expect(changed).toHaveBeenCalledOnce();
   });
 
   it("拒绝非白名单 Origin 且不写入凭据", async () => {

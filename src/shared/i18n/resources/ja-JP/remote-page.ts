@@ -21,6 +21,11 @@ export const ja_jp_remote_page = {
       "ログインウィンドウを開いています。完了すると認証情報を自動的に保存・更新します。",
     login_succeeded: "ログインしました。認証情報を保存しました",
     login_failed: "ログインに失敗しました …",
+    logged_in: "ログイン済み",
+    logged_out: "未ログイン",
+    login_cancelled: "ログインをキャンセルしました",
+    login_timed_out: "ログインがタイムアウトしました。再試行してください",
+    login_unavailable: "ログインが完了しませんでした。再試行してください",
     expired: "有効期限切れです。再ログインしてください",
     clear: "このサイトを削除",
     clear_all: "すべて削除",
@@ -33,6 +38,7 @@ export const ja_jp_remote_page = {
       login: "ログイン",
     },
     bridge: {
+      loading: "ブリッジ状態を読み込み中 …",
       running: "ブリッジ待ち受け中",
       stopped: "ブリッジ停止中",
       stopped_hint:
@@ -40,6 +46,12 @@ export const ja_jp_remote_page = {
       enable: "ブリッジを有効化",
       disable: "ブリッジを無効化",
       failed: "ブリッジの切り替えに失敗しました …",
+      enabling: "ブリッジを有効化中 …",
+      disabling: "ブリッジを無効化中 …",
+      started: "ブリッジを有効にしました",
+      stopped_toast: "ブリッジを無効にしました",
+      received: "ブリッジがサイト認証情報を受信しました",
+      failed_status: "ブリッジの起動に失敗しました",
     },
   },
   source: {

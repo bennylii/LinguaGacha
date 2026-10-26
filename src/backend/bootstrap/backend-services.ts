@@ -274,6 +274,7 @@ export class BackendServices {
       bridge: new NoveliaAuthBridge({
         credentials: novelia_credentials,
         log: this.logManager,
+        on_credentials_changed: () => remote_auth.notify_credentials_changed(),
       }),
       settings: this.app_setting_service,
       auth_host: options.remoteAuthHost,

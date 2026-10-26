@@ -14,7 +14,8 @@ export type RemoteAuthHostResult =
 
 export type RemoteLoginWindowOperation = {
   kind: "open_remote_login_window";
-  url: string;
+  url: string; // 站点登录入口，登录表单由站点自身承载
+  refresh_url: string; // auth 域的续期端点，不能从站点入口推导
   origin: string;
 };
 

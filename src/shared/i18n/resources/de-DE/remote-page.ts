@@ -22,6 +22,11 @@ export const de_de_remote_page = {
       "Das Anmeldefenster ist geöffnet; Zugangsdaten werden nach Abschluss automatisch gespeichert und erneuert.",
     login_succeeded: "Angemeldet; Zugangsdaten gespeichert",
     login_failed: "Anmeldung fehlgeschlagen …",
+    logged_in: "Angemeldet",
+    logged_out: "Nicht angemeldet",
+    login_cancelled: "Anmeldung abgebrochen",
+    login_timed_out: "Anmeldung abgelaufen; bitte erneut versuchen",
+    login_unavailable: "Anmeldung nicht abgeschlossen; bitte erneut versuchen",
     expired: "Abgelaufen, bitte neu anmelden",
     clear: "Diese Website löschen",
     clear_all: "Alle löschen",
@@ -34,6 +39,7 @@ export const de_de_remote_page = {
       login: "Anmeldung",
     },
     bridge: {
+      loading: "Brückenstatus wird gelesen …",
       running: "Brücke lauscht",
       stopped: "Brücke gestoppt",
       stopped_hint:
@@ -41,6 +47,12 @@ export const de_de_remote_page = {
       enable: "Brücke aktivieren",
       disable: "Brücke deaktivieren",
       failed: "Umschalten der Brücke fehlgeschlagen …",
+      enabling: "Brücke wird aktiviert …",
+      disabling: "Brücke wird deaktiviert …",
+      started: "Brücke aktiviert",
+      stopped_toast: "Brücke deaktiviert",
+      received: "Brücke hat Website-Zugangsdaten empfangen",
+      failed_status: "Brücke konnte nicht starten",
     },
   },
   source: {

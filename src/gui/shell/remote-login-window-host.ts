@@ -8,12 +8,10 @@ import {
 
 const LOGIN_POLL_INTERVAL_MS = 3_000;
 const LOGIN_WINDOW_TIMEOUT_MS = 5 * 60_000;
-// 与站点前端一致的续期端点；登录页 URL 已包含派生好的 auth origin。
-const REFRESH_PATH = "/api/v1/auth/refresh?app=n";
 
 /**
- * 内嵌登录窗口：加载真实认证页让用户输入用户名密码，
- * 登录成功（续期端点返回 JWT）后经分区会话结算回包，并把站点域 Cookie 一并交付落盘。
+ * 内嵌登录窗口：加载站点入口让用户在站点自身的登录表单中登录，
+ * 登录成功（auth 域续期端点返回 JWT）后经分区会话结算回包，并把站点域 Cookie 一并交付落盘。
  * Cookie 保存在持久分区里跨重启复用，因此 dispose 不清理存储。
  */
 export function create_remote_login_window_host(): RemoteAuthHost & {
@@ -49,7 +47,6 @@ export function create_remote_login_window_host(): RemoteAuthHost & {
     signal?: AbortSignal,
   ): Promise<RemoteAuthHostResult> {
     const { promise, resolve } = Promise.withResolvers<RemoteAuthHostResult>();
-    const refresh_url = `${new URL(operation.url).origin}${REFRESH_PATH}`;
     let poll: NodeJS.Timeout | null = null;
     let timeout: NodeJS.Timeout | null = null;
     let settled = false;
@@ -62,16 +59,17 @@ export function create_remote_login_window_host(): RemoteAuthHost & {
       signal?.removeEventListener("abort", on_abort);
       resolve(value);
     };
+    // 先写终态再关窗：close 触发的 closed 回调随后只会命中 settled 分支。
+    const finish = (value: RemoteAuthHostResult): void => {
+      settle(value);
+      if (!current.isDestroyed()) current.close();
+    };
     const on_abort = (): void => {
-      current?.close();
-      settle({ status: "cancelled" });
+      finish({ status: "cancelled" });
     };
     const poll_once = (): void => {
-      void refresh_once(refresh_url, operation.origin).then((outcome) => {
-        if (outcome.status === "succeeded") {
-          current?.close();
-          settle(outcome);
-        }
+      void refresh_once(operation.refresh_url, operation.origin).then((outcome) => {
+        if (outcome.status === "succeeded") finish(outcome);
       });
     };
 
@@ -101,17 +99,14 @@ export function create_remote_login_window_host(): RemoteAuthHost & {
         poll = setInterval(poll_once, LOGIN_POLL_INTERVAL_MS);
         poll.unref?.();
         timeout = setTimeout(() => {
-          current.close();
-          settle({ status: "timeout" });
+          finish({ status: "timeout" });
         }, LOGIN_WINDOW_TIMEOUT_MS);
         timeout.unref?.();
       })
-      .catch((error: unknown) => {
-        // 页面加载失败直接结算，让上层以普通远端失败提示。
-        settle({ status: "unavailable" });
-        throw error;
-      })
-      .catch(() => undefined);
+      .catch(() => {
+        // 页面加载失败也结束本次尝试并关闭窗口，避免遗留不可见窗口。
+        finish({ status: "unavailable" });
+      });
     return promise;
   }
 

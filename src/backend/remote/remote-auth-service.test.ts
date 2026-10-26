@@ -129,7 +129,7 @@ describe("RemoteAuthService", () => {
           error: null,
         },
       },
-      login: { running: false, origin: null, started_at: null },
+      login: { status: "idle", origin: null, started_at: null },
     });
   });
 
@@ -195,6 +195,7 @@ describe("RemoteAuthService login", () => {
       {
         kind: "open_remote_login_window",
         url: "https://n.novelia.cc/?app=n&theme=light",
+        refresh_url: "https://auth.novelia.cc/api/v1/auth/refresh?app=n",
         origin: DEFAULT_NOVELIA_ORIGIN,
       },
       expect.any(AbortSignal),
@@ -205,10 +206,9 @@ describe("RemoteAuthService login", () => {
       cookie: "s=1",
       source: "login",
     });
-    expect(service.snapshot().login).toEqual({
-      running: false,
-      origin: null,
-      started_at: null,
+    expect(service.snapshot().login).toMatchObject({
+      status: "succeeded",
+      origin: DEFAULT_NOVELIA_ORIGIN,
     });
   });
 
@@ -220,7 +220,7 @@ describe("RemoteAuthService login", () => {
     });
   });
 
-  it("取消登录按空闲快照结算且不落盘凭据", async () => {
+  it("取消登录以 cancelled 终态结算且不落盘凭据", async () => {
     const auth_host = vi.fn(
       async (_operation: unknown, signal?: AbortSignal): Promise<RemoteAuthHostResult> =>
         await new Promise<RemoteAuthHostResult>((_resolve, reject) => {
@@ -230,12 +230,55 @@ describe("RemoteAuthService login", () => {
     const { service, credentials } = create_service({ auth_host });
 
     const pending = service.login({});
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await service.cancel_login();
+    await vi.waitFor(() => {
+      expect(service.snapshot().login.status).toBe("running");
+    });
+    const cancelled = await service.cancel_login();
+    expect(cancelled.login).toMatchObject({ status: "cancelled", origin: DEFAULT_NOVELIA_ORIGIN });
     const snapshot = await pending;
-    expect(snapshot.login).toEqual({ running: false, origin: null, started_at: null });
+    expect(snapshot.login.status).toBe("cancelled");
     expect(credentials.save_token).not.toHaveBeenCalled();
     expect(auth_host).toHaveBeenCalledOnce();
+  });
+
+  it("宿主返回超时与不可用时按各自终态保留在快照里", async () => {
+    for (const status of ["timeout", "unavailable", "unauthorized"] as const) {
+      const auth_host = vi.fn(async (): Promise<RemoteAuthHostResult> => ({ status }));
+      const { service, credentials } = create_service({ auth_host });
+
+      const snapshot = await service.login({});
+      expect(snapshot.login).toMatchObject({
+        status: status === "unauthorized" ? "unavailable" : status,
+        origin: DEFAULT_NOVELIA_ORIGIN,
+      });
+      expect(credentials.save_token).not.toHaveBeenCalled();
+    }
+  });
+
+  it("登录过程向订阅者发布 running 与终态快照", async () => {
+    const auth_host = vi.fn(async (): Promise<RemoteAuthHostResult> => ({
+      status: "succeeded",
+      token: "t.a.b",
+      cookie: "",
+    }));
+    const { service } = create_service({ auth_host });
+    const statuses: string[] = [];
+    service.subscribe((snapshot) => statuses.push(snapshot.login.status));
+
+    await service.login({});
+
+    expect(statuses).toEqual(["running", "succeeded"]);
+  });
+
+  it("桥接写入凭据后主动发布认证快照", () => {
+    const { service } = create_service();
+    const listener = vi.fn();
+    service.subscribe(listener);
+
+    service.notify_credentials_changed();
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(service.snapshot());
   });
 });
 

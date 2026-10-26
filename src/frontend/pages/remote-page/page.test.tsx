@@ -54,7 +54,7 @@ const AUTH_SNAPSHOT = {
     },
   },
   login: {
-    running: false,
+    status: "idle",
     origin: null,
     started_at: null,
   },
@@ -207,6 +207,18 @@ describe("RemotePage", () => {
     return container;
   }
 
+  /** 事件监听器按事件名读取，避免测试依赖注册顺序。 */
+  function get_listener(name: string): (event: MessageEvent<string>) => void {
+    const listener = event_source.addEventListener.mock.calls.find((call) => call[0] === name)?.[1];
+    if (typeof listener !== "function") throw new Error(`未订阅事件：${name}`);
+    return listener as (event: MessageEvent<string>) => void;
+  }
+
+  /** SSE 推送按后端事件格式包装。 */
+  function emit(name: string, payload: unknown): void {
+    get_listener(name)(new MessageEvent(name, { data: JSON.stringify(payload) }));
+  }
+
   it("展示绑定与凭据，并完成预览、行级对齐和应用同步", async () => {
     api_fetch_mock.mockImplementation(async (path: string) => {
       if (path === "/api/remote/auth/status") return { auth: AUTH_SNAPSHOT };
@@ -285,6 +297,7 @@ describe("RemotePage", () => {
     expect(page.textContent).toContain("测试小说");
     expect(page.textContent).toContain("尾号 abcd");
     expect(page.textContent).toContain("127.0.0.1:7331");
+    expect(page.textContent).toContain("已登录");
 
     await act(async () => {
       get_button_by_text(page, "预览同步").click();
@@ -410,6 +423,11 @@ describe("RemotePage", () => {
                 expired: false,
               },
             ],
+            login: {
+              status: "succeeded",
+              origin: "https://n.novelia.cc",
+              started_at: "2026-10-03T12:00:00",
+            },
           },
         };
       }
@@ -428,30 +446,59 @@ describe("RemotePage", () => {
     });
     expect(push_toast_mock).toHaveBeenCalledWith("success", "登录成功，凭据已保存");
     expect(page.textContent).toContain("尾号 log1");
+    expect(page.textContent).toContain("已登录");
+  });
+
+  it.each([
+    ["cancelled", "info", "已取消登录"],
+    ["timeout", "warning", "登录超时，请重试"],
+    ["unavailable", "warning", "登录未完成，请重试"],
+  ] as const)("登录终态 %s 按实际结果提示", async (status, level, message) => {
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/auth/status") return { auth: AUTH_SNAPSHOT };
+      if (path === "/api/remote/source/read") return { source: SOURCE_SNAPSHOT };
+      if (path === "/api/remote/workspace/snapshot") {
+        return { remote_workspace: WORKSPACE_SNAPSHOT };
+      }
+      if (path === "/api/remote/auth/login") {
+        return {
+          auth: {
+            ...AUTH_SNAPSHOT,
+            login: {
+              status,
+              origin: "https://n.novelia.cc",
+              started_at: "2026-10-03T12:00:00",
+            },
+          },
+        };
+      }
+
+      return {};
+    });
+
+    const page = await mount_page();
+    await act(async () => {
+      get_button_by_text(page, "登录站点").click();
+    });
+
+    expect(push_toast_mock).toHaveBeenCalledWith(level, message);
+    expect(push_toast_mock).not.toHaveBeenCalledWith("success", "登录成功，凭据已保存");
   });
 
   it("登录中状态由事件流推送并可取消", async () => {
     const page = await mount_page();
-    const auth_listener = event_source.addEventListener.mock.calls.find(
-      (call) => call[0] === "remote_auth.snapshot_changed",
-    )?.[1];
-    if (typeof auth_listener !== "function") throw new Error("未订阅登录状态事件。");
 
     await act(async () => {
-      auth_listener(
-        new MessageEvent("remote_auth.snapshot_changed", {
-          data: JSON.stringify({
-            auth: {
-              ...AUTH_SNAPSHOT,
-              login: {
-                running: true,
-                origin: "https://n.novelia.cc",
-                started_at: "2026-10-03T12:00:00",
-              },
-            },
-          }),
-        }),
-      );
+      emit("remote_auth.snapshot_changed", {
+        auth: {
+          ...AUTH_SNAPSHOT,
+          login: {
+            status: "running",
+            origin: "https://n.novelia.cc",
+            started_at: "2026-10-03T12:00:00",
+          },
+        },
+      });
     });
 
     expect(page.textContent).toContain("登录窗口已打开");
@@ -459,7 +506,14 @@ describe("RemotePage", () => {
     api_fetch_mock.mockImplementation(async (path: string) => {
       if (path === "/api/remote/auth/login/cancel") {
         return {
-          auth: { ...AUTH_SNAPSHOT, login: { running: false, origin: null, started_at: null } },
+          auth: {
+            ...AUTH_SNAPSHOT,
+            login: {
+              status: "cancelled",
+              origin: "https://n.novelia.cc",
+              started_at: "2026-10-03T12:00:00",
+            },
+          },
         };
       }
       return {};
@@ -470,5 +524,91 @@ describe("RemotePage", () => {
 
     expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/auth/login/cancel", {});
     expect(page.textContent).not.toContain("登录窗口已打开");
+  });
+
+  it("切换桥接期间显示进行态并在完成后提示", async () => {
+    const pending = Promise.withResolvers<{ auth: Record<string, unknown> }>();
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/auth/status") return { auth: AUTH_SNAPSHOT };
+      if (path === "/api/remote/source/read") return { source: SOURCE_SNAPSHOT };
+      if (path === "/api/remote/workspace/snapshot") {
+        return { remote_workspace: WORKSPACE_SNAPSHOT };
+      }
+      if (path === "/api/remote/auth/bridge") return pending.promise;
+
+      return {};
+    });
+
+    const page = await mount_page();
+    await act(async () => {
+      get_button_by_text(page, "关闭桥接").click();
+    });
+
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/auth/bridge", { enabled: false });
+    expect(page.textContent).toContain("正在关闭桥接 …");
+
+    await act(async () => {
+      pending.resolve({
+        auth: {
+          ...AUTH_SNAPSHOT,
+          bridge: {
+            enabled: false,
+            status: { running: false, port: null, address: null, error: null },
+          },
+        },
+      });
+      await pending.promise;
+    });
+
+    expect(push_toast_mock).toHaveBeenCalledWith("success", "桥接已关闭");
+    expect(page.textContent).toContain("桥接未监听");
+    expect(page.textContent).toContain("开启桥接");
+  });
+
+  it("桥接推送新凭据时只提示一次", async () => {
+    const page = await mount_page();
+    const bridged = {
+      ...AUTH_SNAPSHOT,
+      origins: [
+        {
+          origin: "https://n.novelia.cc",
+          token_tail: "brdg",
+          updated_at: "2026-10-04T09:00:00",
+          source: "bridge",
+          expired: false,
+        },
+      ],
+    };
+
+    await act(async () => {
+      emit("remote_auth.snapshot_changed", { auth: bridged });
+      emit("remote_auth.snapshot_changed", { auth: bridged });
+    });
+
+    expect(push_toast_mock).toHaveBeenCalledTimes(1);
+    expect(push_toast_mock).toHaveBeenCalledWith("success", "桥接已接收站点凭据");
+    expect(page.textContent).toContain("尾号 brdg");
+  });
+
+  it("事件流重连后补读快照", async () => {
+    await mount_page();
+    const open_listener = event_source.addEventListener.mock.calls.find(
+      (call) => call[0] === "open",
+    )?.[1];
+    if (typeof open_listener !== "function") throw new Error("未订阅连接事件。");
+
+    api_fetch_mock.mockClear();
+    await act(async () => {
+      open_listener();
+    });
+    expect(api_fetch_mock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      open_listener();
+    });
+
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/auth/status", {});
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/source/read", {});
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/workspace/snapshot", {});
   });
 });
