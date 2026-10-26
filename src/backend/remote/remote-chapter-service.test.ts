@@ -54,6 +54,21 @@ function task(paragraphs: string[]): RemoteChapterTask {
   };
 }
 
+function read_task(options?: {
+  paragraphs?: string[];
+  old_paragraph_zh?: string[] | null;
+  glossary_id?: string;
+  old_glossary_id?: string | null;
+}): RemoteChapterTask {
+  return {
+    paragraph_jp: options?.paragraphs ?? ["第一段", "第二段", "第三段"],
+    old_paragraph_zh: options?.old_paragraph_zh ?? null,
+    glossary_id: options?.glossary_id ?? "g2",
+    glossary: {},
+    old_glossary_id: options?.old_glossary_id ?? null,
+  };
+}
+
 interface Fixture {
   service: RemoteChapterService;
   read_workspace: ReturnType<typeof vi.fn>;
@@ -265,6 +280,168 @@ describe("RemoteChapterService", () => {
     const result = await fixture.service.import_chapter({ chapter_id: "c1" });
     expect(result).toMatchObject({ imported: true, paragraph_count: 1 });
     expect(fixture.refresh).toHaveBeenCalledWith("https://n.novelia.cc");
+    expect(attempts).toBe(2);
+  });
+
+  it("纯读取返回原文与站点旧译文，固定 sync=false", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: (_ref, _chapter, options) => {
+        expect(options).toEqual({ sync: false });
+        return read_task({
+          paragraphs: ["第一段", "", "第三段"],
+          old_paragraph_zh: ["第一段译文", "", ""],
+          glossary_id: "g2",
+          old_glossary_id: "g1",
+        });
+      },
+    });
+    const result = await fixture.service.read_chapter({ chapter_id: "c2" });
+    expect(result).toMatchObject({
+      chapter_id: "c2",
+      volume_id: null,
+      title: "第二章",
+      translated: false,
+      total_paragraphs: 3,
+      glossary_id: "g2",
+      old_glossary_id: "g1",
+      translation_current: false,
+    });
+    expect(result.paragraphs).toEqual([
+      { n: 1, jp: "第一段", zh: "第一段译文" },
+      { n: 2, jp: "", zh: "" },
+      { n: 3, jp: "第三段", zh: "" },
+    ]);
+    expect(fixture.import_under_agent).not.toHaveBeenCalled();
+    expect(fixture.staged_files()).toEqual([]);
+  });
+
+  it("没有站点旧译文时 zh 为 null 且 translation_current 为 false", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task({ old_paragraph_zh: null, old_glossary_id: null }),
+    });
+    const result = await fixture.service.read_chapter({ chapter_id: "c1" });
+    expect(result.paragraphs).toEqual([
+      { n: 1, jp: "第一段", zh: null },
+      { n: 2, jp: "第二段", zh: null },
+      { n: 3, jp: "第三段", zh: null },
+    ]);
+    expect(result.translation_current).toBe(false);
+  });
+
+  it("术语表一致时 translation_current 为 true", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task({ glossary_id: "g1", old_glossary_id: "g1" }),
+    });
+    const result = await fixture.service.read_chapter({ chapter_id: "c1" });
+    expect(result.translation_current).toBe(true);
+  });
+
+  it("段落分页保留原始段号并计算 next_offset", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task({ paragraphs: ["一", "二", "三", "四", "五"] }),
+    });
+    const page = await fixture.service.read_chapter({ chapter_id: "c1", offset: 2, limit: 2 });
+    expect(page.offset).toBe(2);
+    expect(page.paragraphs.map((paragraph) => paragraph.n)).toEqual([3, 4]);
+    expect(page.next_offset).toBe(4);
+    expect(page.truncated).toBe(true);
+    const last = await fixture.service.read_chapter({ chapter_id: "c1", offset: 4 });
+    expect(last.paragraphs.map((paragraph) => paragraph.n)).toEqual([5]);
+    expect(last.next_offset).toBeNull();
+    expect(last.truncated).toBe(false);
+  });
+
+  it("字符预算在段落之间截断，超长首段仍返回", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () =>
+        read_task({
+          paragraphs: ["很长".repeat(20), "短一", "短二"],
+          old_paragraph_zh: ["翻译".repeat(20), "", ""],
+        }),
+    });
+    const result = await fixture.service.read_chapter({ chapter_id: "c1", max_chars: 80 });
+    expect(result.paragraphs.map((paragraph) => paragraph.n)).toEqual([1]);
+    expect(result.next_offset).toBe(1);
+    expect(result.truncated).toBe(true);
+    const rest = await fixture.service.read_chapter({
+      chapter_id: "c1",
+      offset: 1,
+      max_chars: 90,
+    });
+    expect(rest.paragraphs.map((paragraph) => paragraph.n)).toEqual([2, 3]);
+    expect(rest.truncated).toBe(false);
+  });
+
+  it("offset 越界返回空页而不是章节错误", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task(),
+    });
+    const result = await fixture.service.read_chapter({ chapter_id: "c1", offset: 99 });
+    expect(result.total_paragraphs).toBe(3);
+    expect(result.paragraphs).toEqual([]);
+    expect(result.next_offset).toBeNull();
+    expect(result.truncated).toBe(false);
+  });
+
+  it("纯读取沿用绑定、消歧与未找到错误", async () => {
+    const fixture = create_service({
+      binding: WENKU_BINDING,
+      chapters: [
+        { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一卷 001.txt", translated: true },
+        { chapter_id: "001.txt", volume_id: "v2.txt", title: "第二卷 001.txt", translated: false },
+      ],
+      tasks: () => read_task(),
+    });
+    await expect(fixture.service.read_chapter({ chapter_id: "001.txt" })).rejects.toThrow(
+      expect.objectContaining({ code: "request.validation_failed" }),
+    );
+    const resolved = await fixture.service.read_chapter({
+      chapter_id: "001.txt",
+      volume_id: "v2.txt",
+    });
+    expect(resolved).toMatchObject({ volume_id: "v2.txt", title: "第二卷 001.txt" });
+    await expect(fixture.service.read_chapter({ chapter_id: "missing" })).rejects.toThrow(
+      expect.objectContaining({ code: "remote.chapter_not_found" }),
+    );
+  });
+
+  it("未绑定时拒绝纯读取", async () => {
+    const fixture = create_service({
+      binding: null,
+      chapters: [],
+      tasks: () => read_task(),
+    });
+    await expect(fixture.service.read_chapter({ chapter_id: "c1" })).rejects.toThrow(
+      expect.objectContaining({ code: "remote.source_not_bound" }),
+    );
+  });
+
+  it("凭据续期同样适用于纯读取", async () => {
+    let attempts = 0;
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => {
+        attempts += 1;
+        if (attempts === 1) throw new AppError("remote.auth_rejected");
+        return read_task();
+      },
+      refresh_result: true,
+    });
+    const result = await fixture.service.read_chapter({ chapter_id: "c1" });
+    expect(result.total_paragraphs).toBe(3);
     expect(attempts).toBe(2);
   });
 

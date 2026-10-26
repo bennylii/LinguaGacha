@@ -75,6 +75,10 @@ import {
   create_agent_novel_chapter_import_tool,
   type AgentNovelChapterImportPort,
 } from "./tools/novel-chapter-import";
+import {
+  create_agent_novel_chapter_read_tool,
+  type AgentNovelChapterReadPort,
+} from "./tools/novel-chapter-read";
 import type { AgentWorkspacePort } from "./workspace/service";
 import { create_agent_workspace_run_tool } from "./tools/workspace-run";
 import { format_agent_skills_for_system_prompt } from "./agent-skills";
@@ -119,6 +123,7 @@ type AgentServiceOptions = {
   webSearch: AgentWebSearchPort | undefined;
   novelChapters: AgentNovelChaptersPort | undefined;
   novelChapterImport: AgentNovelChapterImportPort | undefined;
+  novelChapterRead: AgentNovelChapterReadPort | undefined;
   workspace: AgentWorkspacePort;
   images: Pick<AgentImageService, "prepare" | "clear">;
   logManager: Pick<LogManager, "append">;
@@ -165,6 +170,7 @@ export class AgentService {
   private readonly web_search: AgentWebSearchPort | undefined;
   private readonly novel_chapters: AgentNovelChaptersPort | undefined;
   private readonly novel_chapter_import: AgentNovelChapterImportPort | undefined;
+  private readonly novel_chapter_read: AgentNovelChapterReadPort | undefined;
   private readonly workspace: AgentWorkspacePort;
   private readonly images: AgentServiceOptions["images"];
   private readonly log_manager: AgentServiceOptions["logManager"];
@@ -217,6 +223,7 @@ export class AgentService {
     this.web_search = options.webSearch;
     this.novel_chapters = options.novelChapters;
     this.novel_chapter_import = options.novelChapterImport;
+    this.novel_chapter_read = options.novelChapterRead;
     this.workspace = options.workspace;
     this.images = options.images;
     this.log_manager = options.logManager;
@@ -1454,6 +1461,17 @@ export class AgentService {
               // 站点读取无需租约；导入使用 Agent 写串行，必须仍然持有当前执行。
               this.runtime_gate.assert_current_runtime(execution.lease, "agent");
               return this.novel_chapter_import!(request, signal);
+            }),
+          ]),
+      ...(this.novel_chapter_read === undefined
+        ? []
+        : [
+            create_agent_novel_chapter_read_tool((request, signal) => {
+              // 纯读取不写工程：只需要当前执行与已加载工程，不需要写租约或审批。
+              this.require_execution();
+              this.session_state.require_loaded_project_path();
+              signal.throwIfAborted();
+              return this.novel_chapter_read!(request, signal);
             }),
           ]),
     ];

@@ -1,13 +1,26 @@
 import { AppError } from "../../shared/error/app-error";
 import type { ProjectWriteResult } from "../../shared/project-event";
 import { call_with_credential_refresh } from "./credential-refresh";
-import type { NoveliaClient, RemoteWorkspace, RemoteWorkspaceChapter } from "./novelia-client";
-import { build_chapter_filename, parse_novel_ref, REMOTE_NOVEL_MAX_BYTES } from "./novelia-source";
+import type {
+  NoveliaClient,
+  RemoteChapterTask,
+  RemoteWorkspace,
+  RemoteWorkspaceChapter,
+} from "./novelia-client";
+import {
+  build_chapter_filename,
+  parse_novel_ref,
+  REMOTE_NOVEL_MAX_BYTES,
+  type RemoteNovelRef,
+} from "./novelia-source";
 import type { NovelSourceService } from "./novel-source-service";
 import type { RemoteSourceBinding } from "./remote-source";
 
 const CHAPTER_LIST_DEFAULT_LIMIT = 50;
 const CHAPTER_LIST_MAX_LIMIT = 100;
+/** 单章读取的段落分页与字符预算；分页只裁剪模型回执，不改变章节事实。 */
+export const CHAPTER_READ_LIMITS = Object.freeze({ default: 100, max: 100 });
+export const CHAPTER_READ_CHAR_BUDGET = Object.freeze({ default: 12000, max: 24000 });
 
 /** 站点目录中的一章；`index` 是站点目录顺序，从 1 开始。 */
 export interface RemoteCachedChapter {
@@ -44,6 +57,39 @@ export interface RemoteChapterImportResult {
   char_count: number;
   translated: boolean;
   reason?: "chapter_empty";
+}
+
+export interface RemoteChapterReadRequest {
+  chapter_id: string;
+  /** 文库章节所属分卷；章节 ID 在多卷间不唯一时必须提供。 */
+  volume_id?: string | null;
+  offset?: number;
+  limit?: number;
+  max_chars?: number;
+}
+
+/** 站点旧译文按段落位置与原文对齐；本章没有旧译文时 `zh` 为 null。 */
+export interface RemoteChapterReadParagraph {
+  n: number;
+  jp: string;
+  zh: string | null;
+}
+
+export interface RemoteChapterReadResult {
+  chapter_id: string;
+  volume_id: string | null;
+  title: string;
+  translated: boolean;
+  total_paragraphs: number;
+  offset: number;
+  paragraphs: RemoteChapterReadParagraph[];
+  glossary_id: string;
+  old_glossary_id: string | null;
+  /** 旧译文所用术语表是否与当前一致；不表示译文内容本身是最新的。 */
+  translation_current: boolean;
+  /** 下一次读取应使用的段落偏移；已读完时为 null。 */
+  next_offset: number | null;
+  truncated: boolean;
 }
 
 /** Agent 工具在自身运行租约内导入暂存文本的窄端口。 */
@@ -132,14 +178,10 @@ export class RemoteChapterService {
         public_details: { field: "chapter_id" },
       });
     }
-    const binding = await this.require_binding();
-    const ref = parse_novel_ref(binding.url);
-    const workspace = await call_with_credential_refresh(this.refresh_credentials, ref.origin, () =>
-      this.client.read_workspace(ref, signal),
-    );
-    const chapter = this.resolve_chapter(workspace, chapter_id, request.volume_id ?? null);
-    const task = await call_with_credential_refresh(this.refresh_credentials, ref.origin, () =>
-      this.client.read_chapter_task(ref, chapter, { sync: false }, signal),
+    const { chapter, task, file_base_title } = await this.read_bound_chapter_task(
+      chapter_id,
+      request.volume_id ?? null,
+      signal,
     );
     const base = {
       chapter_id: chapter.chapter_id,
@@ -164,7 +206,7 @@ export class RemoteChapterService {
         diagnostic_context: { reason: "chapter_too_large", chapter_id },
       });
     }
-    const file_name = build_chapter_filename(binding.title, chapter.title);
+    const file_name = build_chapter_filename(file_base_title, chapter.title);
     const staged = await this.sources.stage_text(file_name, text);
     try {
       const imported = await this.importer.import_source_file_under_agent(
@@ -181,6 +223,68 @@ export class RemoteChapterService {
     } finally {
       await staged.dispose();
     }
+  }
+
+  /**
+   * 纯读取指定章节的站点缓存原文与旧译文，不导入文件、不写工程、不需要租约。
+   */
+  public async read_chapter(
+    request: RemoteChapterReadRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteChapterReadResult> {
+    signal?.throwIfAborted();
+    const chapter_id = request.chapter_id.trim();
+    if (chapter_id === "") {
+      throw new AppError("request.validation_failed", {
+        public_details: { field: "chapter_id" },
+      });
+    }
+    const { chapter, task } = await this.read_bound_chapter_task(
+      chapter_id,
+      request.volume_id ?? null,
+      signal,
+    );
+    const page = paginate_chapter_paragraphs(task.paragraph_jp, task.old_paragraph_zh, {
+      offset: request.offset ?? undefined,
+      limit: request.limit ?? undefined,
+      max_chars: request.max_chars ?? undefined,
+    });
+    return {
+      chapter_id: chapter.chapter_id,
+      volume_id: chapter.volume_id,
+      title: chapter.title,
+      translated: chapter.translated,
+      total_paragraphs: task.paragraph_jp.length,
+      ...page,
+      glossary_id: task.glossary_id,
+      old_glossary_id: task.old_glossary_id,
+      // 站点以术语表身份标记译文代次；没有旧译文时不存在“当前”状态。
+      translation_current:
+        task.old_glossary_id !== null && task.old_glossary_id === task.glossary_id,
+    };
+  }
+
+  /** 目录解析与任务读取是导入和纯读取的公共前置；凭据拒绝时先续期再重试一次。 */
+  private async read_bound_chapter_task(
+    chapter_id: string,
+    volume_id: string | null,
+    signal?: AbortSignal,
+  ): Promise<{
+    ref: RemoteNovelRef;
+    chapter: RemoteWorkspaceChapter;
+    task: RemoteChapterTask;
+    file_base_title: string;
+  }> {
+    const binding = await this.require_binding();
+    const ref = parse_novel_ref(binding.url);
+    const workspace = await call_with_credential_refresh(this.refresh_credentials, ref.origin, () =>
+      this.client.read_workspace(ref, signal),
+    );
+    const chapter = this.resolve_chapter(workspace, chapter_id, volume_id);
+    const task = await call_with_credential_refresh(this.refresh_credentials, ref.origin, () =>
+      this.client.read_chapter_task(ref, chapter, { sync: false }, signal),
+    );
+    return { ref, chapter, task, file_base_title: binding.title };
   }
 
   /** 章节身份只能来自站点目录；文库同名章节 ID 需要显式分卷消歧。 */
@@ -216,4 +320,48 @@ function build_chapter_not_found(chapter_id: string, volume_id: string | null): 
   return new AppError("remote.chapter_not_found", {
     public_details: { chapter_id, ...(volume_id === null ? {} : { volume_id }) },
   });
+}
+
+/**
+ * 按段落分页并施加字符预算；保留原始段号与空段，不截断单段正文。
+ * 首段自身超预算时仍返回，避免超长段落永远无法读取。
+ */
+function paginate_chapter_paragraphs(
+  paragraph_jp: readonly string[],
+  paragraph_zh: readonly string[] | null,
+  request: {
+    offset?: number | undefined;
+    limit?: number | undefined;
+    max_chars?: number | undefined;
+  },
+): {
+  offset: number;
+  paragraphs: RemoteChapterReadParagraph[];
+  next_offset: number | null;
+  truncated: boolean;
+} {
+  const total = paragraph_jp.length;
+  const offset = Math.min(Math.max(request.offset ?? 0, 0), total);
+  const limit = Math.min(
+    Math.max(request.limit ?? CHAPTER_READ_LIMITS.default, 1),
+    CHAPTER_READ_LIMITS.max,
+  );
+  const max_chars = Math.min(
+    Math.max(request.max_chars ?? CHAPTER_READ_CHAR_BUDGET.default, 1),
+    CHAPTER_READ_CHAR_BUDGET.max,
+  );
+  const paragraphs: RemoteChapterReadParagraph[] = [];
+  let used_chars = 0;
+  let cursor = offset;
+  while (cursor < total && paragraphs.length < limit) {
+    const jp = paragraph_jp[cursor]!;
+    const zh = paragraph_zh === null ? null : (paragraph_zh[cursor] ?? "");
+    const cost = jp.length + (zh?.length ?? 0);
+    if (paragraphs.length > 0 && used_chars + cost > max_chars) break;
+    paragraphs.push({ n: cursor + 1, jp, zh });
+    used_chars += cost;
+    cursor += 1;
+  }
+  const next_offset = cursor < total ? cursor : null;
+  return { offset, paragraphs, next_offset, truncated: next_offset !== null };
 }
