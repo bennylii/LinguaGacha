@@ -147,6 +147,7 @@ export const de_de_remote_page = {
     },
     chapter_message: {
       local_translation_incomplete: "Lokale Übersetzung unvollständig; übersprungen",
+      identical_to_remote_translation: "Identisch mit der vorhandenen Übersetzung der Seite; nicht erneut hochgeladen",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_remote_page>;

@@ -145,6 +145,7 @@ export const en_us_remote_page = {
     },
     chapter_message: {
       local_translation_incomplete: "Local translation incomplete; skipped",
+      identical_to_remote_translation: "Identical to the site's existing translation; not re-uploaded",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_remote_page>;

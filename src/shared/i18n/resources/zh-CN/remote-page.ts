@@ -136,6 +136,7 @@ export const zh_cn_remote_page = {
     },
     chapter_message: {
       local_translation_incomplete: "本地译文不完整，已跳过",
+      identical_to_remote_translation: "与站点已有译文一致，未重复上传",
     },
   },
 } as const;

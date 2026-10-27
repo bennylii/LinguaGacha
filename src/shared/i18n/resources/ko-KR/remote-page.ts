@@ -143,6 +143,7 @@ export const ko_kr_remote_page = {
     },
     chapter_message: {
       local_translation_incomplete: "로컬 번역이 불완전하여 건너뜀",
+      identical_to_remote_translation: "사이트의 기존 번역과 동일하여 다시 업로드하지 않았습니다",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_remote_page>;

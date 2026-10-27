@@ -144,6 +144,7 @@ export const ja_jp_remote_page = {
     },
     chapter_message: {
       local_translation_incomplete: "ローカル訳が不完全なためスキップしました",
+      identical_to_remote_translation: "サイトの既存訳と一致するため再アップロードしませんでした",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_remote_page>;

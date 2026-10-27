@@ -239,6 +239,84 @@ describe("RemoteWorkspaceSubmissionService", () => {
     }
   });
 
+  it("本地译文与站点旧译逐段一致时跳过该章", async () => {
+    const fixture = await create_fixture({
+      workspace: workspace(1),
+      tasks: [task({ old_paragraph_zh: ["站点一 ", "站点二"] })],
+      items: [
+        { src: "本文一", dst: "站点一", status: "PROCESSED" },
+        { src: "本文二", dst: "站点二", status: "PROCESSED" },
+      ],
+    });
+    try {
+      await fixture.service.start();
+      await wait_for_status(fixture.service, "completed");
+
+      // 内容与站点一致的上传不改变读者可见内容，不发出站点写请求。
+      expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+      expect(fixture.service.get_snapshot()).toMatchObject({
+        status: "completed",
+        totals: { chapters: 1, uploaded: 0, skipped: 1, failed: 0 },
+        chapters: [
+          { state: "skipped", ready: 2, missing: 0, message: "identical_to_remote_translation" },
+        ],
+      });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("本地译文与站点旧译存在差异时照常上传", async () => {
+    const fixture = await create_fixture({
+      workspace: workspace(1),
+      tasks: [task({ old_paragraph_zh: ["站点一", "旧译二"] })],
+      items: [
+        { src: "本文一", dst: "站点一", status: "PROCESSED" },
+        { src: "本文二", dst: "工程二", status: "PROCESSED" },
+      ],
+    });
+    try {
+      await fixture.service.start();
+      await wait_for_status(fixture.service, "completed");
+
+      expect(fixture.write_chapter_translation).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ chapter_id: "chapter-1" }),
+        { glossary_id: "glossary-1", paragraphs_zh: ["站点一", "工程二"] },
+        expect.any(AbortSignal),
+      );
+      expect(fixture.service.get_snapshot()).toMatchObject({
+        status: "completed",
+        totals: { chapters: 1, uploaded: 1, skipped: 0, failed: 0 },
+        chapters: [{ state: "uploaded", ready: 2, missing: 0, message: null }],
+      });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("站点旧译包含缺失标记时不判为一致", async () => {
+    const fixture = await create_fixture({
+      workspace: workspace(1),
+      tasks: [task({ old_paragraph_zh: ["gpt翻译缺失。", "gpt翻译缺失。"] })],
+      items: [
+        { src: "本文一", dst: "gpt翻译缺失。", status: "PROCESSED" },
+        { src: "本文二", dst: "gpt翻译缺失。", status: "PROCESSED" },
+      ],
+    });
+    try {
+      await fixture.service.start();
+      await wait_for_status(fixture.service, "completed");
+
+      expect(fixture.write_chapter_translation).toHaveBeenCalledTimes(1);
+      expect(fixture.service.get_snapshot()).toMatchObject({
+        totals: { chapters: 1, uploaded: 1, skipped: 0, failed: 0 },
+      });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
   it("未完成的本地译文不参与上传", async () => {
     const fixture = await create_fixture({
       workspace: workspace(1),

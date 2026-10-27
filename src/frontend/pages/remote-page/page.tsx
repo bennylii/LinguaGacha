@@ -1016,9 +1016,10 @@ export function RemotePage(): JSX.Element {
                       {chapter.message === null
                         ? ""
                         : ` · ${
-                            chapter.message === "local_translation_incomplete"
+                            chapter.message === "local_translation_incomplete" ||
+                            chapter.message === "identical_to_remote_translation"
                               ? t(
-                                  "remote_page.workspace.chapter_message.local_translation_incomplete",
+                                  `remote_page.workspace.chapter_message.${chapter.message}`,
                                 )
                               : t("remote_page.workspace.chapter_error").replace(
                                   "{ERROR}",

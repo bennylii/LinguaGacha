@@ -5,6 +5,7 @@ import type { ProjectSessionState } from "../project/project-session-state";
 import type { NoveliaClient, RemoteWorkspaceChapter } from "./novelia-client";
 import { call_with_credential_refresh } from "./credential-refresh";
 import {
+  is_missing_remote_translation,
   normalize_match_line,
   parse_novel_url,
   split_remote_document,
@@ -263,6 +264,16 @@ export class RemoteWorkspaceSubmissionService {
         missing += 1;
       }
     }
+    // 站点已有旧译时，逐段与旧译比较：全部一致说明上传只是把站点内容原样写回，
+    // 对读者没有变化（epub 官方旧译的说明页、目录页就是这种情况），按跳过处理。
+    if (task.old_paragraph_zh !== null && missing === 0 && same_as_old_translation(paragraphs_zh, task.old_paragraph_zh)) {
+      return {
+        uploaded: false,
+        ready: paragraphs.length,
+        missing: 0,
+        message: "identical_to_remote_translation",
+      };
+    }
     const ready = paragraphs.length - missing;
     if (missing > 0) {
       return {
@@ -476,4 +487,20 @@ function map_paragraph_items(
     }
   }
   return result;
+}
+
+/**
+ * 上传内容是否与站点旧译逐段一致；空段不参与比较，长度不同视为有差异。
+ * 旧译里的站点缺失标记不是真实译文，遇标记即视为不一致。
+ */
+function same_as_old_translation(
+  paragraphs_zh: readonly string[],
+  old_paragraph_zh: readonly string[],
+): boolean {
+  if (paragraphs_zh.length !== old_paragraph_zh.length) return false;
+  return paragraphs_zh.every((paragraph, index) => {
+    const old_paragraph = old_paragraph_zh[index] ?? "";
+    if (old_paragraph.trim() === "") return false;
+    return !is_missing_remote_translation(old_paragraph) && old_paragraph.trim() === paragraph.trim();
+  });
 }
