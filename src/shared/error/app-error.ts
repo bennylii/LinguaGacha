@@ -233,6 +233,11 @@ export const APP_ERROR_DEFINITIONS = {
     status: 404,
     severity: "expected",
   },
+  "remote.sync_unsupported": {
+    message: "Site-side sync only applies to web novels.",
+    status: 400,
+    severity: "expected",
+  },
 } as const satisfies Readonly<Record<string, AppErrorDefinition>>;
 
 export type AppErrorCode = keyof typeof APP_ERROR_DEFINITIONS;

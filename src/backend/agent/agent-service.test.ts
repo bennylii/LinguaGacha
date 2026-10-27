@@ -45,6 +45,7 @@ import type { AgentWebSearchPort } from "./tools/web-search";
 import type { AgentNovelChaptersPort } from "./tools/novel-chapters";
 import type { AgentNovelChapterImportPort } from "./tools/novel-chapter-import";
 import type { AgentNovelChapterReadPort } from "./tools/novel-chapter-read";
+import type { AgentNovelChapterSyncPort } from "./tools/novel-chapter-sync";
 import * as workspace_tools from "./tools/workspace-run";
 import { ProjectSessionState } from "../project/project-session-state";
 import { RuntimeOperationGate } from "../runtime-operation-gate";
@@ -2507,6 +2508,36 @@ describe("AgentService", () => {
 
     expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapter_read");
 
+    const with_sync = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      novel_chapters,
+      undefined,
+      undefined,
+      async () => ({
+        chapter_id: "c1",
+        volume_id: null,
+        title: "第一章",
+        translated: false,
+        total_paragraphs: 1,
+        offset: 0,
+        paragraphs: [{ n: 1, jp: "同步后的第一段", zh: null }],
+        glossary_id: "no glossary",
+        old_glossary_id: null,
+        translation_current: false,
+        next_offset: null,
+        truncated: false,
+      }),
+    );
+    await with_sync.service.send_message({ text: "同步章节", attachments: [] });
+    await wait_for_idle(with_sync.service);
+
+    expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapter_sync");
+
     const with_import = await create_service(
       true,
       undefined,
@@ -4853,6 +4884,7 @@ describe("AgentService", () => {
     novel_chapters?: AgentNovelChaptersPort,
     novel_chapter_import?: AgentNovelChapterImportPort,
     novel_chapter_read?: AgentNovelChapterReadPort,
+    novel_chapter_sync?: AgentNovelChapterSyncPort,
   ): Promise<{
     workspace: AgentWorkspacePort;
     service: AgentService;
@@ -5029,6 +5061,7 @@ describe("AgentService", () => {
       novelChapters: novel_chapters,
       novelChapterImport: novel_chapter_import,
       novelChapterRead: novel_chapter_read,
+      novelChapterSync: novel_chapter_sync,
       workspace: effective_workspace,
       logManager: { append: log_append },
       publish,

@@ -79,6 +79,10 @@ import {
   create_agent_novel_chapter_read_tool,
   type AgentNovelChapterReadPort,
 } from "./tools/novel-chapter-read";
+import {
+  create_agent_novel_chapter_sync_tool,
+  type AgentNovelChapterSyncPort,
+} from "./tools/novel-chapter-sync";
 import type { AgentWorkspacePort } from "./workspace/service";
 import { create_agent_workspace_run_tool } from "./tools/workspace-run";
 import { format_agent_skills_for_system_prompt } from "./agent-skills";
@@ -124,6 +128,7 @@ type AgentServiceOptions = {
   novelChapters: AgentNovelChaptersPort | undefined;
   novelChapterImport: AgentNovelChapterImportPort | undefined;
   novelChapterRead: AgentNovelChapterReadPort | undefined;
+  novelChapterSync: AgentNovelChapterSyncPort | undefined;
   workspace: AgentWorkspacePort;
   images: Pick<AgentImageService, "prepare" | "clear">;
   logManager: Pick<LogManager, "append">;
@@ -171,6 +176,7 @@ export class AgentService {
   private readonly novel_chapters: AgentNovelChaptersPort | undefined;
   private readonly novel_chapter_import: AgentNovelChapterImportPort | undefined;
   private readonly novel_chapter_read: AgentNovelChapterReadPort | undefined;
+  private readonly novel_chapter_sync: AgentNovelChapterSyncPort | undefined;
   private readonly workspace: AgentWorkspacePort;
   private readonly images: AgentServiceOptions["images"];
   private readonly log_manager: AgentServiceOptions["logManager"];
@@ -224,6 +230,7 @@ export class AgentService {
     this.novel_chapters = options.novelChapters;
     this.novel_chapter_import = options.novelChapterImport;
     this.novel_chapter_read = options.novelChapterRead;
+    this.novel_chapter_sync = options.novelChapterSync;
     this.workspace = options.workspace;
     this.images = options.images;
     this.log_manager = options.logManager;
@@ -1472,6 +1479,17 @@ export class AgentService {
               this.session_state.require_loaded_project_path();
               signal.throwIfAborted();
               return this.novel_chapter_read!(request, signal);
+            }),
+          ]),
+      ...(this.novel_chapter_sync === undefined
+        ? []
+        : [
+            create_agent_novel_chapter_sync_tool((request, signal) => {
+              // 站点抓取不写工程，但消耗站点资源：与纯读取一致只要求当前执行与已加载工程。
+              this.require_execution();
+              this.session_state.require_loaded_project_path();
+              signal.throwIfAborted();
+              return this.novel_chapter_sync!(request, signal);
             }),
           ]),
     ];

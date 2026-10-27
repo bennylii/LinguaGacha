@@ -87,6 +87,8 @@ export interface RemoteChapterReadResult {
   old_glossary_id: string | null;
   /** 旧译文所用术语表是否与当前一致；不表示译文内容本身是最新的。 */
   translation_current: boolean;
+  /** 仅网页小说且站点缓存为空时为 true：可用 `novel_chapter_sync` 触发站点抓取。 */
+  sync_available?: true;
   /** 下一次读取应使用的段落偏移；已读完时为 null。 */
   next_offset: number | null;
   truncated: boolean;
@@ -181,6 +183,7 @@ export class RemoteChapterService {
     const { chapter, task, file_base_title } = await this.read_bound_chapter_task(
       chapter_id,
       request.volume_id ?? null,
+      undefined,
       signal,
     );
     const base = {
@@ -227,6 +230,7 @@ export class RemoteChapterService {
 
   /**
    * 纯读取指定章节的站点缓存原文与旧译文，不导入文件、不写工程、不需要租约。
+   * 网页小说缓存为空时返回 `sync_available` 提示，同步抓取属于显式的独立工具。
    */
   public async read_chapter(
     request: RemoteChapterReadRequest,
@@ -239,9 +243,10 @@ export class RemoteChapterService {
         public_details: { field: "chapter_id" },
       });
     }
-    const { chapter, task } = await this.read_bound_chapter_task(
+    const { ref, chapter, task } = await this.read_bound_chapter_task(
       chapter_id,
       request.volume_id ?? null,
+      undefined,
       signal,
     );
     const page = paginate_chapter_paragraphs(task.paragraph_jp, task.old_paragraph_zh, {
@@ -261,6 +266,54 @@ export class RemoteChapterService {
       // 站点以术语表身份标记译文代次；没有旧译文时不存在“当前”状态。
       translation_current:
         task.old_glossary_id !== null && task.old_glossary_id === task.glossary_id,
+      // 只有网页小说的空缓存可能靠站点同步补救；文库空章节是永久事实。
+      ...(task.paragraph_jp.length === 0 && ref.kind === "web" ? { sync_available: true } : {}),
+    };
+  }
+
+  /**
+   * 触发站点向上游抓取指定章节的原文并返回缓存结果；只对网页小说有意义。
+   * 抓取由站点执行且消耗站点资源，只能被显式的 `novel_chapter_sync` 调用。
+   */
+  public async sync_chapter(
+    request: RemoteChapterReadRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteChapterReadResult> {
+    signal?.throwIfAborted();
+    const chapter_id = request.chapter_id.trim();
+    if (chapter_id === "") {
+      throw new AppError("request.validation_failed", {
+        public_details: { field: "chapter_id" },
+      });
+    }
+    const { ref, chapter, task } = await this.read_bound_chapter_task(
+      chapter_id,
+      request.volume_id ?? null,
+      { sync: true },
+      signal,
+    );
+    if (ref.kind !== "web") {
+      throw new AppError("remote.sync_unsupported", {
+        public_details: { kind: ref.kind },
+      });
+    }
+    const page = paginate_chapter_paragraphs(task.paragraph_jp, task.old_paragraph_zh, {
+      offset: request.offset ?? undefined,
+      limit: request.limit ?? undefined,
+      max_chars: request.max_chars ?? undefined,
+    });
+    return {
+      chapter_id: chapter.chapter_id,
+      volume_id: chapter.volume_id,
+      title: chapter.title,
+      translated: chapter.translated,
+      total_paragraphs: task.paragraph_jp.length,
+      ...page,
+      glossary_id: task.glossary_id,
+      old_glossary_id: task.old_glossary_id,
+      // 同步抓取不改变站点译文；术语表语义与纯读取一致。
+      translation_current:
+        task.old_glossary_id !== null && task.old_glossary_id === task.glossary_id,
     };
   }
 
@@ -268,6 +321,7 @@ export class RemoteChapterService {
   private async read_bound_chapter_task(
     chapter_id: string,
     volume_id: string | null,
+    options: { sync: boolean } = { sync: false },
     signal?: AbortSignal,
   ): Promise<{
     ref: RemoteNovelRef;
@@ -282,7 +336,7 @@ export class RemoteChapterService {
     );
     const chapter = this.resolve_chapter(workspace, chapter_id, volume_id);
     const task = await call_with_credential_refresh(this.refresh_credentials, ref.origin, () =>
-      this.client.read_chapter_task(ref, chapter, { sync: false }, signal),
+      this.client.read_chapter_task(ref, chapter, options, signal),
     );
     return { ref, chapter, task, file_base_title: binding.title };
   }

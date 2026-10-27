@@ -428,6 +428,119 @@ describe("RemoteChapterService", () => {
     );
   });
 
+  it("网页小说空缓存返回 sync_available 提示，非空时不返回", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: (_ref, _chapter, options) => {
+        expect(options).toEqual({ sync: false });
+        return task([]);
+      },
+    });
+    const empty = await fixture.service.read_chapter({ chapter_id: "c1" });
+    expect(empty.total_paragraphs).toBe(0);
+    expect(empty.sync_available).toBe(true);
+    const fixture_with_content = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => task(["第一段"]),
+    });
+    const filled = await fixture_with_content.service.read_chapter({ chapter_id: "c1" });
+    expect(filled.sync_available).toBeUndefined();
+  });
+
+  it("文库空缓存不返回 sync_available 提示", async () => {
+    const fixture = create_service({
+      binding: WENKU_BINDING,
+      chapters: [
+        { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一卷 001.txt", translated: false },
+      ],
+      tasks: () => task([]),
+    });
+    const result = await fixture.service.read_chapter({ chapter_id: "001.txt", volume_id: "v1.txt" });
+    expect(result.total_paragraphs).toBe(0);
+    expect(result.sync_available).toBeUndefined();
+  });
+
+  it("章节同步固定 sync=true 且只返回缓存结果", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: (_ref, _chapter, options) => {
+        expect(options).toEqual({ sync: true });
+        return read_task({
+          paragraphs: ["同步后的第一段", "同步后的第二段"],
+          glossary_id: "g2",
+          old_glossary_id: "g1",
+        });
+      },
+    });
+    const result = await fixture.service.sync_chapter({ chapter_id: "c2", max_chars: 100 });
+    expect(result).toMatchObject({
+      chapter_id: "c2",
+      volume_id: null,
+      title: "第二章",
+      total_paragraphs: 2,
+      offset: 0,
+      translation_current: false,
+    });
+    expect(result.paragraphs).toEqual([
+      { n: 1, jp: "同步后的第一段", zh: null },
+      { n: 2, jp: "同步后的第二段", zh: null },
+    ]);
+    expect(fixture.import_under_agent).not.toHaveBeenCalled();
+    expect(fixture.staged_files()).toEqual([]);
+  });
+
+  it("文库作品拒绝章节同步", async () => {
+    const fixture = create_service({
+      binding: WENKU_BINDING,
+      chapters: [
+        { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一卷 001.txt", translated: false },
+      ],
+      tasks: () => read_task(),
+    });
+    await expect(
+      fixture.service.sync_chapter({ chapter_id: "001.txt", volume_id: "v1.txt" }),
+    ).rejects.toThrow(expect.objectContaining({ code: "remote.sync_unsupported" }));
+    // 任务读取发生在类型检查之前：站点请求已发出，但结果不返回给调用方。
+    expect(fixture.read_chapter_task).toHaveBeenCalledTimes(1);
+  });
+
+  it("章节同步沿用绑定、未找到与凭据续期语义", async () => {
+    const fixture = create_service({
+      binding: null,
+      chapters: [],
+      tasks: () => read_task(),
+    });
+    await expect(fixture.service.sync_chapter({ chapter_id: "c1" })).rejects.toThrow(
+      expect.objectContaining({ code: "remote.source_not_bound" }),
+    );
+    let attempts = 0;
+    const auth_fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => {
+        attempts += 1;
+        if (attempts === 1) throw new AppError("remote.auth_rejected");
+        return read_task();
+      },
+      refresh_result: true,
+    });
+    const result = await auth_fixture.service.sync_chapter({ chapter_id: "c1" });
+    expect(result.total_paragraphs).toBe(3);
+    expect(auth_fixture.refresh).toHaveBeenCalledWith("https://n.novelia.cc");
+    expect(attempts).toBe(2);
+    const missing_fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task(),
+    });
+    await expect(missing_fixture.service.sync_chapter({ chapter_id: "missing" })).rejects.toThrow(
+      expect.objectContaining({ code: "remote.chapter_not_found" }),
+    );
+  });
+
   it("凭据续期同样适用于纯读取", async () => {
     let attempts = 0;
     const fixture = create_service({

@@ -175,6 +175,8 @@ export class GuiBackendBootstrap {
           services.remote.chapters.import_chapter(request, signal),
         novelChapterRead: (request, signal) =>
           services.remote.chapters.read_chapter(request, signal),
+        novelChapterSync: (request, signal) =>
+          services.remote.chapters.sync_chapter(request, signal),
         workspace,
         logManager: resources.logManager,
         publish: (topic, payload) => event_stream.publish(topic, payload),

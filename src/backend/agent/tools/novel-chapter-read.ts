@@ -39,6 +39,7 @@ export function create_agent_novel_chapter_read_tool(
       "### 执行",
       "",
       "- 读取站点缓存（固定 `sync=false`），不触发站点向上游重新抓取。",
+      "- 网页小说章节站点没有缓存时，站点会拒绝请求（`remote.fetch_failed`）；此时用 `novel_chapter_sync` 触发站点抓取后重试。",
       "- 纯读取：不导入文件、不上传译文、不修改工程绑定或整本资产，无需用户审批。",
       "- `zh` 是站点已有的 GPT 译文，不是本地工程当前译文；本章没有站点译文时为 `null`。",
       "- `translation_current` 只表示旧译文所用术语表与当前一致，不代表译文内容是最新的。",
@@ -55,6 +56,7 @@ export function create_agent_novel_chapter_read_tool(
       "- `total_paragraphs` 是本章完整段数；`paragraphs[].n` 是从 1 开始的原始段号。",
       "- `next_offset` 是继续读取时应使用的段落偏移；已读完时为 `null`。",
       "- 截断后按 `next_offset` 继续调用，不要根据返回段数自行推算位置。",
+      '- 网页小说 `total_paragraphs` 为 0 时会返回 `sync_available: true`，需要原文可调用 `novel_chapter_sync` 触发站点抓取。',
     ].join("\n"),
     executionMode: "sequential",
     parameters: Type.Object(
@@ -111,6 +113,7 @@ export function create_agent_novel_chapter_read_tool(
         glossary_id: result.glossary_id,
         old_glossary_id: result.old_glossary_id,
         translation_current: result.translation_current,
+        ...(result.sync_available === true ? { sync_available: result.sync_available } : {}),
         next_offset: result.next_offset,
         truncated: result.truncated,
       });
