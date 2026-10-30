@@ -2,6 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DesktopApiError } from "@frontend/app/desktop/desktop-api";
 import { LocaleProvider } from "@frontend/app/locale/locale-provider";
 import { RemotePage } from "@frontend/pages/remote-page/page";
 
@@ -72,6 +73,12 @@ const SOURCE_SNAPSHOT = {
   },
   asset_present: true,
   snapshot_present: true,
+};
+
+const UNBOUND_SOURCE_SNAPSHOT = {
+  binding: null,
+  asset_present: false,
+  snapshot_present: false,
 };
 
 const WORKSPACE_SNAPSHOT = {
@@ -333,6 +340,116 @@ describe("RemotePage", () => {
       overrides: [{ row: 10, src_hash: "hash-a", action: "keep" }],
     });
     expect(push_toast_mock).toHaveBeenCalledWith("success", expect.stringContaining("同步完成"));
+  });
+
+  it("未绑定工程可粘贴地址并完成安全绑定", async () => {
+    const bound_source = {
+      binding: { ...SOURCE_SNAPSHOT.binding, title: "新绑定小说" },
+      asset_present: true,
+      snapshot_present: true,
+    };
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/auth/status") return { auth: AUTH_SNAPSHOT };
+      if (path === "/api/remote/source/read") return { source: UNBOUND_SOURCE_SNAPSHOT };
+      if (path === "/api/remote/workspace/snapshot") {
+        return { remote_workspace: WORKSPACE_SNAPSHOT };
+      }
+      if (path === "/api/remote/source/bind") return { source: bound_source };
+
+      return {};
+    });
+
+    const page = await mount_page();
+    expect(page.textContent).toContain("当前工程没有绑定小说地址");
+    expect(page.textContent).toContain("仅当工程只有一个 TXT 正文文件");
+    const input = page.querySelector<HTMLInputElement>(
+      'input[aria-label="粘贴 n.novelia.cc 小说页面地址"]',
+    );
+    if (input === null) throw new Error("未找到小说地址输入框。");
+
+    await act(async () => {
+      set_form_value(input, " https://n.novelia.cc/novel/kakuyomu/123456 ");
+    });
+    await act(async () => {
+      get_button_by_text(page, "绑定").click();
+    });
+
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/source/bind", {
+      url: "https://n.novelia.cc/novel/kakuyomu/123456",
+    });
+    expect(push_toast_mock).toHaveBeenCalledWith("success", "小说源已绑定");
+    expect(page.textContent).toContain("新绑定小说");
+    expect(page.querySelector('input[aria-label="粘贴 n.novelia.cc 小说页面地址"]')).toBeNull();
+  });
+
+  it("补绑定文本不一致时保留未绑定状态并提示", async () => {
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/auth/status") return { auth: AUTH_SNAPSHOT };
+      if (path === "/api/remote/source/read") return { source: UNBOUND_SOURCE_SNAPSHOT };
+      if (path === "/api/remote/workspace/snapshot") {
+        return { remote_workspace: WORKSPACE_SNAPSHOT };
+      }
+      if (path === "/api/remote/source/bind") {
+        throw new DesktopApiError({ code: "remote.source_mismatch" });
+      }
+
+      return {};
+    });
+
+    const page = await mount_page();
+    const input = page.querySelector<HTMLInputElement>(
+      'input[aria-label="粘贴 n.novelia.cc 小说页面地址"]',
+    );
+    if (input === null) throw new Error("未找到小说地址输入框。");
+
+    await act(async () => {
+      set_form_value(input, "https://n.novelia.cc/novel/kakuyomu/123456");
+    });
+    await act(async () => {
+      get_button_by_text(page, "绑定").click();
+    });
+
+    expect(push_toast_mock).toHaveBeenCalledWith(
+      "工程文本与站点文本不一致，未绑定",
+      expect.any(DesktopApiError),
+    );
+    expect(page.textContent).toContain("当前工程没有绑定小说地址");
+    expect(page.querySelector('input[aria-label="粘贴 n.novelia.cc 小说页面地址"]')).not.toBeNull();
+  });
+
+  it("补绑定资产不符合唯一正文文件规则时保留未绑定状态并提示", async () => {
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/auth/status") return { auth: AUTH_SNAPSHOT };
+      if (path === "/api/remote/source/read") return { source: UNBOUND_SOURCE_SNAPSHOT };
+      if (path === "/api/remote/workspace/snapshot") {
+        return { remote_workspace: WORKSPACE_SNAPSHOT };
+      }
+      if (path === "/api/remote/source/bind") {
+        throw new DesktopApiError({ code: "remote.source_not_bindable" });
+      }
+
+      return {};
+    });
+
+    const page = await mount_page();
+    const input = page.querySelector<HTMLInputElement>(
+      'input[aria-label="粘贴 n.novelia.cc 小说页面地址"]',
+    );
+    if (input === null) throw new Error("未找到小说地址输入框。");
+
+    await act(async () => {
+      set_form_value(input, "https://n.novelia.cc/novel/kakuyomu/123456");
+    });
+    await act(async () => {
+      get_button_by_text(page, "绑定").click();
+    });
+
+    expect(push_toast_mock).toHaveBeenCalledWith(
+      "工程必须只有一个 TXT 正文文件，未绑定；EPUB 需整本导入",
+      expect.any(DesktopApiError),
+    );
+    expect(page.textContent).toContain("当前工程没有绑定小说地址");
+    expect(page.querySelector('input[aria-label="粘贴 n.novelia.cc 小说页面地址"]')).not.toBeNull();
   });
 
   it("手动导入 token 后展示末位并上传工程译文", async () => {

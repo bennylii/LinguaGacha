@@ -58,8 +58,17 @@ export const ja_jp_remote_page = {
     title: "小説ソース",
     description:
       "全体同期はサイトのテキストを再取得し、内容に一致するプロジェクト翻訳を保持します。プロジェクトに訳がない行はサイトの GPT 訳を引き継ぎます。",
-    unbound:
-      "このプロジェクトは小説 URL に紐付いていません。作成時に「小説 URL」を選択してください。",
+    unbound: "このプロジェクトは小説 URL に紐付いていません。",
+    bind_url_placeholder: "n.novelia.cc の小説ページ URL を貼り付け",
+    bind: "バインド",
+    binding: "バインド中 …",
+    bind_hint:
+      "プロジェクトに本文ファイルが 1 つだけあり、それが TXT で、本文がサイトと一致する場合のみバインドします。EPUB は丸ごとインポートする必要があります。既存の訳文は変更しません。",
+    bind_success: "小説ソースをバインドしました",
+    bind_failed: "小説ソースのバインドに失敗しました …",
+    bind_mismatch: "プロジェクト本文がサイトと一致しないため、バインドしていません",
+    bind_not_bindable:
+      "プロジェクトには TXT の本文ファイルが 1 つだけ必要です。バインドしていません。EPUB は丸ごとインポートする必要があります。",
     novel: "作品",
     url: "アドレス",
     asset: "プロジェクトファイル",
@@ -145,6 +154,7 @@ export const ja_jp_remote_page = {
     chapter_message: {
       local_translation_incomplete: "ローカル訳が不完全なためスキップしました",
       identical_to_remote_translation: "サイトの既存訳と一致するため再アップロードしませんでした",
+      local_chapter_mismatch: "ローカル章の段落がサイト章と一致しないためスキップしました",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_remote_page>;

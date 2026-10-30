@@ -59,6 +59,13 @@ export class EpubWriter {
   }
 
   /**
+   * 远程源文重写复用导出时的 XML/HTML 序列化规则，避免另一套转义逻辑。
+   */
+  public serialize_document(name: string, root: Element): string {
+    return this.serialize_doc(name, root);
+  }
+
+  /**
    * 三种正式 AST 模式共用原树定位，旧无 metadata 项才走 legacy
    */
   public has_epub_ast_metadata(item: Item): boolean {

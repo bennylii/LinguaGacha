@@ -6,19 +6,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "../../domain/json";
 import { AppError } from "../../shared/error/app-error";
+import { create_volume_epub_fixture, type VolumeDocumentFixture } from "../../test/epub-fixture";
 import { ProjectDatabase } from "../database/database-operations";
+import { EpubAst } from "../file/epub/epub-ast";
 import { ProjectSessionState } from "../project/project-session-state";
 import { RuntimeOperationGate } from "../runtime-operation-gate";
 import type { NoveliaClient, RemoteChapterTask, RemoteWorkspace } from "./novelia-client";
 import { parse_novel_url, sha256_text } from "./novelia-source";
-import { build_remote_source_binding, REMOTE_SOURCE_META_KEY } from "./remote-source";
+import {
+  build_remote_source_binding,
+  REMOTE_EPUB_MAP_META_KEY,
+  REMOTE_SOURCE_META_KEY,
+} from "./remote-source";
 import {
   RemoteWorkspaceSubmissionService,
   type RemoteWorkspaceSnapshot,
 } from "./workspace-submission-service";
+import { build_wenku_epub_map, build_wenku_epub_package } from "./wenku-epub-source";
 
 const NOVEL_URL = "https://n.novelia.cc/novel/kakuyomu/12345";
+const WENKU_URL = "https://n.novelia.cc/wenku/12345";
 const ASSET_PATH = "テスト小説.txt";
+const EPUB_ASSET_PATH = "テスト小説.epub";
 const ASSET_TEXT = "# 第一章\n本文一\n本文二";
 
 interface Fixture {
@@ -26,6 +35,30 @@ interface Fixture {
   database: ProjectDatabase;
   write_chapter_translation: ReturnType<typeof vi.fn>;
   read_chapter_task: ReturnType<typeof vi.fn>;
+}
+
+/** 整本 EPUB 资产的条目与章节映射都来自真实导入管线，用例只声明分卷文档。 */
+async function create_epub_asset(documents: VolumeDocumentFixture[]): Promise<{
+  bytes: Uint8Array;
+  map: ReturnType<typeof build_wenku_epub_map>;
+}> {
+  const ref = parse_novel_url(WENKU_URL);
+  const volume_bytes = await create_volume_epub_fixture(documents);
+  const pkg = await build_wenku_epub_package({
+    ref,
+    metadata: {
+      title: "テスト小説",
+      title_jp: "テスト小説",
+      title_zh: null,
+      introduction_jp: "",
+      introduction_zh: null,
+      glossary: {},
+      chapter_count: 1,
+      volumes: [{ volume_id: "1.epub", title: "第一卷" }],
+    },
+    client: { download_wenku_volume_epub: async () => volume_bytes },
+  });
+  return { bytes: pkg.bytes, map: build_wenku_epub_map(pkg) };
 }
 
 /** 工作区、项目条目与上传端口都可注入，用例只声明影响提交结果的事实。 */
@@ -37,16 +70,20 @@ async function create_fixture(options: {
   task_error?: Error;
   pending_task?: boolean;
   novel_url?: string;
+  /** 提供时按整本 EPUB 资产构造工程，缺失映射用于覆盖旧工程。 */
+  epub?: { documents: VolumeDocumentFixture[]; with_map: boolean };
 }): Promise<Fixture> {
   const database = new ProjectDatabase();
   const lg_path = path.join(temp_dir, "demo.lg");
   await database.create_project(lg_path, "demo");
   const session_state = new ProjectSessionState();
   await session_state.mark_loaded(lg_path);
+  const novel_url = options.novel_url ?? NOVEL_URL;
+  const asset_path = options.epub === undefined ? ASSET_PATH : EPUB_ASSET_PATH;
   const binding = build_remote_source_binding({
-    ref: parse_novel_url(options.novel_url ?? NOVEL_URL),
+    ref: parse_novel_url(novel_url),
     title: "テスト小説",
-    asset_path: ASSET_PATH,
+    asset_path,
     remote_hash: sha256_text(ASSET_TEXT),
     chapter_count: 1,
     synced_at: "2026-10-20T00:00:00.000Z",
@@ -55,19 +92,56 @@ async function create_fixture(options: {
     { src: "本文一", dst: "工程一", status: "PROCESSED" },
     { src: "本文二", dst: "工程二", status: "PROCESSED" },
   ];
+  const epub_asset =
+    options.epub === undefined ? null : await create_epub_asset(options.epub.documents);
+  const epub_with_map = options.epub?.with_map === true;
+  const epub_items =
+    epub_asset === null
+      ? []
+      : (await new EpubAst().read_from_stream(epub_asset.bytes, asset_path))
+          .slice()
+          .sort((left, right) => left.row - right.row);
   await database.transaction(lg_path, (writer) => {
-    writer.add_asset(lg_path, ASSET_PATH, Buffer.from(ASSET_TEXT), "TXT", null);
-    writer.set_items(lg_path, [
-      { id: 1, row: 0, src: "# 第一章", dst: "", status: "NONE", file_path: ASSET_PATH },
-      ...items.map((item, index) => ({
-        id: index + 2,
-        row: index + 1,
-        src: item.src,
-        dst: item.dst,
-        status: item.status,
-        file_path: ASSET_PATH,
-      })),
-    ]);
+    if (epub_asset === null) {
+      writer.add_asset(lg_path, asset_path, Buffer.from(ASSET_TEXT), "TXT", null);
+      writer.set_items(lg_path, [
+        { id: 1, row: 0, src: "# 第一章", dst: "", status: "NONE", file_path: asset_path },
+        ...items.map((item, index) => ({
+          id: index + 2,
+          row: index + 1,
+          src: item.src,
+          dst: item.dst,
+          status: item.status,
+          file_path: asset_path,
+        })),
+      ]);
+    } else {
+      writer.add_asset(lg_path, asset_path, epub_asset.bytes, "EPUB", null);
+      const dst_by_src = new Map(items.map((item) => [item.src, item] as const));
+      writer.set_items(
+        lg_path,
+        epub_items.map((item, index) => {
+          const translated = dst_by_src.get(item.src);
+          return {
+            id: index + 1,
+            row: item.row,
+            src: item.src,
+            dst: translated?.dst ?? "",
+            name_src: item.name_src,
+            name_dst: item.name_dst,
+            extra_field: item.extra_field,
+            tag: item.tag,
+            file_type: item.file_type,
+            file_path: asset_path,
+            status: translated?.status ?? "NONE",
+            skip_internal_filter: item.skip_internal_filter,
+          } as unknown as JsonValue;
+        }),
+      );
+      if (epub_with_map) {
+        writer.set_meta(lg_path, REMOTE_EPUB_MAP_META_KEY, epub_asset.map as unknown as JsonValue);
+      }
+    }
     writer.set_meta(lg_path, REMOTE_SOURCE_META_KEY, binding as unknown as JsonValue);
   });
 
@@ -439,6 +513,125 @@ describe("RemoteWorkspaceSubmissionService", () => {
       const snapshot = await fixture.service.cancel();
       expect(snapshot).toMatchObject({ status: "cancelled", error: "cancelled" });
       expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("文库整本 EPUB：按章节映射取文档段落条目并上传", async () => {
+    const fixture = await create_fixture({
+      novel_url: WENKU_URL,
+      workspace: {
+        ...workspace(1),
+        chapters: [
+          {
+            chapter_id: "OEBPS.Text.ch1.xhtml",
+            volume_id: "1.epub",
+            title: "第一章",
+            translated: false,
+          },
+        ],
+      },
+      tasks: [task({ paragraph_jp: ["日本語一", "日本語二"] })],
+      items: [
+        { src: "日本語一", dst: "工程一", status: "PROCESSED" },
+        { src: "日本語二", dst: "工程二", status: "PROCESSED" },
+      ],
+      epub: {
+        with_map: true,
+        documents: [
+          { href: "Text/ch1.xhtml", heading: "第一章", paragraphs: ["日本語一", "日本語二"] },
+        ],
+      },
+    });
+    try {
+      await fixture.service.start();
+      await wait_for_status(fixture.service, "completed");
+
+      expect(fixture.write_chapter_translation).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ chapter_id: "OEBPS.Text.ch1.xhtml" }),
+        { glossary_id: "glossary-1", paragraphs_zh: ["工程一", "工程二"] },
+        expect.any(AbortSignal),
+      );
+      expect(fixture.service.get_snapshot()).toMatchObject({
+        status: "completed",
+        totals: { chapters: 1, uploaded: 1, skipped: 0, failed: 0 },
+        chapters: [{ state: "uploaded", ready: 2, missing: 0, message: null }],
+      });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("文库整本 EPUB：段落数不一致时跳过该章，不猜测对应关系", async () => {
+    const fixture = await create_fixture({
+      novel_url: WENKU_URL,
+      workspace: {
+        ...workspace(1),
+        chapters: [
+          {
+            chapter_id: "OEBPS.Text.ch1.xhtml",
+            volume_id: "1.epub",
+            title: "第一章",
+            translated: false,
+          },
+        ],
+      },
+      tasks: [task({ paragraph_jp: ["日本語一", "日本語二", "站点新增段"] })],
+      items: [
+        { src: "日本語一", dst: "工程一", status: "PROCESSED" },
+        { src: "日本語二", dst: "工程二", status: "PROCESSED" },
+      ],
+      epub: {
+        with_map: true,
+        documents: [
+          { href: "Text/ch1.xhtml", heading: "第一章", paragraphs: ["日本語一", "日本語二"] },
+        ],
+      },
+    });
+    try {
+      await fixture.service.start();
+      await wait_for_status(fixture.service, "completed");
+
+      expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+      expect(fixture.service.get_snapshot()).toMatchObject({
+        status: "completed",
+        totals: { chapters: 1, uploaded: 0, skipped: 1, failed: 0 },
+        chapters: [{ state: "skipped", ready: 0, missing: 3, message: "local_chapter_mismatch" }],
+      });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("文库整本 EPUB 缺少章节映射时拒绝启动", async () => {
+    const fixture = await create_fixture({
+      novel_url: WENKU_URL,
+      workspace: {
+        ...workspace(1),
+        chapters: [
+          {
+            chapter_id: "OEBPS.Text.ch1.xhtml",
+            volume_id: "1.epub",
+            title: "第一章",
+            translated: false,
+          },
+        ],
+      },
+      tasks: [task({ paragraph_jp: ["日本語一", "日本語二"] })],
+      epub: {
+        with_map: false,
+        documents: [
+          { href: "Text/ch1.xhtml", heading: "第一章", paragraphs: ["日本語一", "日本語二"] },
+        ],
+      },
+    });
+    try {
+      await expect(fixture.service.start()).rejects.toMatchObject({
+        code: "remote.epub_map_missing",
+      });
+      expect(fixture.read_chapter_task).not.toHaveBeenCalled();
     } finally {
       await fixture.database.close();
     }

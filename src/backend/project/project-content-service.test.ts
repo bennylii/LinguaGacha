@@ -33,7 +33,11 @@ import type { LogManager } from "../log/log-manager";
 import { RuntimeOperationGate } from "../runtime-operation-gate";
 import { ProjectContentService } from "./project-content-service";
 import type { RemoteOldItem, RemoteRowPlan } from "../remote/novelia-source";
-import { REMOTE_SOURCE_META_KEY, type RemoteSourceBinding } from "../remote/remote-source";
+import {
+  REMOTE_EPUB_MAP_META_KEY,
+  REMOTE_SOURCE_META_KEY,
+  type RemoteSourceBinding,
+} from "../remote/remote-source";
 import { adapt_project_change, type ProjectChangePublisher } from "./project-write-event-adapter";
 import { ProjectWriteStore } from "./project-write-store";
 
@@ -2308,6 +2312,304 @@ describe("ProjectContentService", () => {
         title: "测试小说",
         asset_path: "remote-novel.txt",
       });
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("EPUB 整本替换写入二进制资产并按种子保留固定条目和正文译文", async () => {
+    const { database, service, lg_path } = await create_service();
+    const asset_path = "remote-novel.epub";
+    const revisions = async (): Promise<ProjectDataSectionRevisions> =>
+      (
+        await database.read(lg_path, (access) =>
+          new ProjectDataReader(access).build_manifest({ loaded: true, projectPath: lg_path }),
+        )
+      ).sectionRevisions as unknown as ProjectDataSectionRevisions;
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      provider_id: "kakuyomu",
+      novel_id: "123456",
+      url: "https://n.novelia.cc/novel/kakuyomu/123456",
+      title: "测试小说",
+      asset_path,
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+    const old_item = (id: number, row: number, src: string, tag: string): RemoteOldItem => ({
+      item_id: id,
+      row,
+      src,
+      dst: `译文${id.toString()}`,
+      name_dst: null,
+      status: "PROCESSED",
+      extra_field: { epub: { doc_path: tag } },
+    });
+
+    try {
+      await database.transaction(lg_path, (writer) => {
+        writer.add_asset(lg_path, asset_path, new Uint8Array([1, 2, 3]), "EPUB", null);
+        writer.set_items(lg_path, [
+          create_persistent_item({
+            item_id: 9,
+            row_number: 5,
+            src: "书名",
+            dst: "书名译文",
+            extra_field: { epub: { is_opf_metadata: true } },
+            tag: "OPS/package.opf",
+            file_type: "EPUB",
+            file_path: asset_path,
+            status: "PROCESSED",
+          }),
+          create_persistent_item({
+            item_id: 10,
+            row_number: 0,
+            src: "第一行",
+            dst: "译文10",
+            extra_field: { epub: { doc_path: "OPS/ch1.xhtml" } },
+            tag: "OPS/ch1.xhtml",
+            file_type: "EPUB",
+            file_path: asset_path,
+            status: "PROCESSED",
+          }),
+          create_persistent_item({
+            item_id: 11,
+            row_number: 1,
+            src: "第二行",
+            dst: "译文11",
+            extra_field: { epub: { doc_path: "OPS/ch1.xhtml" } },
+            tag: "OPS/ch1.xhtml",
+            file_type: "EPUB",
+            file_path: asset_path,
+            status: "PROCESSED",
+          }),
+        ]);
+      });
+      const rows: RemoteRowPlan[] = [
+        {
+          row: 0,
+          src: "第一行",
+          src_hash: "hash-0",
+          chapter_index: 0,
+          decision: "preserve",
+          old_item: old_item(10, 0, "第一行", "OPS/ch1.xhtml"),
+          remote_dst: null,
+          similarity: 1,
+          review: false,
+        },
+        {
+          row: 1,
+          src: "第二行改",
+          src_hash: "hash-1",
+          chapter_index: 0,
+          decision: "retranslate",
+          old_item: old_item(11, 1, "第二行", "OPS/ch1.xhtml"),
+          remote_dst: null,
+          similarity: 0.4,
+          review: true,
+        },
+      ];
+      const asset_bytes = new Uint8Array([4, 5, 6, 7]);
+
+      const result = await service.replace_remote_asset({
+        assetPath: asset_path,
+        content: "第一行\n第二行改",
+        assetBytes: asset_bytes,
+        itemSeeds: [
+          {
+            src: "第一行",
+            extra_field: { epub: { doc_path: "OPS/ch1.xhtml", mode: "block_text" } },
+            tag: "OPS/ch1.xhtml",
+            file_type: "EPUB",
+            row_number: 0,
+          },
+          {
+            src: "第二行改",
+            extra_field: { epub: { doc_path: "OPS/ch1.xhtml", mode: "block_text" } },
+            tag: "OPS/ch1.xhtml",
+            file_type: "EPUB",
+            row_number: 1,
+          },
+        ],
+        fixedItemSeeds: [
+          {
+            src: "书名",
+            extra_field: { epub: { is_opf_metadata: true } },
+            tag: "OPS/package.opf",
+            file_type: "EPUB",
+            row_number: 5,
+          },
+        ],
+        binding,
+        rows,
+        overrides: new Map(),
+        expectedSectionRevisions: await revisions(),
+      });
+
+      expect(result.changes[0]).toMatchObject({ source: "remote_sync" });
+      expect(await database.read_asset_content(lg_path, asset_path)).toEqual(
+        Buffer.from(asset_bytes),
+      );
+      const saved_items = (await database.get_all_items(lg_path))
+        .map((item) => ({
+          id: Number(item["id"]),
+          row: Number(item["row"]),
+          src: item["src"],
+          dst: item["dst"],
+          file_type: item["file_type"],
+          extra_field: item["extra_field"],
+        }))
+        .sort((left, right) => left.row - right.row);
+      expect(saved_items).toMatchObject([
+        {
+          id: 10,
+          row: 0,
+          src: "第一行",
+          dst: "译文10",
+          file_type: "EPUB",
+          extra_field: { epub: { doc_path: "OPS/ch1.xhtml", mode: "block_text" } },
+        },
+        {
+          row: 1,
+          src: "第二行改",
+          dst: "",
+          file_type: "EPUB",
+          extra_field: { epub: { doc_path: "OPS/ch1.xhtml", mode: "block_text" } },
+        },
+        {
+          id: 9,
+          row: 5,
+          src: "书名",
+          dst: "书名译文",
+          file_type: "EPUB",
+          extra_field: { epub: { is_opf_metadata: true } },
+        },
+      ]);
+      expect(saved_items[1]?.id).not.toBe(11);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("整本替换把附加 meta 与资产在同一次写入提交", async () => {
+    const { database, service, lg_path } = await create_service();
+    const asset_path = "remote-novel.epub";
+    const revisions = async (): Promise<ProjectDataSectionRevisions> =>
+      (
+        await database.read(lg_path, (access) =>
+          new ProjectDataReader(access).build_manifest({ loaded: true, projectPath: lg_path }),
+        )
+      ).sectionRevisions as unknown as ProjectDataSectionRevisions;
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "wenku",
+      provider_id: "",
+      novel_id: "123456",
+      url: "https://n.novelia.cc/wenku/123456",
+      title: "测试小说",
+      asset_path,
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+    const epub_map = {
+      version: 1 as const,
+      volumes: [{ volume_id: "1.epub", volume_title: "第一卷", prefix: "vol-1.epub" }],
+      documents: [],
+    };
+
+    try {
+      await database.transaction(lg_path, (writer) => {
+        writer.add_asset(lg_path, asset_path, new Uint8Array([1, 2, 3]), "EPUB", null);
+      });
+      await service.replace_remote_asset({
+        assetPath: asset_path,
+        content: "",
+        assetBytes: new Uint8Array([4, 5, 6]),
+        itemSeeds: [],
+        fixedItemSeeds: [],
+        binding,
+        rows: [],
+        overrides: new Map(),
+        expectedSectionRevisions: await revisions(),
+        extraMeta: { [REMOTE_EPUB_MAP_META_KEY]: epub_map },
+      });
+
+      const meta = await database.get_all_meta(lg_path);
+      expect(meta[REMOTE_EPUB_MAP_META_KEY]).toEqual(epub_map);
+      expect(meta[REMOTE_SOURCE_META_KEY]).toMatchObject({ asset_path, kind: "wenku" });
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("补绑定只写 remote_source 与 project 修订，不改资产和条目", async () => {
+    const { publish_project_change } = create_test_project_change_publisher();
+    const { database, service, lg_path } = await create_service(publish_project_change);
+    await database.transaction(lg_path, (writer) => {
+      writer.add_asset(lg_path, "remote-novel.txt", Buffer.from("第一行\n第二行"), "TXT", null);
+      writer.set_items(lg_path, [
+        create_persistent_item({
+          item_id: 1,
+          row_number: 0,
+          src: "第一行",
+          dst: "译文一",
+          file_path: "remote-novel.txt",
+          status: "PROCESSED",
+        }),
+        create_persistent_item({
+          item_id: 2,
+          row_number: 1,
+          src: "第二行",
+          dst: "译文二",
+          file_path: "remote-novel.txt",
+          status: "PROCESSED",
+        }),
+      ]);
+    });
+    const before_meta = await database.get_all_meta(lg_path);
+    const before_items = await database.get_all_items(lg_path);
+    const before_asset = await database.read_asset_content(lg_path, "remote-novel.txt");
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      provider_id: "kakuyomu",
+      novel_id: "123456",
+      url: "https://n.novelia.cc/novel/kakuyomu/123456",
+      title: "测试小说",
+      asset_path: "remote-novel.txt",
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+
+    try {
+      const result = await service.bind_remote_source({ binding });
+
+      expect(result).toMatchObject({
+        accepted: true,
+        changes: [{ source: "remote_source_bind", updatedSections: ["project"] }],
+      });
+      const meta = await database.get_all_meta(lg_path);
+      expect(meta[REMOTE_SOURCE_META_KEY]).toMatchObject({
+        title: "测试小说",
+        asset_path: "remote-novel.txt",
+      });
+      expect(get_section_revision(meta, "project")).toBe(
+        (get_section_revision(before_meta, "project") ?? 0) + 1,
+      );
+      expect(get_section_revision(meta, "items")).toBe(get_section_revision(before_meta, "items"));
+      expect(get_section_revision(meta, "files")).toBe(get_section_revision(before_meta, "files"));
+      expect(await database.get_all_items(lg_path)).toEqual(before_items);
+      expect(await database.read_asset_content(lg_path, "remote-novel.txt")).toEqual(before_asset);
+      expect(publish_project_change).toHaveBeenCalledWith(
+        expect.objectContaining({ updatedSections: ["project"] }),
+      );
     } finally {
       await database.close();
     }

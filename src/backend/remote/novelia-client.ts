@@ -2,7 +2,9 @@ import { AppError } from "../../shared/error/app-error";
 import type { NoveliaCredential } from "./novelia-credential-store";
 import {
   NOVELIA_HOSTS,
+  REMOTE_EPUB_MAX_BYTES,
   REMOTE_NOVEL_MAX_BYTES,
+  REMOTE_TRANSLATIONS_MAX_BYTES,
   build_novel_filename,
   is_missing_remote_translation,
   read_remote_translations,
@@ -314,7 +316,7 @@ export class NoveliaClient {
         signal,
       );
       await assert_not_html(response);
-      return await read_limited_text(response, REMOTE_NOVEL_MAX_BYTES);
+      return await read_limited_text(response, REMOTE_TRANSLATIONS_MAX_BYTES);
     } catch {
       if (caller_signal?.aborted === true) throw caller_signal.reason;
       return "";
@@ -381,6 +383,38 @@ export class NoveliaClient {
       }
     }
     return { text: lines.join("\n"), translations };
+  }
+
+  /**
+   * 文库分卷 EPUB 只能以双语形式下载：站点没有纯日文导出集合。
+   * 调用方负责去掉插入的中文段落，还原日文原文。
+   */
+  public async download_wenku_volume_epub(
+    ref: RemoteNovelRef,
+    volume_id: string,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    if (!volume_id.toLowerCase().endsWith(".epub")) {
+      throw new AppError("remote.fetch_failed", {
+        message: "The volume is not an EPUB.",
+        public_details: { volume_id },
+      });
+    }
+    const timeout = this.resolve_deadline(signal, DOWNLOAD_TIMEOUT_MS);
+    const query = new URLSearchParams({
+      mode: "jp-zh",
+      translationsMode: "priority",
+      translations: TRANSLATOR_ID,
+      filename: volume_id,
+    });
+    const response = await this.request(
+      ref,
+      `/api/wenku/${encodeURIComponent(ref.novel_id)}/file/${encodeURIComponent(volume_id)}?${query.toString()}`,
+      "required",
+      timeout,
+    );
+    await assert_not_html(response);
+    return await read_limited_bytes(response, REMOTE_EPUB_MAX_BYTES);
   }
 
   private async read_wenku_volume_toc(
@@ -683,6 +717,45 @@ async function assert_not_html(response: Response): Promise<void> {
 }
 
 /** 下载与 JSON 共用有上限的流式读取，避免异常响应占满内存。 */
+async function read_limited_bytes(response: Response, max_bytes: number): Promise<Uint8Array> {
+  const content_length = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(content_length) && content_length > max_bytes) {
+    await response.body?.cancel();
+    throw new AppError("remote.fetch_failed", {
+      message: "The novel site response exceeds the size limit.",
+      public_details: { max_bytes },
+    });
+  }
+  if (response.body === null) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max_bytes) {
+        await reader.cancel();
+        throw new AppError("remote.fetch_failed", {
+          message: "The novel site response exceeds the size limit.",
+          public_details: { max_bytes },
+        });
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
 async function read_limited_text(response: Response, max_bytes: number): Promise<string> {
   const content_length = Number(response.headers.get("content-length") ?? "");
   if (Number.isFinite(content_length) && content_length > max_bytes) {

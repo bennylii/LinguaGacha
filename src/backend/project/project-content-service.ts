@@ -49,7 +49,11 @@ import {
   type ProjectItemPublicRecord,
   type Item,
 } from "../../domain/item";
-import type { RemoteRowDecision, RemoteRowPlan } from "../remote/novelia-source";
+import type {
+  RemoteAssetItemSeed,
+  RemoteRowDecision,
+  RemoteRowPlan,
+} from "../remote/novelia-source";
 import { REMOTE_SOURCE_META_KEY, type RemoteSourceBinding } from "../remote/remote-source";
 import { is_json_record } from "../../domain/json";
 import { normalize_setting_snapshot } from "../../domain/setting";
@@ -90,10 +94,23 @@ export interface RemoteAssetRowOverride {
 export interface RemoteAssetReplaceRequest {
   assetPath: string;
   content: string;
+  /** EPUB 等二进制资产由格式适配器生成；缺失时按 UTF-8 写入 content。 */
+  assetBytes?: Uint8Array;
+  /** 与 rows 一一对应的正文条目种子；EPUB 必须提供。 */
+  itemSeeds?: readonly RemoteAssetItemSeed[];
+  /** OPF 标题、nav、NCX 等不参与正文行对齐的固定条目；EPUB 必须提供（可为空数组）。 */
+  fixedItemSeeds?: readonly RemoteAssetItemSeed[];
   binding: RemoteSourceBinding;
   rows: readonly RemoteRowPlan[];
   overrides: ReadonlyMap<number, RemoteAssetRowOverride>;
   expectedSectionRevisions: ProjectExpectedSectionRevisions;
+  /** 与资产同一次事务写入的附加 meta；文库 EPUB 用它更新章节映射。 */
+  extraMeta?: Readonly<Record<string, JsonValue>> | undefined;
+}
+
+/** 补绑定只提交远程身份；正文、条目与译文已有事实不参与写入。 */
+export interface RemoteSourceBindRequest {
+  binding: RemoteSourceBinding;
 }
 
 const PROJECT_SETTINGS_UPDATE_SOURCE = "project_settings_update";
@@ -419,6 +436,21 @@ export class ProjectContentService {
   }
 
   /**
+   * 为已存在的工程补写远程绑定。
+   * 只推进 project 修订；资产正文、条目和译文仍由当前工程事实决定。
+   */
+  public async bind_remote_source(request: RemoteSourceBindRequest): Promise<ProjectWriteResult> {
+    const project_path = this.session_state.require_loaded_project_path();
+    return await this.runtime_gate.run_project_write(async () => {
+      return await this.write_store.apply_project_settings_meta({
+        projectPath: project_path,
+        source: "remote_source_bind",
+        meta: { [REMOTE_SOURCE_META_KEY]: request.binding as unknown as JsonValue },
+      });
+    });
+  }
+
+  /**
    * 远端整本同步以当前工程条目为语义基准：保留可匹配条目的身份、译文与人工状态，
    * 新行分配新身份，再按当前设置重算预过滤与进度。
    */
@@ -436,9 +468,28 @@ export class ProjectContentService {
           public_details: { reason: "asset_missing", asset_path: request.assetPath },
         });
       }
-      if (existing_asset.file_type !== "TXT") {
+      if (existing_asset.file_type !== "TXT" && existing_asset.file_type !== "EPUB") {
         throw new AppErrors.AppError("remote.source_not_bound", {
-          public_details: { reason: "asset_not_text", asset_path: request.assetPath },
+          public_details: {
+            reason: "asset_not_supported",
+            asset_path: request.assetPath,
+            file_type: existing_asset.file_type,
+          },
+        });
+      }
+      if (
+        existing_asset.file_type === "EPUB" &&
+        (request.assetBytes === undefined ||
+          request.itemSeeds === undefined ||
+          request.fixedItemSeeds === undefined)
+      ) {
+        throw new AppErrors.AppError("remote.source_not_bound", {
+          public_details: { reason: "asset_changed", asset_path: request.assetPath },
+        });
+      }
+      if (request.itemSeeds !== undefined && request.itemSeeds.length !== request.rows.length) {
+        throw new AppErrors.AppError("remote.source_not_bound", {
+          public_details: { reason: "asset_changed", asset_path: request.assetPath },
         });
       }
       const settings = await this.read_project_write_settings(project_path);
@@ -450,7 +501,41 @@ export class ProjectContentService {
         next_items.set(item.item_id, { ...item });
         used_item_ids.add(item.item_id);
       }
-      for (const row of request.rows) {
+      const previous_asset_items = [...snapshot.public_items_by_id.values()].filter(
+        (item) => item.file_path === request.assetPath,
+      );
+      const allocate_item_id = (previous: ProjectItemPublicRecord | undefined): number => {
+        if (previous !== undefined && !used_item_ids.has(previous.item_id)) {
+          used_item_ids.add(previous.item_id);
+          return previous.item_id;
+        }
+        next_item_id += 1;
+        while (used_item_ids.has(next_item_id)) next_item_id += 1;
+        used_item_ids.add(next_item_id);
+        return next_item_id;
+      };
+      for (const seed of request.fixedItemSeeds ?? []) {
+        const previous = previous_asset_items.find(
+          (item) => item.row_number === seed.row_number && item.tag === seed.tag,
+        );
+        const item_id = allocate_item_id(previous);
+        next_items.set(item_id, {
+          item_id,
+          row_number: seed.row_number,
+          src: seed.src,
+          dst: previous?.dst ?? "",
+          name_src: previous?.name_src ?? null,
+          name_dst: previous?.name_dst ?? null,
+          extra_field: seed.extra_field,
+          tag: seed.tag,
+          file_type: seed.file_type,
+          file_path: request.assetPath,
+          status: previous?.status ?? "NONE",
+          skip_internal_filter: previous?.skip_internal_filter ?? false,
+        });
+      }
+      for (const [row_index, row] of request.rows.entries()) {
+        const seed = request.itemSeeds?.[row_index];
         const override = request.overrides.get(row.row);
         const decision = override?.action ?? row.decision;
         const previous =
@@ -471,27 +556,19 @@ export class ProjectContentService {
           remote_dst.trim() !== "" &&
           !keeps_previous_dst &&
           !protected_previous;
-        let item_id: number;
-        if (can_reuse && !used_item_ids.has(previous.item_id)) {
-          item_id = previous.item_id;
-        } else {
-          next_item_id += 1;
-          while (used_item_ids.has(next_item_id)) next_item_id += 1;
-          item_id = next_item_id;
-        }
-        used_item_ids.add(item_id);
+        const item_id = allocate_item_id(can_reuse ? previous : undefined);
         const dst =
           override?.dst ?? (keeps_previous_dst ? previous_dst : use_remote ? remote_dst : "");
         next_items.set(item_id, {
           item_id,
-          row_number: row.row,
-          src: row.src,
+          row_number: seed?.row_number ?? row.row,
+          src: seed?.src ?? row.src,
           dst,
           name_src: can_reuse ? previous.name_src : null,
           name_dst: can_reuse ? previous.name_dst : null,
-          extra_field: can_reuse ? previous.extra_field : "",
-          tag: can_reuse ? previous.tag : "",
-          file_type: can_reuse ? previous.file_type : "TXT",
+          extra_field: seed?.extra_field ?? (can_reuse ? previous.extra_field : ""),
+          tag: seed?.tag ?? (can_reuse ? previous.tag : ""),
+          file_type: seed?.file_type ?? (can_reuse ? previous.file_type : "TXT"),
           file_path: request.assetPath,
           status:
             override?.dst !== undefined
@@ -524,6 +601,7 @@ export class ProjectContentService {
         settings,
       });
       const meta: MutableJsonRecord = {
+        ...request.extraMeta,
         ...this.build_prefilter_reset_meta(settings, write_output),
         [REMOTE_SOURCE_META_KEY]: request.binding as unknown as JsonValue,
       };
@@ -537,7 +615,7 @@ export class ProjectContentService {
           {
             kind: "update",
             path: request.assetPath,
-            content: new TextEncoder().encode(request.content),
+            content: request.assetBytes ?? new TextEncoder().encode(request.content),
             fileType: existing_asset.file_type,
             pdfDocument: null,
           },

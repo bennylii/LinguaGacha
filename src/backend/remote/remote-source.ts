@@ -121,3 +121,111 @@ function read_string(
   if (!allow_empty && value.trim() === "") return null;
   return value;
 }
+
+/** 文库整本 EPUB 的章节映射键：站点章节 id 只在卷内唯一，必须与分卷一起索引。 */
+export const REMOTE_EPUB_MAP_META_KEY = "remote_epub_map";
+
+export type RemoteEpubDocumentState = "active" | "retired";
+
+export interface RemoteEpubMapVolume {
+  volume_id: string;
+  volume_title: string;
+  prefix: string;
+}
+
+/** 站点章节与合并包文档的稳定对应关系；行号不落库，始终由资产字节重算。 */
+export interface RemoteEpubMapDocument {
+  chapter_id: string;
+  volume_id: string;
+  /** 分卷包内路径，用于说明章节来自哪个源文档。 */
+  source_doc_path: string;
+  /** 合并包内路径；缺失表示文档已从资产移除（当前流程不会移除）。 */
+  doc_path: string;
+  title: string;
+  /** 源卷是否把它排进 spine；退役后按该值恢复线性阅读顺序。 */
+  linear: boolean;
+  state: RemoteEpubDocumentState;
+}
+
+export interface RemoteEpubMap {
+  version: 1;
+  volumes: RemoteEpubMapVolume[];
+  documents: RemoteEpubMapDocument[];
+}
+
+export function build_epub_document_key(volume_id: string, chapter_id: string): string {
+  return `${volume_id}\u0000${chapter_id}`;
+}
+
+/**
+ * 映射由合并结果生成一次，之后只随同步更新；
+ * 站点章节 id 依赖 manifest 原始 href，无法从规范化后的包内路径反推。
+ */
+export function build_remote_epub_map(input: {
+  volumes: readonly RemoteEpubMapVolume[];
+  documents: readonly RemoteEpubMapDocument[];
+}): RemoteEpubMap {
+  return {
+    version: 1,
+    volumes: input.volumes.map((volume) => ({ ...volume })),
+    documents: input.documents.map((document) => ({ ...document })),
+  };
+}
+
+/**
+ * 只接受结构完整且自洽的映射：损坏或手工改写的映射按缺失处理，
+ * 由调用方要求重新导入，避免用错误章节身份发起同步或上传。
+ */
+export function read_remote_epub_map(value: JsonValue | undefined): RemoteEpubMap | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, JsonValue>;
+  if (record["version"] !== 1) return null;
+  const raw_volumes = record["volumes"];
+  const raw_documents = record["documents"];
+  if (!Array.isArray(raw_volumes) || !Array.isArray(raw_documents)) return null;
+
+  const volumes: RemoteEpubMapVolume[] = [];
+  const volume_ids = new Set<string>();
+  for (const entry of raw_volumes) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
+    const item = entry as Record<string, JsonValue>;
+    const volume_id = read_string(item, "volume_id");
+    const volume_title = read_string(item, "volume_title", true);
+    const prefix = read_string(item, "prefix");
+    if (volume_id === null || volume_title === null || prefix === null) return null;
+    if (volume_ids.has(volume_id)) return null;
+    volume_ids.add(volume_id);
+    volumes.push({ volume_id, volume_title, prefix });
+  }
+
+  const documents: RemoteEpubMapDocument[] = [];
+  const keys = new Set<string>();
+  for (const entry of raw_documents) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
+    const item = entry as Record<string, JsonValue>;
+    const chapter_id = read_string(item, "chapter_id");
+    const volume_id = read_string(item, "volume_id");
+    const source_doc_path = read_string(item, "source_doc_path");
+    const doc_path = read_string(item, "doc_path");
+    const title = read_string(item, "title", true);
+    const linear = item["linear"];
+    const state = item["state"];
+    if (
+      chapter_id === null ||
+      volume_id === null ||
+      source_doc_path === null ||
+      doc_path === null ||
+      title === null ||
+      typeof linear !== "boolean" ||
+      (state !== "active" && state !== "retired")
+    ) {
+      return null;
+    }
+    if (!volume_ids.has(volume_id)) return null;
+    const key = build_epub_document_key(volume_id, chapter_id);
+    if (keys.has(key)) return null;
+    keys.add(key);
+    documents.push({ chapter_id, volume_id, source_doc_path, doc_path, title, linear, state });
+  }
+  return { version: 1, volumes, documents };
+}

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { JsonValue } from "../../domain/json";
-import type { ItemNameField, ItemStatus } from "../../domain/item";
+import type { ItemFileType, ItemNameField, ItemStatus } from "../../domain/item";
 import { split_text_lines_for_items } from "../file/shared/file-format-helpers";
 import { AppError } from "../../shared/error/app-error";
 
@@ -10,6 +10,10 @@ export const NOVELIA_HOSTS = ["n.novelia.cc", "books.fishhawk.top", "books1.fish
 
 /** 单本下载大小上限，避免异常响应耗尽内存。 */
 export const REMOTE_NOVEL_MAX_BYTES = 64 * 1024 * 1024;
+// 双语导出同时包含原文与译文，体积可能接近源文两倍；译文失败只影响沿用，不应误判为源文超限。
+export const REMOTE_TRANSLATIONS_MAX_BYTES = 256 * 1024 * 1024;
+// 文库整本由多个分卷合并，单卷上限之上再留出合并包余量。
+export const REMOTE_EPUB_MAX_BYTES = 256 * 1024 * 1024;
 
 const NOVEL_PATH_PATTERN = /^\/novel\/([^/]+)\/([^/]+)(?:\/.*)?$/u;
 const WENKU_PATH_PATTERN = /^\/wenku\/([^/]+)(?:\/.*)?$/u;
@@ -94,6 +98,15 @@ export interface RemoteOldItem {
   name_dst: ItemNameField;
   status: ItemStatus;
   extra_field: JsonValue;
+}
+
+/** 格式适配器重解析新资产后交给工程写入的条目种子，保留格式私有定位字段。 */
+export interface RemoteAssetItemSeed {
+  src: string;
+  extra_field: JsonValue;
+  tag: string;
+  file_type: ItemFileType;
+  row_number: number;
 }
 
 export type RemoteRowDecision = "preserve" | "keep" | "retranslate";
@@ -312,6 +325,40 @@ export function split_remote_document(text: string): RemoteDocument {
     });
   }
   return { text, lines, chapters };
+}
+
+export interface NormalizedRemoteText {
+  text: string;
+  /** 原始远端行号到规范化行号的映射，站点译文按同一映射转键。 */
+  raw_to_canonical: Map<number, number>;
+}
+
+/**
+ * EPUB 没有与远端完全相同的空行和标题标记。绑定与同步前把双方统一成
+ * “一个正文条目一行”的规范文本，同时保留原始行号映射供站点译文转键。
+ */
+export function normalize_remote_source_text(text: string): NormalizedRemoteText {
+  const output: string[] = [];
+  const raw_to_canonical = new Map<number, number>();
+  for (const [row, raw_line] of split_text_lines_for_items(text).entries()) {
+    const line = raw_line.trim();
+    if (line === "") continue;
+    const heading = CHAPTER_HEADING_PATTERN.exec(line);
+    const canonical = heading === null ? line : `# ${(heading[1] ?? "").trim()}`;
+    raw_to_canonical.set(row, output.length);
+    output.push(canonical);
+  }
+  return { text: output.join("\n"), raw_to_canonical };
+}
+
+/** 绑定比较忽略空白差异，但不忽略行序和标题。 */
+export function remote_text_lines_match(left: string, right: string): boolean {
+  const left_lines = split_text_lines_for_items(left);
+  const right_lines = split_text_lines_for_items(right);
+  if (left_lines.length !== right_lines.length) return false;
+  return left_lines.every(
+    (line, index) => normalize_match_line(line) === normalize_match_line(right_lines[index] ?? ""),
+  );
 }
 
 /**

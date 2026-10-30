@@ -80,6 +80,18 @@ export type EpubDocumentUnit =
   | EpubBlockTextDocumentUnit
   | EpubTextRunDocumentUnit;
 
+/** 远程同步使用一条正文行对应一个 EPUB 条目，标题行保留远端 `#` 标记。 */
+export interface EpubSourceLine {
+  text: string;
+  item: Item;
+}
+
+/** 读取结果同时保留全部条目，调用方据此区分正文项与 OPF/nav/NCX 项。 */
+export interface EpubSourceContext {
+  lines: EpubSourceLine[];
+  items: Item[];
+}
+
 /**
  * 元素路径片段使用本地名和同名序号，规避命名空间前缀变化造成的定位漂移
  */
@@ -437,6 +449,63 @@ export class EpubAst {
     }
 
     return items;
+  }
+
+  /**
+   * 远程同步只把正文条目映射成行；OPF 标题、nav 与 NCX 保留为固定条目。
+   * 同一条目内的多个 slot 合并成一行，避免远端段落被内联标记拆成多行。
+   */
+  public async read_source_context_from_stream(
+    content: Uint8Array,
+    rel_path: string,
+  ): Promise<EpubSourceContext> {
+    const items = await this.read_from_stream(content, rel_path);
+    const zip_reader = await JSZip.loadAsync(content);
+    const root_by_path = new Map<string, Element>();
+    const lines: EpubSourceLine[] = [];
+    for (const item of items) {
+      if (!is_epub_content_item(item)) continue;
+      const epub = read_epub_extra(item);
+      if (epub === null) continue;
+      const doc_path = String(epub["doc_path"] ?? "");
+      if (doc_path === "") continue;
+      let root = root_by_path.get(doc_path);
+      if (root === undefined) {
+        const raw = await this.read_zip_bytes(zip_reader, doc_path);
+        if (raw === null) continue;
+        root = this.parse_xhtml_or_html(raw);
+        root_by_path.set(doc_path, root);
+      }
+      const text = this.build_source_line_text(root, epub);
+      if (text !== null) lines.push({ text, item });
+    }
+    return { lines, items };
+  }
+
+  /**
+   * 正文行统一使用块级可见文本；标题补上远端 `#` 标记，供章节对齐复用。
+   */
+  private build_source_line_text(root: Element, epub: JsonRecord): string | null {
+    const mode = String(epub["mode"] ?? "");
+    let elem: Element | null = null;
+    let text = "";
+    if (mode === "text_run") {
+      const ref = read_epub_text_run(epub);
+      if (ref === null) return null;
+      elem = this.find_by_path(root, ref.container_path);
+      if (elem === null) return null;
+      text = this.build_canonical_nodes_text(elem.children.slice(ref.start, ref.end));
+    } else if (mode === "slot_per_line" || mode === "block_text") {
+      const block_path = String(epub["block_path"] ?? "");
+      elem = block_path === "" ? null : this.find_by_path(root, block_path);
+      if (elem === null) return null;
+      text = this.build_canonical_block_text(elem);
+    } else {
+      return null;
+    }
+    const normalized = text.trim();
+    if (normalized === "") return null;
+    return /^h[1-6]$/u.test(this.local_name(elem.name)) ? `# ${normalized}` : normalized;
   }
 
   /**
@@ -1271,6 +1340,13 @@ export function read_epub_extra(item: Item): JsonRecord | null {
   return typeof epub === "object" && epub !== null && !Array.isArray(epub)
     ? (epub as JsonRecord)
     : null;
+}
+
+/** 正文条目排除 OPF 标题、导航页和 NCX，这三类只随原资产保留。 */
+export function is_epub_content_item(item: Item): boolean {
+  const epub = read_epub_extra(item);
+  if (epub === null) return false;
+  return epub["is_nav"] !== true && epub["is_opf_metadata"] !== true && epub["is_ncx"] !== true;
 }
 
 /**

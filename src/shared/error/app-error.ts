@@ -188,6 +188,21 @@ export const APP_ERROR_DEFINITIONS = {
     status: 409,
     severity: "expected",
   },
+  "remote.source_already_bound": {
+    message: "The project is already bound to a remote novel.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.source_not_bindable": {
+    message: "The project has no unique TXT asset to bind.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.source_mismatch": {
+    message: "The project text does not match the remote novel.",
+    status: 409,
+    severity: "expected",
+  },
   "remote.workspace_empty": {
     message: "The remote novel has no readable chapters.",
     status: 400,
@@ -236,6 +251,26 @@ export const APP_ERROR_DEFINITIONS = {
   "remote.sync_unsupported": {
     message: "Site-side sync only applies to web novels.",
     status: 400,
+    severity: "expected",
+  },
+  "remote.wenku_mixed_volumes": {
+    message: "The novel mixes TXT and EPUB volumes.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.epub_layout_unsupported": {
+    message: "The EPUB layout is not supported.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.epub_map_missing": {
+    message: "The project has no chapter map for the merged EPUB.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.epub_document_conflict": {
+    message: "The chapter map does not match the EPUB asset.",
+    status: 409,
     severity: "expected",
   },
 } as const satisfies Readonly<Record<string, AppErrorDefinition>>;

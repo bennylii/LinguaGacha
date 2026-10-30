@@ -4,6 +4,7 @@ type Listener = () => void;
 
 const created_windows: FakeBrowserWindow[] = [];
 let load_error: Error | null = null;
+let load_pending = false;
 
 class FakeBrowserWindow {
   static instances: FakeBrowserWindow[] = [];
@@ -17,6 +18,7 @@ class FakeBrowserWindow {
   loadURL = vi.fn(async (url: string) => {
     this.loaded_url = url;
     if (load_error !== null) throw load_error;
+    if (load_pending) await new Promise<void>(() => {});
   });
   private listeners = new Map<string, Listener[]>();
 
@@ -93,6 +95,7 @@ beforeEach(() => {
   created_windows.length = 0;
   FakeBrowserWindow.instances.length = 0;
   load_error = null;
+  load_pending = false;
   partition_session.fetch.mockReset();
   partition_session.cookies.get.mockReset();
   partition_session.cookies.get.mockResolvedValue([]);
@@ -125,6 +128,19 @@ describe("远程登录窗口宿主", () => {
     expect(result).toEqual({ status: "succeeded", token: "jwt-token", cookie: "session=abc" });
     expect(created_windows[0]?.destroyed).toBe(true);
     expect(created_windows[0]?.visible).toBe(true);
+  });
+
+  it("页面加载完成前就显示窗口，避免登录入口长时间不可见", async () => {
+    load_pending = true;
+    const host = await open_host();
+    const controller = new AbortController();
+    const pending = host(OPERATION, controller.signal);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(created_windows[0]?.visible).toBe(true);
+
+    controller.abort();
+    await expect(pending).resolves.toEqual({ status: "cancelled" });
   });
 
   it("用户关闭登录窗口时返回 cancelled 并停止轮询", async () => {

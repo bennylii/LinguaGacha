@@ -1,7 +1,7 @@
 import { type JSX, useCallback, useEffect, useRef, useState } from "react";
-import { CloudDownload, LogIn, RefreshCw, Send, ShieldCheck, Unlink, X } from "lucide-react";
+import { CloudDownload, Link2, LogIn, RefreshCw, Send, ShieldCheck, Unlink, X } from "lucide-react";
 
-import { api_fetch, open_event_stream } from "@frontend/app/desktop/desktop-api";
+import { api_fetch, DesktopApiError, open_event_stream } from "@frontend/app/desktop/desktop-api";
 import { push_error_toast, push_toast } from "@frontend/app/feedback/desktop-toast";
 import { useAppearance } from "@frontend/app/appearance/appearance-context";
 import { useI18n } from "@frontend/app/locale/locale-context";
@@ -158,6 +158,8 @@ export function RemotePage(): JSX.Element {
   const { resolved_theme } = useAppearance();
   const [auth, set_auth] = useState<RemoteAuth | null>(null);
   const [source, set_source] = useState<RemoteSource | null>(null);
+  const [bind_url, set_bind_url] = useState("");
+  const [is_bind_busy, set_is_bind_busy] = useState(false);
   const [workspace, set_workspace] = useState<RemoteWorkspaceSnapshot | null>(null);
   const [token_input, set_token_input] = useState("");
   const [origin_input, set_origin_input] = useState("");
@@ -206,6 +208,31 @@ export function RemotePage(): JSX.Element {
     const payload = await api_fetch<{ source: RemoteSource }>("/api/remote/source/read", {});
     set_source(payload.source);
   }, []);
+
+  /** 补绑定只提交地址；只有工程唯一的 TXT 正文资产且正文一致时后端才允许绑定，EPUB 需整本导入。 */
+  async function bind_source(): Promise<void> {
+    const url = bind_url.trim();
+    if (url === "" || is_bind_busy) return;
+    set_is_bind_busy(true);
+    try {
+      const payload = await api_fetch<{ source: RemoteSource }>("/api/remote/source/bind", {
+        url,
+      });
+      set_source(payload.source);
+      set_bind_url("");
+      push_toast("success", t("remote_page.source.bind_success"));
+    } catch (error) {
+      if (error instanceof DesktopApiError && error.code === "remote.source_mismatch") {
+        push_error_toast(t("remote_page.source.bind_mismatch"), error);
+      } else if (error instanceof DesktopApiError && error.code === "remote.source_not_bindable") {
+        push_error_toast(t("remote_page.source.bind_not_bindable"), error);
+      } else {
+        push_error_toast(t("remote_page.source.bind_failed"), error);
+      }
+    } finally {
+      set_is_bind_busy(false);
+    }
+  }
 
   const refresh_workspace = useCallback(async (): Promise<void> => {
     const payload = await api_fetch<{ remote_workspace: RemoteWorkspaceSnapshot }>(
@@ -663,8 +690,42 @@ export function RemotePage(): JSX.Element {
           <CardDescription>{t("remote_page.source.description")}</CardDescription>
         </CardHeader>
         <CardContent className="remote-page__stack">
-          {source?.binding === null || source === null ? (
+          {source === null ? (
             <p className="remote-page__hint">{t("remote_page.source.unbound")}</p>
+          ) : source.binding === null ? (
+            <div className="remote-page__bind">
+              <p className="remote-page__hint">{t("remote_page.source.unbound")}</p>
+              <p className="remote-page__hint">{t("remote_page.source.bind_hint")}</p>
+              <div className="remote-page__url-row">
+                <Input
+                  value={bind_url}
+                  aria-label={t("remote_page.source.bind_url_placeholder")}
+                  placeholder={t("remote_page.source.bind_url_placeholder")}
+                  disabled={is_bind_busy}
+                  onChange={(event) => set_bind_url(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void bind_source();
+                    }
+                  }}
+                />
+                <AppButton
+                  type="button"
+                  disabled={is_bind_busy || bind_url.trim() === ""}
+                  onClick={() => {
+                    void bind_source();
+                  }}
+                >
+                  {is_bind_busy ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <Link2 data-icon="inline-start" />
+                  )}
+                  {t(is_bind_busy ? "remote_page.source.binding" : "remote_page.source.bind")}
+                </AppButton>
+              </div>
+            </div>
           ) : (
             <>
               <dl className="remote-page__facts">
@@ -1017,10 +1078,9 @@ export function RemotePage(): JSX.Element {
                         ? ""
                         : ` · ${
                             chapter.message === "local_translation_incomplete" ||
-                            chapter.message === "identical_to_remote_translation"
-                              ? t(
-                                  `remote_page.workspace.chapter_message.${chapter.message}`,
-                                )
+                            chapter.message === "identical_to_remote_translation" ||
+                            chapter.message === "local_chapter_mismatch"
+                              ? t(`remote_page.workspace.chapter_message.${chapter.message}`)
                               : t("remote_page.workspace.chapter_error").replace(
                                   "{ERROR}",
                                   chapter.message,

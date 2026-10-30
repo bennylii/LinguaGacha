@@ -58,7 +58,17 @@ export const en_us_remote_page = {
     title: "Novel source",
     description:
       "A full sync re-downloads the site text and keeps matching project translations by content; rows without a project translation reuse the site's GPT translation.",
-    unbound: "This project is not bound to a novel URL. Choose “Novel URL” when creating it.",
+    unbound: "This project is not bound to a novel URL.",
+    bind_url_placeholder: "Paste an n.novelia.cc novel page URL",
+    bind: "Bind",
+    binding: "Binding …",
+    bind_hint:
+      "Binding is allowed only when the project has exactly one TXT text file and its content matches the site; EPUB must be imported as a whole; existing translations are not changed.",
+    bind_success: "Novel source bound",
+    bind_failed: "Failed to bind the novel source …",
+    bind_mismatch: "The project text does not match the site; not bound",
+    bind_not_bindable:
+      "The project must contain exactly one TXT text file; not bound. EPUB must be imported as a whole.",
     novel: "Novel",
     url: "URL",
     asset: "Project file",
@@ -145,7 +155,9 @@ export const en_us_remote_page = {
     },
     chapter_message: {
       local_translation_incomplete: "Local translation incomplete; skipped",
-      identical_to_remote_translation: "Identical to the site's existing translation; not re-uploaded",
+      identical_to_remote_translation:
+        "Identical to the site's existing translation; not re-uploaded",
+      local_chapter_mismatch: "Local chapter paragraphs do not match the site chapter; skipped",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_remote_page>;

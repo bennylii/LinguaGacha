@@ -219,6 +219,38 @@ describe("NoveliaClient 网页小说", () => {
     expect(download.text).toBe(WEB_TEXT);
   });
 
+  it("双语导出超过源文上限但在译文预算内时仍还原译文", async () => {
+    const source_text = ["# 一", "あ", "い"].join("\n");
+    const translated_text = ["# 一", "# 一中文", "あ", "甲", "い", "乙"].join("\n");
+    const { client } = create_client((url) => {
+      if (url.pathname.endsWith("/file")) {
+        const mode = url.searchParams.get("mode");
+        if (mode === "jp-zh") {
+          return new Response(translated_text, {
+            status: 200,
+            headers: {
+              "content-type": "text/plain; charset=utf-8",
+              // 超过源文 64 MB 上限，但低于译文独立预算。
+              "content-length": String(70 * 1024 * 1024),
+            },
+          });
+        }
+        return text(source_text);
+      }
+      return json(WEB_METADATA);
+    });
+
+    const download = await client.download(WEB_REF, undefined, { translations: true });
+
+    expect(download.translations).toEqual(
+      new Map([
+        [0, "# 一中文"],
+        [1, "甲"],
+        [2, "乙"],
+      ]),
+    );
+  });
+
   it("有 token 时携带 Bearer，没有 token 时匿名下载", async () => {
     const authorized = create_client(() => json(WEB_METADATA), "secret-token");
     await authorized.client.read_metadata(WEB_REF);

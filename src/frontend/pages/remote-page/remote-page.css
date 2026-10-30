@@ -55,6 +55,24 @@
   color: var(--muted-foreground);
 }
 
+.remote-page__bind {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.remote-page__url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.remote-page__url-row > input {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
 .remote-page__warning {
   margin: 0;
   padding: 8px 10px;

@@ -76,6 +76,7 @@ const POST_PATHS = new Set([
   "/api/remote/workspace/cancel",
   "/api/remote/workspace/snapshot",
   "/api/remote/source/read",
+  "/api/remote/source/bind",
   "/api/remote/auth/status",
   "/api/remote/auth/login",
   "/api/remote/auth/login/cancel",
@@ -262,6 +263,21 @@ describe("register_api_routes", () => {
     expect(fixture.summarize_source_files).toHaveBeenCalledWith(request);
   });
 
+  it("小说源补绑定路由校验地址并转交服务", async () => {
+    const fixture = create_route_fixture();
+    const source = { binding: null, asset_present: false, snapshot_present: false };
+    fixture.bind_source.mockResolvedValueOnce(source);
+    const handler = read_post_handler(fixture.post_json, "/api/remote/source/bind");
+    const url = "https://n.novelia.cc/novel/kakuyomu/123456";
+
+    await expect(handler({ url })).resolves.toEqual({ source });
+    expect(fixture.bind_source).toHaveBeenCalledWith(url);
+    await expect(handler({ url: " " })).rejects.toMatchObject({
+      code: "request.validation_failed",
+    });
+    expect(fixture.bind_source).toHaveBeenCalledTimes(1);
+  });
+
   it("设置更新只调用组合根提供的受保护写入口", () => {
     const fixture = create_route_fixture();
 
@@ -312,6 +328,11 @@ function create_route_fixture() {
   const copy_model = vi.fn();
   const source_file_summary = { source_file_count: 1, format_hit_counts: { txt: 1 } };
   const summarize_source_files = vi.fn(() => source_file_summary);
+  const bind_source = vi.fn(async () => ({
+    binding: null,
+    asset_present: false,
+    snapshot_present: false,
+  }));
   const agent = {
     get_snapshot: vi.fn(() => ({
       revision: 0,
@@ -341,6 +362,12 @@ function create_route_fixture() {
       lifecycle: { summarize_source_files },
       summary: {},
       content: {},
+    },
+    remote: {
+      sources: { bind_existing: bind_source },
+      auth: {},
+      workspace: {},
+      chapters: {},
     },
     proofreading: { query: {}, commands: {} },
     quality: { statistics: {}, rules: {}, prompts: {} },
@@ -398,6 +425,7 @@ function create_route_fixture() {
     update_queued_message,
     source_file_summary,
     summarize_source_files,
+    bind_source,
     start_task,
     stop,
     update_settings,

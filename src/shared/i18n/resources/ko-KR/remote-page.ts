@@ -56,8 +56,17 @@ export const ko_kr_remote_page = {
     title: "소설 원본",
     description:
       "전체 동기화는 사이트 텍스트를 다시 내려받고 내용이 일치하는 프로젝트 번역을 유지합니다. 프로젝트 번역이 없는 줄은 사이트 GPT 번역을 이어서 사용합니다.",
-    unbound:
-      "이 프로젝트는 소설 주소에 연결되어 있지 않습니다. 만들 때 「소설 주소」를 선택하세요.",
+    unbound: "이 프로젝트는 소설 주소에 연결되어 있지 않습니다.",
+    bind_url_placeholder: "n.novelia.cc 소설 페이지 주소 붙여넣기",
+    bind: "바인딩",
+    binding: "바인딩 중 …",
+    bind_hint:
+      "프로젝트에 본문 파일이 하나만 있고 그 파일이 TXT이며 사이트 텍스트와 일치할 때만 바인딩합니다. EPUB은 통째로 가져와야 합니다. 기존 번역은 변경하지 않습니다.",
+    bind_success: "소설 소스를 바인딩했습니다",
+    bind_failed: "소설 소스 바인딩 실패 …",
+    bind_mismatch: "프로젝트 텍스트가 사이트와 일치하지 않아 바인딩하지 않았습니다",
+    bind_not_bindable:
+      "프로젝트에는 하나의 TXT 본문 파일만 있어야 합니다. 바인딩하지 않았습니다. EPUB은 통째로 가져와야 합니다.",
     novel: "작품",
     url: "주소",
     asset: "프로젝트 파일",
@@ -144,6 +153,7 @@ export const ko_kr_remote_page = {
     chapter_message: {
       local_translation_incomplete: "로컬 번역이 불완전하여 건너뜀",
       identical_to_remote_translation: "사이트의 기존 번역과 동일하여 다시 업로드하지 않았습니다",
+      local_chapter_mismatch: "로컬 장의 문단이 사이트 장과 일치하지 않아 건너뜀",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_remote_page>;

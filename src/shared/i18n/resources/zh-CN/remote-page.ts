@@ -53,7 +53,16 @@ export const zh_cn_remote_page = {
     title: "小说源",
     description:
       "整本同步会重新下载站点文本，按内容保留可匹配的工程译文；工程没有译文时沿用站点 GPT 译文。",
-    unbound: "当前工程没有绑定小说地址。请在新建工程时选择「小说地址」。",
+    unbound: "当前工程没有绑定小说地址。",
+    bind_url_placeholder: "粘贴 n.novelia.cc 小说页面地址",
+    bind: "绑定",
+    binding: "绑定中 …",
+    bind_hint:
+      "仅当工程只有一个 TXT 正文文件、正文与站点一致时才会绑定；EPUB 需整本导入；不会修改现有译文。",
+    bind_success: "小说源已绑定",
+    bind_failed: "绑定小说源失败 …",
+    bind_mismatch: "工程文本与站点文本不一致，未绑定",
+    bind_not_bindable: "工程必须只有一个 TXT 正文文件，未绑定；EPUB 需整本导入",
     novel: "作品",
     url: "地址",
     asset: "工程文件",
@@ -137,6 +146,7 @@ export const zh_cn_remote_page = {
     chapter_message: {
       local_translation_incomplete: "本地译文不完整，已跳过",
       identical_to_remote_translation: "与站点已有译文一致，未重复上传",
+      local_chapter_mismatch: "本地章节与站点段落无法一一对应，已跳过",
     },
   },
 } as const;

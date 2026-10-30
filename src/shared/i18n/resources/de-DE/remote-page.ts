@@ -59,7 +59,17 @@ export const de_de_remote_page = {
     title: "Romanquelle",
     description:
       "Eine vollständige Synchronisierung lädt den Websitetext neu und behält passende Projektübersetzungen anhand des Inhalts; Zeilen ohne Projektübersetzung übernehmen die GPT-Übersetzung der Website.",
-    unbound: "Dieses Projekt ist an keine Roman-URL gebunden. Wähle beim Erstellen „Roman-URL“.",
+    unbound: "Dieses Projekt ist an keine Roman-URL gebunden.",
+    bind_url_placeholder: "n.novelia.cc-Romanseiten-URL einfügen",
+    bind: "Binden",
+    binding: "Wird gebunden …",
+    bind_hint:
+      "Das Binden ist nur möglich, wenn das Projekt genau eine TXT-Textdatei enthält und ihr Inhalt mit der Website übereinstimmt; EPUB muss als Ganzes importiert werden; vorhandene Übersetzungen werden nicht geändert.",
+    bind_success: "Romanquelle gebunden",
+    bind_failed: "Romanquelle konnte nicht gebunden werden …",
+    bind_mismatch: "Der Projekttext stimmt nicht mit der Website überein; nicht gebunden",
+    bind_not_bindable:
+      "Das Projekt muss genau eine TXT-Textdatei enthalten; nicht gebunden. EPUB muss als Ganzes importiert werden.",
     novel: "Werk",
     url: "URL",
     asset: "Projektdatei",
@@ -147,7 +157,10 @@ export const de_de_remote_page = {
     },
     chapter_message: {
       local_translation_incomplete: "Lokale Übersetzung unvollständig; übersprungen",
-      identical_to_remote_translation: "Identisch mit der vorhandenen Übersetzung der Seite; nicht erneut hochgeladen",
+      identical_to_remote_translation:
+        "Identisch mit der vorhandenen Übersetzung der Seite; nicht erneut hochgeladen",
+      local_chapter_mismatch:
+        "Absätze des lokalen Kapitels passen nicht zum Kapitel der Seite; übersprungen",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_remote_page>;

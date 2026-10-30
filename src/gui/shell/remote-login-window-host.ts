@@ -91,11 +91,13 @@ export function create_remote_login_window_host(): RemoteAuthHost & {
     });
     open_windows.add(current);
     signal?.addEventListener("abort", on_abort, { once: true });
+    // 站点首屏可能因网络、代理或挑战页长时间不完成；先显示窗口，
+    // 让用户至少能看到登录入口和加载状态，而不是等待一个不可见窗口。
+    current.show();
     void current
       .loadURL(operation.url)
       .then(() => {
         if (settled) return;
-        current.show();
         poll = setInterval(poll_once, LOGIN_POLL_INTERVAL_MS);
         poll.unref?.();
         timeout = setTimeout(() => {

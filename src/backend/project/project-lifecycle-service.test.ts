@@ -5,6 +5,7 @@ import { create_godot_fixture, godot_pack_fixture } from "../../test/godot-fixtu
 import { ProjectDatabaseAccess } from "../database/database-operations";
 import { create_pdf_execution } from "../file/pdf/test-support";
 import { read_zip_fixture, zip_text } from "../../test/zip-fixture";
+import { create_epub_fixture } from "../../test/epub-fixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectSessionState } from "./project-session-state";
 import fs from "node:fs";
@@ -28,7 +29,11 @@ import {
   type ProjectLanguageSettings,
 } from "../../domain/project-settings";
 import type { RemoteNovelImportPort } from "../remote/novel-source-service";
-import type { RemoteSourceBinding } from "../remote/remote-source";
+import {
+  build_remote_epub_map,
+  REMOTE_EPUB_MAP_META_KEY,
+  type RemoteSourceBinding,
+} from "../remote/remote-source";
 
 type TestProjectDatabase = ProjectDatabase & {
   upsert_meta_entries: ReturnType<typeof vi.fn>;
@@ -115,6 +120,7 @@ describe("ProjectLifecycleService", () => {
         [1, "你好"],
         [2, "再见"],
       ]),
+      epub_map: null,
       commit_snapshot: async () => {},
       dispose: async () => {},
     }));
@@ -163,6 +169,67 @@ describe("ProjectLifecycleService", () => {
         { row: 0, dst: "", status: "NONE" },
         { row: 1, dst: "", status: "NONE" },
         { row: 2, dst: "", status: "NONE" },
+      ]);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("文库整本 EPUB 新建时把章节映射与资产一起写入", async () => {
+    const root = create_temp_dir();
+    const source = path.join(root, "remote.epub");
+    fs.writeFileSync(source, await create_epub_fixture("こんにちは"));
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "wenku",
+      provider_id: "",
+      novel_id: "12345",
+      url: "https://n.novelia.cc/wenku/12345",
+      title: "测试小说",
+      asset_path: "remote.epub",
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+    const epub_map = build_remote_epub_map({
+      volumes: [{ volume_id: "1.epub", volume_title: "第一卷", prefix: "vol-1.epub" }],
+      documents: [
+        {
+          chapter_id: "OPS.chapter.xhtml",
+          volume_id: "1.epub",
+          source_doc_path: "OPS/chapter.xhtml",
+          doc_path: "OEBPS/vol-1.epub/OPS/chapter.xhtml",
+          title: "第一章",
+          linear: true,
+          state: "active",
+        },
+      ],
+    });
+    const prepare_import = vi.fn(async () => ({
+      source_path: source,
+      binding,
+      content_hash: "hash",
+      text: "# 第一章\nこんにちは",
+      translations: new Map([[1, "你好"]]),
+      epub_map,
+      commit_snapshot: async () => {},
+      dispose: async () => {},
+    }));
+    const database = new ProjectDatabase();
+    const service = create_service({ database, remote_import: { prepare_import } });
+    try {
+      const project_path = path.join(root, "wenku.lg");
+      await service.create_project_commit({
+        path: project_path,
+        remote_novel_url: binding.url,
+        languages: { source_language: "JA", target_language: "ZH" },
+      });
+
+      const meta = await database.get_all_meta(project_path);
+      expect(meta[REMOTE_EPUB_MAP_META_KEY]).toEqual(epub_map);
+      expect(await database.get_all_asset_records(project_path)).toMatchObject([
+        { path: "remote.epub", file_type: "EPUB" },
       ]);
     } finally {
       await database.close();
@@ -794,6 +861,7 @@ describe("ProjectLifecycleService", () => {
           src: "魔力",
           dst: "Mana",
           info: "",
+          evidence: "",
           case_sensitive: false,
         },
       ]);

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type { JsonRecord, JsonValue } from "../../domain/json";
@@ -9,6 +10,7 @@ import type { ProjectWriteResult } from "../../shared/project-event";
 import { random_id } from "../../shared/utils/identifier";
 import type { AppPathService } from "../app/app-path-service";
 import type { ProjectDatabase } from "../database/database-operations";
+import type { ProjectAssetRecord } from "../database/project-database-access";
 import {
   build_section_revisions_from_meta,
   get_section_revision,
@@ -16,14 +18,17 @@ import {
 import type {
   RemoteAssetReplaceRequest,
   RemoteAssetRowOverride,
+  RemoteSourceBindRequest,
 } from "../project/project-content-service";
 import type { ProjectFileLock } from "../project/project-file-lock";
 import type { ProjectSessionState } from "../project/project-session-state";
 import { NoveliaClient, type RemoteNovelMetadata } from "./novelia-client";
+import { build_epub_remote_source, read_epub_remote_source } from "./epub-remote-source";
 import {
   align_remote_documents,
   build_add_only_plan,
   build_novel_filename,
+  normalize_remote_source_text,
   parse_novel_ref,
   sha256_text,
   split_remote_document,
@@ -37,11 +42,26 @@ import {
 } from "./novelia-source";
 import {
   build_remote_source_binding,
+  read_remote_epub_map,
   read_remote_source_binding,
+  REMOTE_EPUB_MAP_META_KEY,
   REMOTE_SOURCE_META_KEY,
+  type RemoteEpubMap,
   type RemoteSourceBinding,
 } from "./remote-source";
 import type { RemoteSnapshotStore } from "./remote-snapshot-store";
+import {
+  assert_wenku_volumes_bindable,
+  build_wenku_epub_import,
+  build_wenku_epub_package,
+} from "./wenku-epub-source";
+import {
+  apply_wenku_epub_sync_plan,
+  build_wenku_epub_sync_plans,
+  read_wenku_epub_local_package,
+  read_wenku_epub_remote_package,
+  type WenkuEpubSyncPlans,
+} from "./wenku-epub-sync";
 
 const STAGING_DIRECTORY = ["remote", "staging"] as const;
 const STAGING_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
@@ -52,6 +72,7 @@ export type RemoteSyncMode = (typeof REMOTE_SYNC_MODES)[number];
 
 export interface RemoteAssetWriter {
   replace_remote_asset(request: RemoteAssetReplaceRequest): Promise<ProjectWriteResult>;
+  bind_remote_source(request: RemoteSourceBindRequest): Promise<ProjectWriteResult>;
 }
 
 /** 一次已下载但尚未提交的导入；提交快照与清理暂存由调用方决定。 */
@@ -61,6 +82,8 @@ export interface RemoteNovelImport {
   content_hash: string;
   text: string;
   translations: ReadonlyMap<number, string>; // 站点 GPT 译文，键为源文行号
+  /** 文库整本 EPUB 的章节映射；工程创建时随资产一起落库。 */
+  epub_map: RemoteEpubMap | null;
   /** 工程创建提交成功后写入上次同步快照。 */
   commit_snapshot: (project_path: string) => Promise<void>;
   /** 删除本次暂存目录；重复调用安全。 */
@@ -158,7 +181,12 @@ interface SyncStash {
   filename: string;
   next_text: string;
   plan: RemoteAlignmentPlan;
+  /** 文库整本 EPUB 走文档级计划；文本来源为 null。 */
+  epub_plans: WenkuEpubSyncPlans | null;
+  asset_type: string;
   current_asset_hash: string;
+  /** EPUB 正文哈希相同也可能只改了图片等资源，提交时用原始字节哈希复查。 */
+  asset_hash: string;
   files_revision: number;
   items_revision: number;
   created_at: number;
@@ -216,6 +244,13 @@ export class NovelSourceService implements RemoteNovelImportPort {
     options: { translations?: boolean } = {},
   ): Promise<RemoteNovelImport> {
     const ref = parse_novel_ref(url);
+    if (ref.kind === "wenku") {
+      const metadata = await this.client.read_metadata(ref, signal);
+      const formats = assert_wenku_volumes_bindable(metadata);
+      if (formats.includes("epub")) {
+        return await this.prepare_wenku_epub_import(ref, metadata, signal, options);
+      }
+    }
     const download = await this.client.download(ref, signal, options);
     const staged = await this.stage_text(download.filename, download.text);
     const binding = build_remote_source_binding({
@@ -232,6 +267,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
       content_hash: download.content_hash,
       text: download.text,
       translations: download.translations,
+      epub_map: null,
       commit_snapshot: async (project_path) => {
         await this.snapshots.write(project_path, binding, download.text);
       },
@@ -239,8 +275,54 @@ export class NovelSourceService implements RemoteNovelImportPort {
     };
   }
 
+  /**
+   * 文库整本导入：全部分卷还原日文并合并成一个 EPUB，站点已有中文按条目行号沿用。
+   * 合并包正文成为唯一的同步基准，后续不再回落到按章 TXT 拼装。
+   */
+  private async prepare_wenku_epub_import(
+    ref: RemoteNovelRef,
+    metadata: RemoteNovelMetadata,
+    signal: AbortSignal | undefined,
+    options: { translations?: boolean },
+  ): Promise<RemoteNovelImport> {
+    const epub = await build_wenku_epub_import({
+      ref,
+      metadata,
+      client: this.client,
+      include_translations: options.translations === true,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const staged = await this.stage_bytes(epub.filename, epub.bytes);
+    const content_hash = sha256_text(epub.text);
+    const binding = build_remote_source_binding({
+      ref,
+      title: metadata.title,
+      asset_path: epub.filename,
+      remote_hash: content_hash,
+      chapter_count: epub.chapter_count,
+      synced_at: new Date().toISOString(),
+    });
+    return {
+      source_path: staged.source_path,
+      binding,
+      content_hash,
+      text: epub.text,
+      translations: epub.translations,
+      epub_map: epub.map,
+      commit_snapshot: async (project_path) => {
+        await this.snapshots.write(project_path, binding, epub.text);
+      },
+      dispose: staged.dispose,
+    };
+  }
+
   /** 把一段文本暂存为可导入的源文件；调用方用 `dispose` 清理目录。 */
   public async stage_text(file_name: string, text: string): Promise<StagedTextFile> {
+    return await this.stage_bytes(file_name, text);
+  }
+
+  /** 二进制资产与文本共用暂存目录和清理语义。 */
+  public async stage_bytes(file_name: string, data: string | Uint8Array): Promise<StagedTextFile> {
     await this.clean_stale_staging();
     const staging_root = this.get_staging_root();
     const staging_directory = path.join(staging_root, random_id(16));
@@ -258,7 +340,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
         diagnostic_context: { reason: "staging_path_escape" },
       });
     }
-    await this.native_fs.write_file(source_path, text);
+    await this.native_fs.write_file(source_path, data);
     let disposed = false;
     return {
       source_path,
@@ -287,6 +369,130 @@ export class NovelSourceService implements RemoteNovelImportPort {
   }
 
   /**
+   * 补绑定只接受工程唯一的 TXT 正文资产；额外资产会让后续整本同步的替换目标不明确。
+   * EPUB 只能整本导入时生成，补绑定无法证明其分卷与章节契约，直接拒绝。
+   * 下载前后各调用一次，锁内复查复用同一判定。
+   */
+  private async require_single_remote_asset(project_path: string): Promise<ProjectAssetRecord> {
+    const assets = await this.database.get_all_asset_records(project_path);
+    const [asset, ...extra_assets] = assets;
+    if (asset === undefined) {
+      throw new AppError("remote.source_not_bindable", {
+        public_details: { reason: "no_assets", asset_count: 0, file_types: [] },
+      });
+    }
+    if (extra_assets.length > 0) {
+      throw new AppError("remote.source_not_bindable", {
+        public_details: {
+          reason: "multiple_assets",
+          asset_count: assets.length,
+          file_types: assets.map((candidate) => candidate.file_type),
+        },
+      });
+    }
+    if (asset.file_type === "EPUB") {
+      throw new AppError("remote.source_not_bindable", {
+        public_details: {
+          reason: "epub_requires_import",
+          asset_path: asset.path,
+          file_type: asset.file_type,
+        },
+      });
+    }
+    if (asset.file_type !== "TXT") {
+      throw new AppError("remote.source_not_bindable", {
+        public_details: {
+          reason: "asset_not_supported",
+          asset_path: asset.path,
+          file_type: asset.file_type,
+        },
+      });
+    }
+    return asset;
+  }
+
+  /**
+   * 为已打开且未绑定的工程补写小说来源。
+   * 只有工程只有一个资产且该资产为 TXT 或 EPUB、正文与站点一致时才提交，避免把不相关的本地译文挂到远端作品上。
+   */
+  public async bind_existing(url: string, signal?: AbortSignal): Promise<RemoteSourceSnapshot> {
+    const project_path = this.session_state.require_loaded_project_path();
+    const meta = await this.database.get_all_meta(project_path);
+    if (read_remote_source_binding(meta[REMOTE_SOURCE_META_KEY]) !== null) {
+      throw new AppError("remote.source_already_bound");
+    }
+    const asset = await this.require_single_remote_asset(project_path);
+    const current_bytes = await this.database.read_asset_content(project_path, asset.path);
+    if (current_bytes === null) {
+      throw new AppError("remote.source_not_bindable", {
+        public_details: { reason: "asset_missing", asset_path: asset.path },
+      });
+    }
+    const current_text = current_bytes.toString("utf8");
+    const current_hash = sha256_text(current_text);
+    const ref = parse_novel_ref(url);
+    const download = await this.client.download(ref, signal);
+    const remote_text = download.text;
+    const remote_hash = download.content_hash;
+    if (current_text !== remote_text) {
+      throw new AppError("remote.source_mismatch", {
+        public_details: {
+          reason: "text_changed",
+          current_hash,
+          remote_hash,
+        },
+      });
+    }
+    const binding = build_remote_source_binding({
+      ref,
+      title: download.metadata.title,
+      asset_path: asset.path,
+      remote_hash,
+      chapter_count: download.chapter_count,
+      synced_at: new Date().toISOString(),
+    });
+    return await this.project_lock.run(project_path, async () => {
+      const latest_meta = await this.database.get_all_meta(project_path);
+      if (read_remote_source_binding(latest_meta[REMOTE_SOURCE_META_KEY]) !== null) {
+        throw new AppError("remote.source_already_bound");
+      }
+      const latest_asset = await this.require_single_remote_asset(project_path);
+      if (latest_asset.path !== asset.path) {
+        throw new AppError("remote.source_not_bindable", {
+          public_details: { reason: "asset_changed", asset_path: latest_asset.path },
+        });
+      }
+      const latest_bytes = await this.database.read_asset_content(project_path, asset.path);
+      const latest_text = latest_bytes === null ? null : latest_bytes.toString("utf8");
+      if (latest_text === null || latest_text !== current_text) {
+        throw new AppError("remote.source_mismatch", {
+          public_details: {
+            reason: "asset_changed",
+            current_hash: latest_text === null ? null : sha256_text(latest_text),
+            remote_hash,
+          },
+        });
+      }
+      try {
+        // 快照先于绑定落盘：绑定一旦可见，后续同步就有同一版本的比较基准。
+        this.snapshots.write(project_path, binding, current_text);
+        await this.writer.bind_remote_source({ binding });
+      } catch (cause) {
+        // 写入已提交但通知失败时绑定仍然生效，不能删除刚写入的快照。
+        if (!(cause instanceof AppError && cause.code === "data.committed_sync_failed")) {
+          try {
+            this.snapshots.clear(project_path);
+          } catch {
+            // 清理失败只会留下无绑定快照；读取绑定后才会使用快照，因此不影响工程事实。
+          }
+        }
+        throw cause;
+      }
+      return await this.read_bound_source();
+    });
+  }
+
+  /**
    * 下载整本并以上次同步文本（缺失时退化为当前资产）为基准生成差异。
    * 预览只保留一份内存暂存，应用时必须携带同一 stash_id。
    */
@@ -294,10 +500,12 @@ export class NovelSourceService implements RemoteNovelImportPort {
     const project_path = this.session_state.require_loaded_project_path();
     const binding = await this.require_binding(project_path);
     const ref = parse_novel_ref(binding.url);
-    const target_language = read_project_language_settings(
-      await this.database.get_all_meta(project_path),
-    ).target_language;
-    const include_translations = target_language === "ZH";
+    const meta = await this.database.get_all_meta(project_path);
+    const include_translations = read_project_language_settings(meta).target_language === "ZH";
+    // 文库整本 EPUB 的章节身份来自分卷，必须先按文档级计划比对，不能下载 TXT 导出。
+    if (ref.kind === "wenku" && (await this.read_asset_type(project_path, binding)) === "EPUB") {
+      return await this.preview_wenku_epub_sync(project_path, binding, ref, signal);
+    }
     const download = await this.client.download(ref, signal, {
       translations: include_translations,
     });
@@ -305,11 +513,19 @@ export class NovelSourceService implements RemoteNovelImportPort {
       const current = await this.read_remote_context(project_path, binding);
       const snapshot = this.read_matching_snapshot(project_path, binding);
       const previous_text = snapshot?.text ?? current.text;
+      const normalized =
+        current.asset_type === "EPUB" ? normalize_remote_source_text(download.text) : null;
+      const next_text = normalized?.text ?? download.text;
+      const next_translations = include_translations
+        ? normalized === null
+          ? download.translations
+          : remap_remote_translations(download.translations, normalized.raw_to_canonical)
+        : undefined;
       const plan = align_remote_documents({
         previous_text,
-        next_text: download.text,
+        next_text,
         old_items: current.items,
-        next_translations: include_translations ? download.translations : undefined,
+        next_translations,
       });
       const created_at = Date.now();
       const id = random_id(16);
@@ -319,9 +535,98 @@ export class NovelSourceService implements RemoteNovelImportPort {
         binding,
         ref,
         filename: download.filename,
-        next_text: download.text,
+        next_text,
         plan,
+        epub_plans: null,
+        asset_type: current.asset_type,
         current_asset_hash: current.hash,
+        asset_hash: current.asset_hash,
+        files_revision: current.files_revision,
+        items_revision: current.items_revision,
+        created_at,
+      };
+      const remote_hash = normalized === null ? download.content_hash : sha256_text(next_text);
+      return {
+        stash_id: id,
+        created_at: new Date(created_at).toISOString(),
+        expires_at: new Date(created_at + SYNC_STASH_TTL_MS).toISOString(),
+        binding,
+        filename: download.filename,
+        remote_hash,
+        previous_source: snapshot === null ? "current_asset" : "snapshot",
+        snapshot_available: snapshot !== null,
+        current_asset_changed: snapshot !== null && snapshot.content_hash !== current.hash,
+        stats: plan.stats,
+        chapters: plan.chapters,
+        files_revision: current.files_revision,
+        items_revision: current.items_revision,
+      };
+    });
+  }
+
+  private async read_asset_type(
+    project_path: string,
+    binding: RemoteSourceBinding,
+  ): Promise<string | null> {
+    const assets = await this.database.get_all_asset_records(project_path);
+    return assets.find((asset) => asset.path === binding.asset_path)?.file_type ?? null;
+  }
+
+  /**
+   * 文库整本 EPUB 预览：重新合并远端分卷，再按 `(分卷, 章节 id)` 与本地映射逐文档对齐。
+   * 完整计划与“仅追加”计划同时生成，应用时按模式取用。
+   */
+  private async preview_wenku_epub_sync(
+    project_path: string,
+    binding: RemoteSourceBinding,
+    ref: RemoteNovelRef,
+    signal: AbortSignal | undefined,
+  ): Promise<RemoteSyncPreview> {
+    const metadata = await this.client.read_metadata(ref, signal);
+    const pkg = await build_wenku_epub_package({
+      ref,
+      metadata,
+      client: this.client,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const remote = await read_wenku_epub_remote_package(pkg, pkg.filename);
+    return await this.project_lock.run(project_path, async () => {
+      const current = await this.read_remote_context(project_path, binding);
+      if (current.asset_type !== "EPUB") {
+        throw new AppError("remote.source_not_bound", {
+          public_details: { reason: "asset_changed", asset_path: binding.asset_path },
+        });
+      }
+      const meta = await this.database.get_all_meta(project_path);
+      const map = read_remote_epub_map(meta[REMOTE_EPUB_MAP_META_KEY]);
+      if (map === null) {
+        throw new AppError("remote.epub_map_missing", {
+          public_details: { asset_path: binding.asset_path },
+        });
+      }
+      const local = await read_wenku_epub_local_package(current.bytes, binding.asset_path);
+      const epub_plans = build_wenku_epub_sync_plans({
+        local,
+        old_items: current.items,
+        map,
+        remote,
+        remote_bytes: pkg.bytes,
+      });
+      const { alignment } = epub_plans.full;
+      const created_at = Date.now();
+      const id = random_id(16);
+      this.sync_stash = {
+        id,
+        project_path,
+        binding,
+        ref,
+        filename: binding.asset_path,
+        next_text: alignment.next.text,
+        plan: alignment,
+        epub_plans,
+        asset_type: current.asset_type,
+        current_asset_hash: current.hash,
+        asset_hash: current.asset_hash,
         files_revision: current.files_revision,
         items_revision: current.items_revision,
         created_at,
@@ -331,13 +636,13 @@ export class NovelSourceService implements RemoteNovelImportPort {
         created_at: new Date(created_at).toISOString(),
         expires_at: new Date(created_at + SYNC_STASH_TTL_MS).toISOString(),
         binding,
-        filename: download.filename,
-        remote_hash: download.content_hash,
-        previous_source: snapshot === null ? "current_asset" : "snapshot",
-        snapshot_available: snapshot !== null,
-        current_asset_changed: snapshot !== null && snapshot.content_hash !== current.hash,
-        stats: plan.stats,
-        chapters: plan.chapters,
+        filename: binding.asset_path,
+        remote_hash: sha256_text(alignment.next.text),
+        previous_source: "current_asset",
+        snapshot_available: false,
+        current_asset_changed: false,
+        stats: alignment.stats,
+        chapters: alignment.chapters,
         files_revision: current.files_revision,
         items_revision: current.items_revision,
       };
@@ -394,7 +699,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
     }
     return await this.project_lock.run(project_path, async () => {
       const current = await this.read_remote_context(project_path, stash.binding);
-      if (current.hash !== stash.current_asset_hash) {
+      if (current.hash !== stash.current_asset_hash || current.asset_hash !== stash.asset_hash) {
         this.sync_stash = null;
         throw new AppError("remote.alignment_stale", {
           public_details: { reason: "asset_changed" },
@@ -407,6 +712,16 @@ export class NovelSourceService implements RemoteNovelImportPort {
         this.sync_stash = null;
         throw new AppError("data.revision_conflict");
       }
+      if (stash.epub_plans !== null) {
+        return await this.apply_wenku_epub_sync({
+          mode: input.mode,
+          stash,
+          current,
+          overrides: input.overrides,
+          files_revision,
+          items_revision,
+        });
+      }
       const applied = this.build_sync_application(input.mode, stash, current);
       const binding = build_remote_source_binding({
         ref: stash.ref,
@@ -418,9 +733,25 @@ export class NovelSourceService implements RemoteNovelImportPort {
         ).length,
         synced_at: new Date().toISOString(),
       });
+      const epub_asset =
+        current.asset_type === "EPUB"
+          ? await build_epub_remote_source({
+              bytes: current.bytes,
+              asset_path: binding.asset_path,
+              plan: applied.plan,
+              old_items: current.items,
+            })
+          : null;
       const write = await this.writer.replace_remote_asset({
         assetPath: binding.asset_path,
         content: applied.text,
+        ...(epub_asset === null
+          ? {}
+          : {
+              assetBytes: epub_asset.bytes,
+              itemSeeds: epub_asset.content_seeds,
+              fixedItemSeeds: epub_asset.fixed_seeds,
+            }),
         binding,
         rows: applied.plan.rows,
         overrides: input.overrides,
@@ -449,6 +780,83 @@ export class NovelSourceService implements RemoteNovelImportPort {
         skipped_chapters: applied.skipped_chapters,
       };
     });
+  }
+
+  /**
+   * 文库整本 EPUB 应用：按模式取文档级计划，写出合并包后连同章节映射一次提交。
+   * `add_only` 只并入新增章节；退役与改写只发生在完整同步计划里。
+   */
+  private async apply_wenku_epub_sync(input: {
+    mode: RemoteSyncMode;
+    stash: SyncStash;
+    current: { bytes: Uint8Array };
+    overrides: ReadonlyMap<number, RemoteAssetRowOverride>;
+    files_revision: number;
+    items_revision: number;
+  }): Promise<RemoteSyncApplyResult> {
+    const project_path = this.session_state.require_loaded_project_path();
+    const plans = input.stash.epub_plans;
+    if (plans === null) {
+      throw new AppError("remote.stash_expired", {
+        public_details: { reason: "missing_or_replaced" },
+      });
+    }
+    if (input.mode === "auto" && plans.full.alignment.stats.requires_alignment) {
+      throw new AppError("remote.alignment_required", {
+        public_details: {
+          would_lose: plans.full.alignment.stats.would_lose,
+          total: plans.full.alignment.next.lines.length,
+        },
+      });
+    }
+    const plan = input.mode === "add_only" ? plans.add_only : plans.full;
+    const asset = await apply_wenku_epub_sync_plan({
+      bytes: input.current.bytes,
+      rel_path: input.stash.binding.asset_path,
+      plan,
+    });
+    const binding = build_remote_source_binding({
+      ref: input.stash.ref,
+      title: input.stash.binding.title,
+      asset_path: input.stash.binding.asset_path,
+      remote_hash: sha256_text(asset.text),
+      chapter_count: asset.map.documents.filter((document) => document.state === "active").length,
+      synced_at: new Date().toISOString(),
+    });
+    const write = await this.writer.replace_remote_asset({
+      assetPath: binding.asset_path,
+      content: asset.text,
+      assetBytes: asset.bytes,
+      itemSeeds: asset.content_seeds,
+      fixedItemSeeds: asset.fixed_seeds,
+      binding,
+      rows: plan.alignment.rows,
+      overrides: input.overrides,
+      expectedSectionRevisions: {
+        files: input.files_revision,
+        items: input.items_revision,
+      },
+      extraMeta: { [REMOTE_EPUB_MAP_META_KEY]: asset.map as unknown as JsonValue },
+    });
+    try {
+      this.snapshots.write(project_path, binding, asset.text);
+    } catch (cause) {
+      this.sync_stash = null;
+      throw new AppError("data.committed_sync_failed", {
+        cause,
+        public_details: { committed: true, action: "write_remote_snapshot" },
+        diagnostic_context: { operation: "write_remote_snapshot_after_sync" },
+      });
+    }
+    this.sync_stash = null;
+    return {
+      mode: input.mode,
+      write,
+      binding,
+      stats: plan.alignment.stats,
+      chapters: plan.alignment.chapters,
+      skipped_chapters: [],
+    };
   }
 
   private async require_binding(project_path: string): Promise<RemoteSourceBinding> {
@@ -483,39 +891,48 @@ export class NovelSourceService implements RemoteNovelImportPort {
     text: string;
     hash: string;
     items: RemoteOldItem[];
+    bytes: Uint8Array;
+    asset_type: string;
+    asset_hash: string;
     files_revision: number;
     items_revision: number;
   }> {
+    const assets = await this.database.get_all_asset_records(project_path);
+    const asset = assets.find((candidate) => candidate.path === binding.asset_path);
     const bytes = await this.database.read_asset_content(project_path, binding.asset_path);
-    if (bytes === null) {
+    if (asset === undefined || bytes === null) {
       throw new AppError("remote.source_not_bound", {
         public_details: { reason: "asset_missing", asset_path: binding.asset_path },
       });
     }
-    const text = bytes.toString("utf8");
     const raw_items = await this.database.get_all_items(project_path);
+    const asset_records = raw_items.filter((record) => record["file_path"] === binding.asset_path);
     const items: RemoteOldItem[] = [];
-    for (const record of raw_items) {
-      if (record["file_path"] !== binding.asset_path) continue;
-      const item_id = record["id"];
-      const row = record["row"];
-      if (
-        typeof item_id !== "number" ||
-        !Number.isSafeInteger(item_id) ||
-        typeof row !== "number" ||
-        !Number.isSafeInteger(row)
-      ) {
-        continue;
+    let text: string;
+    if (asset.file_type === "EPUB") {
+      const source = await read_epub_remote_source(bytes, binding.asset_path);
+      const records_by_row = new Map<number, JsonRecord>();
+      for (const record of asset_records) {
+        const row = record["row"];
+        if (typeof row === "number" && Number.isSafeInteger(row)) records_by_row.set(row, record);
       }
-      items.push({
-        item_id,
-        row,
-        src: String(record["src"] ?? ""),
-        dst: String(record["dst"] ?? ""),
-        name_dst: (record["name_dst"] ?? null) as ItemNameField,
-        status: String(record["status"] ?? "NONE") as ItemStatus,
-        extra_field: (record["extra_field"] ?? "") as JsonValue,
-      });
+      for (const [line_index, line] of source.lines.entries()) {
+        const record = records_by_row.get(line.item.row);
+        if (record === undefined) {
+          throw new AppError("remote.source_not_bound", {
+            public_details: { reason: "asset_changed", asset_path: binding.asset_path },
+          });
+        }
+        items.push(to_remote_old_item(record, line_index, line.text));
+      }
+      text = source.text;
+    } else {
+      text = bytes.toString("utf8");
+      for (const record of asset_records) {
+        const row = record["row"];
+        if (typeof row !== "number" || !Number.isSafeInteger(row)) continue;
+        items.push(to_remote_old_item(record, row, String(record["src"] ?? "")));
+      }
     }
     const meta = await this.database.get_all_meta(project_path);
     const revisions = build_section_revisions_from_meta(meta);
@@ -523,6 +940,9 @@ export class NovelSourceService implements RemoteNovelImportPort {
       text,
       hash: sha256_text(text),
       items,
+      bytes,
+      asset_type: asset.file_type,
+      asset_hash: sha256_bytes(bytes),
       files_revision: revisions.files ?? 0,
       items_revision: revisions.items ?? 0,
     };
@@ -554,13 +974,19 @@ export class NovelSourceService implements RemoteNovelImportPort {
   ): { text: string; plan: RemoteAlignmentPlan; skipped_chapters: string[] } {
     if (mode === "add_only") {
       const appended = build_add_only_plan(current.text, stash.plan);
+      const normalized =
+        stash.asset_type === "EPUB" ? normalize_remote_source_text(appended.text) : null;
+      const next_text = normalized?.text ?? appended.text;
       const plan = align_remote_documents({
         previous_text: current.text,
-        next_text: appended.text,
+        next_text,
         old_items: current.items,
-        next_translations: appended.translations,
+        next_translations:
+          normalized === null
+            ? appended.translations
+            : remap_remote_translations(appended.translations, normalized.raw_to_canonical),
       });
-      return { text: appended.text, plan, skipped_chapters: appended.skipped };
+      return { text: next_text, plan, skipped_chapters: appended.skipped };
     }
     if (mode === "auto" && stash.plan.stats.requires_alignment) {
       throw new AppError("remote.alignment_required", {
@@ -608,6 +1034,41 @@ export class NovelSourceService implements RemoteNovelImportPort {
       // 清理失败不会改变已提交事实，下次启动仍会按时间重试。
     }
   }
+}
+
+function sha256_bytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function to_remote_old_item(record: JsonRecord, row: number, src: string): RemoteOldItem {
+  const item_id = record["id"];
+  if (typeof item_id !== "number" || !Number.isSafeInteger(item_id)) {
+    throw new AppError("remote.source_not_bound", {
+      public_details: { reason: "asset_changed" },
+    });
+  }
+  return {
+    item_id,
+    row,
+    src,
+    dst: String(record["dst"] ?? ""),
+    name_dst: (record["name_dst"] ?? null) as ItemNameField,
+    status: String(record["status"] ?? "NONE") as ItemStatus,
+    extra_field: (record["extra_field"] ?? "") as JsonValue,
+  };
+}
+
+/** 站点译文按原始行号返回，规范化后必须同步转键，避免 EPUB 复用译文错行。 */
+function remap_remote_translations(
+  translations: ReadonlyMap<number, string>,
+  raw_to_canonical: ReadonlyMap<number, number>,
+): Map<number, string> {
+  const result = new Map<number, string>();
+  for (const [raw_row, dst] of translations) {
+    const row = raw_to_canonical.get(raw_row);
+    if (row !== undefined) result.set(row, dst);
+  }
+  return result;
 }
 
 function build_preview(ref: RemoteNovelRef, metadata: RemoteNovelMetadata): RemoteNovelPreview {

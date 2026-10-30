@@ -133,6 +133,9 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.postJson("/api/remote/source/read", async () => ({
     source: (await remote.sources.read_bound_source()) as unknown as JsonValue,
   }));
+  context.postJson("/api/remote/source/bind", async (body) => ({
+    source: (await remote.sources.bind_existing(require_remote_url(body))) as unknown as JsonValue,
+  }));
   context.postJson("/api/remote/auth/status", () => ({
     auth: remote.auth.snapshot() as unknown as JsonValue,
   }));
