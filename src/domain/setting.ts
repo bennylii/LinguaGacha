@@ -59,6 +59,7 @@ export type RecentProjectSetting = Static<typeof RECENT_PROJECT_SETTING_SCHEMA>;
 export const SETTING_SNAPSHOT_SCHEMA = Type.Object(
   {
     agent_approval_mode: Type.Enum(AGENT_APPROVAL_MODES), // Agent 工程写入的审批方式。
+    agent_term_lookup_enabled: Type.Boolean(), // 是否向 Agent 提供公开词典与百科查询。
     agent_auto_resume_enabled: Type.Boolean(), // Agent 可重试失败后是否自动重试。
     agent_auto_resume_initial_delay: Type.Number(), // 首次自动重试前的等待秒数。
     agent_auto_resume_max_delay: Type.Number(), // 指数退避封顶的等待秒数。
@@ -98,6 +99,7 @@ type SettingKey = keyof SettingSnapshot;
 
 export const DEFAULT_SETTING: SettingSnapshot & JsonRecord = {
   agent_approval_mode: "manual",
+  agent_term_lookup_enabled: true,
   agent_auto_resume_enabled: AGENT_AUTO_RESUME_DEFAULT_ENABLED,
   agent_auto_resume_initial_delay: AGENT_AUTO_RESUME_DEFAULT_INITIAL_DELAY_SECONDS,
   agent_auto_resume_max_delay: AGENT_AUTO_RESUME_DEFAULT_MAX_DELAY_SECONDS,

@@ -13,6 +13,7 @@ const snapshot: ExpertSettingsSnapshot = {
   agent_auto_resume_max_attempts: 0,
   agent_auto_continue_enabled: false,
   agent_auto_continue_max_continues: 10,
+  agent_term_lookup_enabled: true,
   preceding_lines_threshold: 3,
   clean_ruby: false,
   deduplication_in_bilingual: false,
@@ -29,6 +30,7 @@ vi.mock("@frontend/features/settings-editor/use-settings-editor", () => ({
       agent_auto_resume_max_attempts: false,
       agent_auto_continue_enabled: false,
       agent_auto_continue_max_continues: false,
+      agent_term_lookup_enabled: false,
       preceding_lines_threshold: false,
       clean_ruby: false,
       deduplication_in_bilingual: false,
@@ -140,6 +142,20 @@ describe("useExpertSettingsState", () => {
     });
     expect(commit_update).toHaveBeenCalledWith("agent_auto_continue_max_continues", {
       agent_auto_continue_max_continues: 1_000,
+    });
+  });
+
+  it("术语查证开关单独保存，恢复到当前值时不再提交", async () => {
+    await render_hook();
+
+    await act(async () => {
+      await latest_state?.update_agent_term_lookup_enabled(false);
+      await latest_state?.update_agent_term_lookup_enabled(true);
+    });
+
+    expect(commit_update).toHaveBeenCalledTimes(1);
+    expect(commit_update).toHaveBeenCalledWith("agent_term_lookup_enabled", {
+      agent_term_lookup_enabled: false,
     });
   });
 

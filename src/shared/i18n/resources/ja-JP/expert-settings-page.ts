@@ -3,6 +3,11 @@ import type { LocaleMessageSchema } from "../../types";
 export const ja_jp_expert_settings_page = {
   title: "エキスパート設定",
   fields: {
+    agent_term_lookup_enabled: {
+      title: "Agent の用語検索",
+      description:
+        "Wikipedia、Wiktionary、Jotoba、ローカルの JMdict 常用語パッケージを検索できます。公開情報のみを使用し、プロジェクトの読み取りや変更は行いません。既定で有効です",
+    },
     agent_auto_resume_enabled: {
       title: "Agent の自動再試行",
       description:

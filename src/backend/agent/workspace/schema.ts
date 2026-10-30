@@ -176,6 +176,7 @@ export const AGENT_WORKSPACE_PROJECT_META_SCHEMA = Type.Object(
   {
     source_language: Type.String(),
     target_language: Type.String(),
+    glossary_enabled: Type.Boolean({ description: "当前工程的术语表是否参与翻译" }),
     counts: Type.Object(
       {
         files: Type.Integer({ minimum: 0 }),

@@ -42,6 +42,7 @@ import type { AppLanguage } from "../../domain/app-language";
 import type { JsonRecord } from "../../domain/json";
 import type { AgentChatChange, AgentChatEvent } from "../../shared/agent";
 import type { AgentWebSearchPort } from "./tools/web-search";
+import type { AgentTermLookupPort } from "./tools/lookup-term";
 import type { AgentNovelChaptersPort } from "./tools/novel-chapters";
 import type { AgentNovelChapterImportPort } from "./tools/novel-chapter-import";
 import type { AgentNovelChapterReadPort } from "./tools/novel-chapter-read";
@@ -2448,6 +2449,53 @@ describe("AgentService", () => {
     await wait_for_idle(service);
 
     expect(fake_agent_state.tool_names.at(-1)).toContain("web_search");
+  });
+
+  it("术语查证开关关闭时不注册 lookup_term，开启后注册", async () => {
+    const lookup = vi.fn<AgentTermLookupPort>(async () => ({
+      query: "",
+      languages: { source: "JA", target: "ZH", isDefault: true },
+      results: [],
+      attribution: [],
+      warnings: [],
+      truncated: false,
+    }));
+    const disabled = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      lookup,
+      false,
+    );
+    disabled.set_term_lookup_enabled(false);
+    await disabled.service.send_message({ text: "查询术语", attachments: [] });
+    await wait_for_idle(disabled.service);
+    expect(fake_agent_state.tool_names.at(-1)).not.toContain("lookup_term");
+
+    const enabled = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      lookup,
+    );
+    await enabled.service.send_message({ text: "查询术语", attachments: [] });
+    await wait_for_idle(enabled.service);
+    expect(fake_agent_state.tool_names.at(-1)).toContain("lookup_term");
+    expect(lookup).not.toHaveBeenCalled();
   });
 
   it("宿主提供章节端口时注册 novel 工具，端口缺席时不注册", async () => {
@@ -4885,6 +4933,8 @@ describe("AgentService", () => {
     novel_chapter_import?: AgentNovelChapterImportPort,
     novel_chapter_read?: AgentNovelChapterReadPort,
     novel_chapter_sync?: AgentNovelChapterSyncPort,
+    term_lookup?: AgentTermLookupPort,
+    term_lookup_enabled = true,
   ): Promise<{
     workspace: AgentWorkspacePort;
     service: AgentService;
@@ -4901,6 +4951,7 @@ describe("AgentService", () => {
     set_approval_mode: (value: AgentApprovalMode) => void;
     set_auto_resume_settings: (value: Partial<TestAutoResumeSettings>) => void;
     set_auto_continue_settings: (value: Partial<TestAutoContinueSettings>) => void;
+    set_term_lookup_enabled: (value: boolean) => void;
     session_state: ProjectSessionState;
   }> {
     const session_state = new ProjectSessionState();
@@ -4921,6 +4972,7 @@ describe("AgentService", () => {
       agent_auto_continue_enabled: false,
       agent_auto_continue_max_continues: 10,
     };
+    let agent_term_lookup_enabled = term_lookup_enabled;
     const settings = {
       read_setting: () => {
         return {
@@ -4929,6 +4981,7 @@ describe("AgentService", () => {
           agent_approval_mode: approval_mode,
           ...auto_resume_settings,
           ...auto_continue_settings,
+          agent_term_lookup_enabled,
           model_selection: {
             translation: "active",
             agent: agent_model_id,
@@ -5058,6 +5111,7 @@ describe("AgentService", () => {
       sessionState: session_state,
       runtimeGate: runtime_gate,
       webSearch: web_search,
+      termLookup: term_lookup,
       novelChapters: novel_chapters,
       novelChapterImport: novel_chapter_import,
       novelChapterRead: novel_chapter_read,
@@ -5083,6 +5137,9 @@ describe("AgentService", () => {
       },
       set_auto_continue_settings: (value) => {
         auto_continue_settings = { ...auto_continue_settings, ...value };
+      },
+      set_term_lookup_enabled: (value) => {
+        agent_term_lookup_enabled = value;
       },
       service,
       workspace: effective_workspace,

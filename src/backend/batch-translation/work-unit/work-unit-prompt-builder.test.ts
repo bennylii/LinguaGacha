@@ -93,7 +93,7 @@ describe("PromptBuilder", () => {
       },
       create_quality_snapshot({
         glossary_entries: [
-          { src: "Alice", dst: "爱丽丝", info: "女性人名", case_sensitive: false },
+          { src: "Alice", dst: "爱丽丝", info: "女性人名", evidence: "", case_sensitive: false },
         ],
       }),
       [
@@ -102,6 +102,7 @@ describe("PromptBuilder", () => {
           src: "Alice",
           dst: "爱丽丝",
           info: "女性人名",
+          evidence: "",
           case_sensitive: false,
         },
       ],
@@ -182,11 +183,20 @@ describe("PromptBuilder", () => {
       { app_language: "EN", target_language: "EN" },
       create_quality_snapshot({
         glossary_entries: [
-          { src: "ABC", dst: "甲", info: "", case_sensitive: true },
-          { src: "foo", dst: "乙", info: "备注", case_sensitive: false },
+          { src: "ABC", dst: "甲", info: "", evidence: "", case_sensitive: true },
+          { src: "foo", dst: "乙", info: "备注", evidence: "", case_sensitive: false },
         ],
       }),
-      [{ entry_id: "foo", src: "foo", dst: "乙", info: "备注", case_sensitive: false }],
+      [
+        {
+          entry_id: "foo",
+          src: "foo",
+          dst: "乙",
+          info: "备注",
+          evidence: "",
+          case_sensitive: false,
+        },
+      ],
     );
 
     const result = builder.generate_prompt([create_line({ text_src: "abc foo" })], "text", [], []);
@@ -223,7 +233,16 @@ describe("PromptBuilder", () => {
       "unused",
       { app_language: "ZH", target_language: "ZH" },
       create_quality_snapshot(),
-      [{ entry_id: "hp", src: "HP", dst: "生命值", info: "stat", case_sensitive: true }],
+      [
+        {
+          entry_id: "hp",
+          src: "HP",
+          dst: "生命值",
+          info: "stat",
+          evidence: "",
+          case_sensitive: true,
+        },
+      ],
     );
 
     const result = builder.generate_prompt_sakura("HP");
@@ -269,6 +288,7 @@ describe("PromptBuilder", () => {
           src: "虎鉄",
           dst: "虎铁",
           info: "男性人名",
+          evidence: "",
           case_sensitive: false,
         },
       ],

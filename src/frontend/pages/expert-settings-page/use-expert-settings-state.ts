@@ -17,6 +17,7 @@ import {
 } from "@frontend/pages/expert-settings-page/types";
 
 const EXPERT_SETTINGS_PENDING_FIELDS = [
+  "agent_term_lookup_enabled",
   "agent_auto_resume_enabled",
   "agent_auto_resume_initial_delay",
   "agent_auto_resume_max_delay",
@@ -34,6 +35,7 @@ type ExpertSettingsPendingField = (typeof EXPERT_SETTINGS_PENDING_FIELDS)[number
 type UseExpertSettingsStateResult = {
   snapshot: ExpertSettingsSnapshot;
   pending_state: Record<ExpertSettingsPendingField, boolean>;
+  update_agent_term_lookup_enabled: (next_checked: boolean) => Promise<void>;
   update_agent_auto_resume_enabled: (next_checked: boolean) => Promise<void>;
   update_agent_auto_resume_initial_delay: (next_value: number) => Promise<void>;
   update_agent_auto_resume_max_delay: (next_value: number) => Promise<void>;
@@ -59,6 +61,17 @@ export function useExpertSettingsState(): UseExpertSettingsStateResult {
     select_snapshot: build_expert_settings_snapshot,
     pending_fields: EXPERT_SETTINGS_PENDING_FIELDS,
   });
+  const update_agent_term_lookup_enabled = useCallback(
+    async (next_checked: boolean): Promise<void> => {
+      if (snapshot.agent_term_lookup_enabled !== next_checked) {
+        await commit_update("agent_term_lookup_enabled", {
+          agent_term_lookup_enabled: next_checked,
+        });
+      }
+    },
+    [commit_update, snapshot.agent_term_lookup_enabled],
+  );
+
   const update_agent_auto_resume_enabled = useCallback(
     async (next_checked: boolean): Promise<void> => {
       if (snapshot.agent_auto_resume_enabled !== next_checked) {
@@ -206,6 +219,7 @@ export function useExpertSettingsState(): UseExpertSettingsStateResult {
   return {
     snapshot,
     pending_state,
+    update_agent_term_lookup_enabled,
     update_agent_auto_resume_enabled,
     update_agent_auto_resume_initial_delay,
     update_agent_auto_resume_max_delay,

@@ -73,7 +73,16 @@ function create_cache_read_port(options: {
           enabled: true,
           mode: "custom",
           revision: 1,
-          entries: [{ entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: false }],
+          entries: [
+            {
+              entry_id: "hp",
+              src: "HP",
+              dst: "生命值",
+              info: "",
+              evidence: "",
+              case_sensitive: false,
+            },
+          ],
         },
       }),
     },

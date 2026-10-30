@@ -191,7 +191,7 @@ function evaluate_draft_glossary_applications(
 ): GlossaryApplication[] {
   const source_matches: GlossarySourceMatch[] = item.glossary_applications.map(
     ({ entry_id, src, dst, case_sensitive, fields }) => ({
-      entry: { entry_id, src, dst, case_sensitive, info: "" },
+      entry: { entry_id, src, dst, case_sensitive, info: "", evidence: "" },
       fields: fields.map(({ source_field, target_field }) => ({
         source_field,
         target_field,

@@ -91,6 +91,22 @@ export function GlossaryEditDialog(props: GlossaryEditDialogProps): JSX.Element 
                   }}
                 />
               </div>
+
+              <div className="glossary-page__dialog-section glossary-page__dialog-section--description">
+                <span className="glossary-page__dialog-section-title font-medium">
+                  {t("glossary_page.fields.evidence")}
+                </span>
+                <AppEditor
+                  class_name="glossary-page__dialog-editor"
+                  value={props.entry.evidence}
+                  aria_label={t("glossary_page.fields.evidence")}
+                  read_only={disabled}
+                  indent_with_tab={false}
+                  on_change={(next_value) => {
+                    props.on_change({ evidence: next_value });
+                  }}
+                />
+              </div>
             </div>
           </Card>
 

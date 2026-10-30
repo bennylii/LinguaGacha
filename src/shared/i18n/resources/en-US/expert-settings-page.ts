@@ -4,6 +4,11 @@ import type { LocaleMessageSchema } from "../../types";
 export const en_us_expert_settings_page = {
   title: "Expert Settings",
   fields: {
+    agent_term_lookup_enabled: {
+      title: "Agent term lookup",
+      description:
+        "Allow Agent to query Wikipedia, Wiktionary, Jotoba, and a local JMdict common-word package. Public sources only; no project files are read or changed. Enabled by default",
+    },
     agent_auto_resume_enabled: {
       title: "Agent Auto Retry",
       description:

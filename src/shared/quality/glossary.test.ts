@@ -4,19 +4,40 @@ import { read_item_source_text_parts, read_item_translation_text_parts } from ".
 import {
   compile_glossary,
   evaluate_glossary_applications,
+  format_glossary_entry,
   match_glossary_source,
   resolve_glossary_application_state,
   type GlossaryEntry,
 } from "./glossary";
 
 const entries: GlossaryEntry[] = [
-  { entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: true },
-  { entry_id: "name", src: "Alice", dst: "爱丽丝", info: "角色", case_sensitive: false },
-  { entry_id: "empty", src: "MP", dst: "   ", info: "", case_sensitive: false },
-  { entry_id: "duplicate", src: "HP", dst: "体力", info: "", case_sensitive: true },
+  { entry_id: "hp", src: "HP", dst: "生命值", info: "", evidence: "", case_sensitive: true },
+  {
+    entry_id: "name",
+    src: "Alice",
+    dst: "爱丽丝",
+    info: "角色",
+    evidence: "",
+    case_sensitive: false,
+  },
+  { entry_id: "empty", src: "MP", dst: "   ", info: "", evidence: "", case_sensitive: false },
+  { entry_id: "duplicate", src: "HP", dst: "体力", info: "", evidence: "", case_sensitive: true },
 ];
 
 describe("共享术语领域规则", () => {
+  it("提示词只包含译法与适用说明，不包含查证证据", () => {
+    expect(
+      format_glossary_entry({
+        entry_id: "term",
+        src: "セラ",
+        dst: "塞拉",
+        info: "女性角色",
+        evidence: "来源：https://example.test/term",
+        case_sensitive: false,
+      }),
+    ).toBe("セラ -> 塞拉 #女性角色");
+  });
+
   it("不敏感术语跨兼容字符形态匹配原始源文", () => {
     const matches = match_glossary_source(
       compile_glossary([
@@ -25,6 +46,7 @@ describe("共享术语领域规则", () => {
           src: "HP",
           dst: "生命值",
           info: "",
+          evidence: "",
           case_sensitive: false,
         },
       ]),
@@ -111,8 +133,8 @@ describe("共享术语领域规则", () => {
 
   it("目标字段复用字面量 matcher 的 Unicode 与大小写语义", () => {
     const compiled = compile_glossary([
-      { entry_id: "wide", src: "JK", dst: "JK", info: "", case_sensitive: true },
-      { entry_id: "folded", src: "HP", dst: "HP", info: "", case_sensitive: false },
+      { entry_id: "wide", src: "JK", dst: "JK", info: "", evidence: "", case_sensitive: true },
+      { entry_id: "folded", src: "HP", dst: "HP", info: "", evidence: "", case_sensitive: false },
     ]);
     const matches = match_glossary_source(
       compiled,
@@ -143,8 +165,8 @@ describe("共享术语领域规则", () => {
 
   it("相同目标文本的多个术语保持独立应用身份", () => {
     const compiled = compile_glossary([
-      { entry_id: "first", src: "A", dst: "X", info: "", case_sensitive: true },
-      { entry_id: "second", src: "B", dst: "X", info: "", case_sensitive: true },
+      { entry_id: "first", src: "A", dst: "X", info: "", evidence: "", case_sensitive: true },
+      { entry_id: "second", src: "B", dst: "X", info: "", evidence: "", case_sensitive: true },
     ]);
     const matches = match_glossary_source(compiled, read_item_source_text_parts({ src: "A B" }));
 
@@ -159,7 +181,14 @@ describe("共享术语领域规则", () => {
 
   it("不跨字段拼接，也不读取全局开关", () => {
     const compiled = compile_glossary([
-      { entry_id: "split", src: "hello", dst: "你好", info: "", case_sensitive: false },
+      {
+        entry_id: "split",
+        src: "hello",
+        dst: "你好",
+        info: "",
+        evidence: "",
+        case_sensitive: false,
+      },
     ]);
     expect(
       match_glossary_source(compiled, [

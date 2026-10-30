@@ -4,6 +4,11 @@ import type { LocaleMessageSchema } from "../../types";
 export const de_de_expert_settings_page = {
   title: "Erweitert",
   fields: {
+    agent_term_lookup_enabled: {
+      title: "Agent-Begriffssuche",
+      description:
+        "Agent darf Wikipedia, Wiktionary, Jotoba und ein lokales JMdict-Paket gebräuchlicher Wörter abfragen. Nur öffentliche Quellen; Projektdateien werden weder gelesen noch geändert. Standardmäßig aktiviert",
+    },
     agent_auto_resume_enabled: {
       title: "Automatischer Neuversuch für Agent",
       description:

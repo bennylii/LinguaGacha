@@ -516,6 +516,7 @@ export class AgentWorkspaceService {
       : [];
     const project_meta: JsonRecord = {
       ...language,
+      glossary_enabled: quality_block.glossary.enabled,
       counts: {
         files: snapshot_files.length,
         items: current_items.length,

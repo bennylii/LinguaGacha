@@ -8,5 +8,6 @@ export const ko_kr_glossary_page = {
   fields: {
     translation: "번역문",
     description: "설명",
+    evidence: "조사 근거(번역 프롬프트에 포함되지 않음)",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_glossary_page>;

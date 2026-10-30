@@ -116,6 +116,19 @@ export function ExpertSettingsPage(_props: ExpertSettingsPageProps): JSX.Element
     <div className="expert-settings-page page-shell page-shell--full">
       <section className="expert-settings-page__list" aria-label={t("expert_settings_page.title")}>
         <SettingCardRow
+          title={t("expert_settings_page.fields.agent_term_lookup_enabled.title")}
+          description={t("expert_settings_page.fields.agent_term_lookup_enabled.description")}
+          action={render_boolean_toggle({
+            title_key: "expert_settings_page.fields.agent_term_lookup_enabled.title",
+            value: expert_settings_state.snapshot.agent_term_lookup_enabled,
+            disabled: expert_settings_state.pending_state.agent_term_lookup_enabled,
+            on_value_change: (next_value) => {
+              void expert_settings_state.update_agent_term_lookup_enabled(next_value);
+            },
+          })}
+        />
+
+        <SettingCardRow
           title={t("expert_settings_page.fields.agent_auto_resume_enabled.title")}
           description={t("expert_settings_page.fields.agent_auto_resume_enabled.description")}
           action={render_boolean_toggle({

@@ -156,6 +156,17 @@ describe("设置快照", () => {
     ).toBe(10);
   });
 
+  it("术语查证默认开启，布尔兼容值可关闭，非法值回到默认", () => {
+    expect(normalize_setting_snapshot({})).toMatchObject({ agent_term_lookup_enabled: true });
+    expect(
+      Setting.from_json({ agent_term_lookup_enabled: "0" }).to_snapshot().agent_term_lookup_enabled,
+    ).toBe(false);
+    expect(
+      Setting.from_json({ agent_term_lookup_enabled: "bad" }).to_snapshot()
+        .agent_term_lookup_enabled,
+    ).toBe(true);
+  });
+
   it("结果检查旧字段不会进入设置快照", () => {
     const snapshot = normalize_setting_snapshot({
       check_kana_residue: false,

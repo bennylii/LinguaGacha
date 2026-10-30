@@ -736,6 +736,21 @@ it("emitImage 通过真实 IPC 等待接收，宿主拒绝可由脚本捕获", a
   expect(output_content(result.stdout)).toContain("image rejected");
 });
 
+it("术语检索模块在生产构建中导入并返回聚合译法", async () => {
+  const result = await run(`
+    import { searchTerms } from '@lg/workspace/term-search';
+    const results = await searchTerms(
+      [{item_id:1,file_path:'a.txt',src:'mana',dst:'魔力',name_src:'',name_dst:'',status:'PROCESSED'}],
+      [], ['mana'],
+    );
+    console.log(JSON.stringify(results));
+  `);
+  expect(result.exitCode).toBe(0);
+  expect(output_content(result.stdout)).toMatchObject([
+    { query: "mana", results: [{ src: "mana", dst: "魔力", confirmed: true }] },
+  ]);
+});
+
 it("页面更新模块在部署工作区解析记录并判定目标", async () => {
   const result = await run(`
     import { parse_page_update, resolve_agent_workspace_page_updates } from '@lg/workspace/page-updates';

@@ -10,5 +10,6 @@ export const de_de_glossary_page = {
   fields: {
     translation: "Übersetzung",
     description: "Beschreibung",
+    evidence: "Recherchebelege (nicht in Übersetzungs-Prompts enthalten)",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_glossary_page>;

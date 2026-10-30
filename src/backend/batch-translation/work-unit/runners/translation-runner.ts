@@ -428,6 +428,7 @@ export class TranslationWorkUnitRunner {
         src: String(entry["src"] ?? ""),
         dst: String(entry["dst"] ?? ""),
         info: String(entry["info"] ?? ""),
+        evidence: String(entry["evidence"] ?? ""),
         case_sensitive: entry["case_sensitive"] === true,
       })),
     );

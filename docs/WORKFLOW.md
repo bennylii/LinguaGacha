@@ -30,6 +30,7 @@
 |---|---|
 |Agent 会话与指令|[Agent](../src/backend/agent/)、[公开会话类型](../src/shared/agent.ts)、[运行时资源](../builtin/)|
 |工具与工作区|[工具](../src/backend/agent/tools/)、[工作区](../src/backend/agent/workspace/)|
+|术语检索与查证|[工程内检索](../src/backend/agent/workspace/runtime/term-search.ts)、[查证服务](../src/backend/agent/term-lookup-service.ts)、[JMdict](../src/backend/agent/jmdict-provider.ts)|
 |模型可读契约|[Schema](../src/backend/agent/workspace/schema.ts)、[契约生成](../src/backend/agent/tools/contract.ts)|
 |宿主桥与传输|[GUI](../src/gui/)、[桌面传输](../src/frontend/app/desktop/)|
 |前端运行态|[共享状态](../src/frontend/app/state/)、[会话](../src/frontend/app/session/)|
@@ -157,6 +158,21 @@ GUI、preload、native 或 Backend Runtime worker 变化时，先运行相关目
 
 发行包入口或资源定位见 [发行包运行验证](#发行包运行验证)。
 
+术语检索、外部查证或证据字段变化时，按影响选择测试：
+
+|变化|测试|
+|---|---|
+|工具参数、默认来源、取消与错误传播|`tools/lookup-term.test.ts`|
+|来源编排、语言映射、缓存键、局部失败与结果预算|`term-lookup-service.test.ts`|
+|缓存有效期、损坏载荷、哈希路径与值隔离|`term-lookup-cache.test.ts`|
+|JMdict 下载、哈希、版本、索引、并发与许可证|`jmdict-provider.test.ts`|
+|工程内匹配、聚合、排序、确认与异步输入|`workspace/runtime/term-search.test.ts`|
+|开关默认值与设置提交|`setting.test.ts`、`use-expert-settings-state.test.ts`|
+|`evidence` 导入导出、旧载荷与 `.lg` 持久化|`quality-rule-file-io.test.ts`、`quality-rule-import.test.ts`、`project-write-store.test.ts`|
+|工具注册开关|`agent-service.test.ts`|
+
+外部来源在单测中使用 mock；真实网络、代理和首次词包下载不在常规单测中，按发行包运行验证处理。
+
 ### 原生游戏
 
 格式目录位于 `src/backend/file/`，按变化选择测试：
@@ -230,7 +246,7 @@ Windows 启动器或更新器变化时，在对应的 `win-cli` 或 `win-berserk
 - 使用 `npm exec -- asar list <app.asar 路径>` 检查应用入口、前端资源及文件范围。用户数据、项目源码和原始应用依赖树应排除。
 - Electron 语言资源与 `LOCALES` 一致。
 - 内置资源随应用部署。
-- 工作区包含实际依赖清单、标准 `node_modules`、内部包和运行资源。
+- 工作区包含实际依赖清单、标准 `node_modules`、内部包和运行资源；术语检索发布时确认 `@lg/workspace/term-search` 存在。
 - `runAsNode` fuse 保持开启，供工作区启动 Electron Node 子进程。
 - Windows 启动器和更新器完成对应 Go module 的测试与构建。
 
@@ -259,3 +275,28 @@ Windows 启动器或更新器变化时，在对应的 `win-cli` 或 `win-berserk
 
 - `pdf-host.test.ts` 只设置工作区运行目录，使用默认开发 Electron。
 - 脚本解析器部署还须核对发行工作区中的 `oxc-parser` 平台绑定与 `@ruby/prism` WASM。
+- 术语检索部署还须核对 `resources/workspace/node_modules/@lg/workspace/term-search.mjs`，并在发行工作区执行一次聚合查询；`bootstrap.test.ts` 覆盖该导入路径。
+
+### 便携版替换与数据保留
+
+构建产物位于 `build/release/<package version>/win-unpacked`。应用版本由安装根目录的 `version.txt` 决定，`package.json` 版本只参与打包目录和压缩包命名，两者职责不同。
+
+替换已安装的便携版时，程序文件与用户数据分开处理：
+
+- 需要替换：`app.exe`、`resources/app.asar`、`resources/workspace`、`locales`、DLL、pak、`cli.exe` 和 `berserker.exe`。
+- 必须保留：`userdata/`，其中包含配置、模型设置、Agent 会话、技能、规则预设和 Agent 工作材料。
+- 还应保留：`log/` 与根目录诊断文件。
+- 工程 `.lg` 文件通常位于安装目录之外，替换安装文件不处理工程数据。
+- `userdata/workspace` 是用户工作材料，`resources/workspace` 是发行程序依赖树，二者不能混用。
+- `userdata` 中的 `node_modules` 可能是指向 `resources/workspace/node_modules` 的目录联接。递归复制会把联接展开成真实文件，导致体积膨胀；替换时应保留联接，或直接移动数据目录。
+
+推荐步骤：
+
+1. 关闭应用，确认 `app.exe`、`cli.exe` 和 `berserker.exe` 没有运行。
+2. 将完整安装目录改名为带时间戳的备份；备份保留程序与用户数据。
+3. 将新 `win-unpacked` 复制为安装目录。
+4. 从备份复制或移动回 `userdata/`、`log/` 和必要的诊断文件，不复制旧程序文件，并保留 `userdata` 中的目录联接。
+5. 首次启动前对比 `userdata` 的文件数量、总大小和 `config.json` 哈希，确认数据未改变；启动后新版本可能补充默认设置字段或实例注册文件，检查没有键或文件缺失即可。
+6. 启动应用做冒烟验证；失败时将新目录改名，恢复备份目录。
+
+不要在应用运行时覆盖 `resources` 或 `userdata`。回滚前保留新目录或备份，避免同时删除两套程序。

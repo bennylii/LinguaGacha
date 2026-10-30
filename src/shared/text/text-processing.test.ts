@@ -67,7 +67,7 @@ describe("text worker snapshots", () => {
     expect(snapshot).toEqual({
       glossary_enable: true,
       glossary_entries: [
-        { entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: false },
+        { entry_id: "hp", src: "HP", dst: "生命值", info: "", evidence: "", case_sensitive: false },
       ],
       text_preserve_mode: "custom",
       text_preserve_entries: [{ entry_id: "italic", src: "<i>", info: "" }],

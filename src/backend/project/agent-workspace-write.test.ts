@@ -432,6 +432,7 @@ function quality_entry(id: string, src: string, extra: JsonRecord = {}): Quality
     src,
     dst: String(extra["dst"] ?? src),
     info: String(extra["info"] ?? ""),
+    evidence: String(extra["evidence"] ?? ""),
     case_sensitive: false,
   };
 }
@@ -440,7 +441,7 @@ function quality_create(line: number, src: string, sort: number) {
   return {
     line,
     kind: "glossary" as const,
-    fields: { src, dst: src, info: "", case_sensitive: false },
+    fields: { src, dst: src, info: "", evidence: "", case_sensitive: false },
     sort,
   };
 }

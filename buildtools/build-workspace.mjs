@@ -15,11 +15,13 @@ await build_package(
     bootstrap: "src/backend/agent/workspace/runtime/bootstrap.ts",
     "item-contexts": "src/backend/agent/workspace/runtime/item-contexts.ts",
     "page-updates": "src/backend/agent/workspace/page-updates.ts",
+    "term-search": "src/backend/agent/workspace/runtime/term-search.ts",
   },
   {
     "./bootstrap": "./bootstrap.mjs",
     "./item-contexts": "./item-contexts.mjs",
     "./page-updates": "./page-updates.mjs",
+    "./term-search": "./term-search.mjs",
   },
   ["mupdf"],
 );

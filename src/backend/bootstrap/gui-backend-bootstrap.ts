@@ -6,6 +6,7 @@ import type { RemoteAuthHost } from "../../shared/remote-auth-host";
 import { AgentImageService } from "../agent/agent-image-service";
 import { AgentService } from "../agent/agent-service";
 import { WebSearchService } from "../agent/web-search-service";
+import { TermLookupService } from "../agent/term-lookup-service";
 import { AgentWorkspaceService } from "../agent/workspace/service";
 import { AgentWorkspaceRunner } from "../agent/workspace/runtime/runner";
 import { ApiGatewayServer } from "../api/api-gateway-server";
@@ -126,6 +127,11 @@ export class GuiBackendBootstrap {
         resources.logManager,
       );
       this.web_search = web_search;
+      const term_lookup = new TermLookupService({
+        paths: resources.paths,
+        userAgent: resources.metadata.build_linguagacha_user_agent(),
+        fetch: globalThis.fetch,
+      }); // 使用已安装的代理感知 transport，服务本身不持有需释放的连接。
       const images = new AgentImageService(this.options.imageHost);
       this.images = images;
       // runner 与 catalog 共用同一 AppPathService，避免重复维护可写数据根的选择。
@@ -170,6 +176,8 @@ export class GuiBackendBootstrap {
         sessionState: services.state.session,
         runtimeGate: services.state.runtimeGate,
         webSearch: web_search.search,
+        termLookup: term_lookup.lookup,
+        readLanguages: () => services.state.cache.languages.readBlock(),
         novelChapters: (request, signal) => services.remote.chapters.list_chapters(request, signal),
         novelChapterImport: (request, signal) =>
           services.remote.chapters.import_chapter(request, signal),

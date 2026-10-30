@@ -32,7 +32,7 @@ describe("GlossaryEditDialog", () => {
         <GlossaryEditDialog
           open
           mode="edit"
-          entry={{ src: "hero", dst: "勇者", info: "主角", case_sensitive: false }}
+          entry={{ src: "hero", dst: "勇者", info: "主角", evidence: "", case_sensitive: false }}
           saving={false}
           readonly={false}
           on_change={vi.fn()}
@@ -68,7 +68,7 @@ describe("GlossaryEditDialog", () => {
           <GlossaryEditDialog
             open
             mode="create"
-            entry={{ src: "hero", dst: "勇者", info: "主角", case_sensitive: false }}
+            entry={{ src: "hero", dst: "勇者", info: "主角", evidence: "", case_sensitive: false }}
             saving={false}
             readonly={readonly}
             on_change={on_change}
@@ -89,6 +89,9 @@ describe("GlossaryEditDialog", () => {
       find_button("app.action.save")?.click();
     });
     expect(on_change).toHaveBeenCalledWith({ case_sensitive: true });
+    expect(
+      document.querySelector('.cm-content[aria-label="glossary_page.fields.evidence"]'),
+    ).not.toBeNull();
     expect(on_save).toHaveBeenCalledOnce();
 
     await render_dialog(true);

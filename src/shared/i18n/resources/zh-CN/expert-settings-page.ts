@@ -1,6 +1,11 @@
 export const zh_cn_expert_settings_page = {
   title: "专家设置",
   fields: {
+    agent_term_lookup_enabled: {
+      title: "Agent 术语查询",
+      description:
+        "允许 Agent 查询 Wikipedia、Wiktionary、Jotoba 和本地 JMdict 常用词包；仅访问公开来源，不读取或修改工程，默认启用",
+    },
     agent_auto_resume_enabled: {
       title: "Agent 自动重试",
       description:

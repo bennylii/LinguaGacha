@@ -200,7 +200,7 @@ describe("BatchTranslationProjectStore", () => {
 
     expect(snapshot.glossary_enable).toBe(true);
     expect(snapshot.glossary_entries).toEqual([
-      { entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: false },
+      { entry_id: "hp", src: "HP", dst: "生命值", info: "", evidence: "", case_sensitive: false },
     ]);
   });
 

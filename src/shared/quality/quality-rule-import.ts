@@ -205,6 +205,8 @@ function overwrite_import_entry_into_base(
   other: JsonRecord,
 ): void {
   for (const field of get_overwrite_fields(rule_type)) {
+    // 旧导入文件没有 evidence 列或该列为空；此时保留工程内已有查证材料。
+    if (field === "evidence" && read_text(other, field) === "") continue;
     const next_value = read_text(other, field);
     if (read_text(base, field) !== next_value) {
       base[field] = next_value;
@@ -296,7 +298,7 @@ function get_overwrite_fields(rule_type: QualityRuleImportRuleType) {
   return rule_type === "TEXT_PRESERVE"
     ? (["info"] as const)
     : rule_type === "GLOSSARY"
-      ? (["dst", "info"] as const)
+      ? (["dst", "info", "evidence"] as const)
       : (["dst"] as const);
 }
 
@@ -339,7 +341,7 @@ export function quality_rule_entries_equal(
     rule_type === "TEXT_PRESERVE"
       ? ["entry_id", "src", "info"]
       : rule_type === "GLOSSARY"
-        ? ["entry_id", "src", "dst", "info", "case_sensitive"]
+        ? ["entry_id", "src", "dst", "info", "evidence", "case_sensitive"]
         : ["entry_id", "src", "dst", "regex", "case_sensitive"];
   return (
     left.length === right.length &&

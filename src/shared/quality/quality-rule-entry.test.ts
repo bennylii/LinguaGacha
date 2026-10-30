@@ -65,6 +65,26 @@ describe("normalize_quality_rule_entries", () => {
     ).toThrow("Quality rule entry_id must not be empty.");
   });
 
+  it("旧 glossary 载荷补齐独立 evidence，且 evidence 不进入术语提示词", () => {
+    const [entry] = normalize_quality_rule_entries(QualityRule.from_json("glossary"), [
+      {
+        entry_id: "term",
+        src: "セラ",
+        dst: "塞拉",
+        info: "女性角色",
+        case_sensitive: false,
+      },
+    ]);
+    expect(entry).toEqual({
+      entry_id: "term",
+      src: "セラ",
+      dst: "塞拉",
+      info: "女性角色",
+      evidence: "",
+      case_sensitive: false,
+    });
+  });
+
   it("为无身份外部规则创建短身份并忽略外部身份", () => {
     const entries = create_quality_rule_entries(QualityRule.from_json("glossary"), [
       { entry_id: "external", src: "苹果", dst: "Apple", case_sensitive: false },

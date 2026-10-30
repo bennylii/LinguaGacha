@@ -3,6 +3,11 @@ import type { LocaleMessageSchema } from "../../types";
 export const ko_kr_expert_settings_page = {
   title: "전문가 설정",
   fields: {
+    agent_term_lookup_enabled: {
+      title: "Agent 용어 조회",
+      description:
+        "Agent가 Wikipedia, Wiktionary, Jotoba 및 로컬 JMdict 상용어 패키지를 조회할 수 있습니다. 공개 출처만 사용하며 프로젝트를 읽거나 수정하지 않습니다. 기본적으로 사용합니다",
+    },
     agent_auto_resume_enabled: {
       title: "Agent 자동 재시도",
       description:

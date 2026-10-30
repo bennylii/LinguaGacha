@@ -29,6 +29,7 @@ export function create_agent_workspace_run_tool(options: {
       "- 当前工作目录（`cwd`）是工作区根目录，文件相对路径从这里解析，脚本内的相对 `import` 从脚本文件所在目录解析。",
       `- 预装包：${app_package.workspacePackages.join("、")}，通过标准 import 使用。`,
       "  - `@lg/workspace/item-contexts` 提供 `queryItemContexts`，用于取得条目的邻近语境。",
+      "  - `@lg/workspace/term-search` 提供 `searchTerms`，用于检索条目和术语表中的已有译法。",
       "  - `@lg/text` 提供与应用共用的字面匹配能力。",
       "  - `@lg/pdf` 提供与正式输出共用的文档模板。",
       "- 包版本、类型和详细 API 可从 `node_modules` 中读取。依赖由应用管理，禁止自行安装或下载依赖。",

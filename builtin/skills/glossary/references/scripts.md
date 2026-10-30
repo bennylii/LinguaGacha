@@ -48,6 +48,32 @@ console.log({ scanned: evidence.scanned_item_count, matched: evidence.matched_it
 - 结果包含 `scanned_item_count`、去重的 `matched_item_count` 和按输入模式顺序排列的 `patterns`。每个模式包含 `key`、`matched_item_count`、`field_item_counts`、`matches_complete` 和 `matches`。
 - 每条字段证据为 `{ item_id, field, ranges: [{ start, end }] }`，按条目、正文、姓名排列。范围是原字段的 UTF-16 半开区间，用原字段的 `slice(start, end)` 取回原文。完整覆盖比较须确认各模式的 `matches_complete`。
 
+## 已有译法
+
+```js
+import { searchTerms } from '@lg/workspace/term-search';
+const glossary = (await readFile(ws.contract.datasets.glossary.path, 'utf8'))
+  .split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
+const matches = await searchTerms(items(), glossary, ['セラ', 'ヴァレン'], {
+  file_path: 'chapter01.txt',
+  include_unconfirmed: true,
+  limit: 8,
+});
+await writeFile('work/term-search.json', JSON.stringify(matches));
+console.log(matches.map(result => ({
+  query: result.query,
+  matches: result.results.map(match => ({
+    dst: match.dst,
+    confirmed: match.confirmed,
+    occurrences: match.occurrences,
+    item_ids: match.item_ids,
+    entry_id: match.entry_id,
+  })),
+})));
+```
+
+`searchTerms` 一次扫描多个候选，按原文字段与已有译法聚合。`occurrences` 和最多 3 个 `item_ids` 用于追溯；`entry_id` 对应术语表对象。结果还包含 `info` 与 `evidence`，修改规则时仍须从最新快照复制 `id` 和 `fp`。完整原文、译文或证据被截断时按出处回读，不根据截断文本提交修改。
+
 ## 公共词根
 
 ```js

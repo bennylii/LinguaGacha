@@ -130,6 +130,7 @@ describe("QualityRuleService", () => {
           src: "A",
           dst: "甲",
           info: "",
+          evidence: "",
           case_sensitive: false,
         },
       ],
@@ -199,6 +200,7 @@ describe("QualityRuleService", () => {
         src: "HP",
         dst: "生命值",
         info: "",
+        evidence: "",
         case_sensitive: false,
       },
     ]);
@@ -243,6 +245,7 @@ describe("QualityRuleService", () => {
             src: "HP",
             dst: "生命值",
             info: "",
+            evidence: "",
             case_sensitive: false,
           },
         ],
@@ -349,7 +352,7 @@ describe("QualityRuleService", () => {
     ).rejects.toThrow(expect.objectContaining({ code: "data.revision_conflict" }));
     expect(publisher.publish_project_change).not.toHaveBeenCalled();
     expect(await database.get_rules(lg_path, "glossary")).toEqual([
-      { entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: false },
+      { entry_id: "hp", src: "HP", dst: "生命值", info: "", evidence: "", case_sensitive: false },
     ]);
   });
 
@@ -370,6 +373,7 @@ describe("QualityRuleService", () => {
         src: "HP",
         dst: "生命值",
         info: "",
+        evidence: "",
         case_sensitive: false,
       },
     ]);

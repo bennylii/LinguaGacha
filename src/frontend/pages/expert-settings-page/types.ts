@@ -5,6 +5,7 @@ export const PRECEDING_LINES_THRESHOLD_MAX = 9_999_999;
 
 export type ExpertSettingsSnapshot = Pick<
   SettingsSnapshot,
+  | "agent_term_lookup_enabled"
   | "agent_auto_resume_enabled"
   | "agent_auto_resume_initial_delay"
   | "agent_auto_resume_max_delay"
@@ -22,6 +23,7 @@ export function build_expert_settings_snapshot(
   settings_snapshot: SettingsSnapshot,
 ): ExpertSettingsSnapshot {
   return {
+    agent_term_lookup_enabled: settings_snapshot.agent_term_lookup_enabled,
     agent_auto_resume_enabled: settings_snapshot.agent_auto_resume_enabled,
     agent_auto_resume_initial_delay: settings_snapshot.agent_auto_resume_initial_delay,
     agent_auto_resume_max_delay: settings_snapshot.agent_auto_resume_max_delay,

@@ -67,6 +67,8 @@ import { create_agent_read_skill_tool } from "./tools/read-skill";
 import { create_agent_ask_user_tool } from "./tools/ask-user";
 import { AgentInputQueue } from "./agent-input-queue";
 import { create_agent_web_search_tool, type AgentWebSearchPort } from "./tools/web-search";
+import { create_agent_lookup_term_tool, type AgentTermLookupPort } from "./tools/lookup-term";
+import type { ProjectLanguageSettings } from "../../domain/project-settings";
 import {
   create_agent_novel_chapters_tool,
   type AgentNovelChaptersPort,
@@ -125,6 +127,8 @@ type AgentServiceOptions = {
   sessionState: ProjectSessionState;
   runtimeGate: RuntimeOperationGate;
   webSearch: AgentWebSearchPort | undefined;
+  termLookup?: AgentTermLookupPort | undefined;
+  readLanguages?: () => ProjectLanguageSettings;
   novelChapters: AgentNovelChaptersPort | undefined;
   novelChapterImport: AgentNovelChapterImportPort | undefined;
   novelChapterRead: AgentNovelChapterReadPort | undefined;
@@ -173,6 +177,8 @@ export class AgentService {
   private readonly session_state: ProjectSessionState;
   private readonly runtime_gate: RuntimeOperationGate;
   private readonly web_search: AgentWebSearchPort | undefined;
+  private readonly term_lookup: AgentTermLookupPort | undefined;
+  private readonly read_languages: (() => ProjectLanguageSettings) | undefined;
   private readonly novel_chapters: AgentNovelChaptersPort | undefined;
   private readonly novel_chapter_import: AgentNovelChapterImportPort | undefined;
   private readonly novel_chapter_read: AgentNovelChapterReadPort | undefined;
@@ -227,6 +233,8 @@ export class AgentService {
     this.session_state = options.sessionState;
     this.runtime_gate = options.runtimeGate;
     this.web_search = options.webSearch;
+    this.term_lookup = options.termLookup;
+    this.read_languages = options.readLanguages;
     this.novel_chapters = options.novelChapters;
     this.novel_chapter_import = options.novelChapterImport;
     this.novel_chapter_read = options.novelChapterRead;
@@ -1448,6 +1456,26 @@ export class AgentService {
       }),
       create_agent_read_skill_tool(() => this.skills.get_current(), this.paths),
       ...(this.web_search === undefined ? [] : [create_agent_web_search_tool(this.web_search)]),
+      ...(this.term_lookup === undefined ||
+      this.settings.read_setting().agent_term_lookup_enabled !== true
+        ? []
+        : [
+            create_agent_lookup_term_tool(async (request, signal) => {
+              // 设置可在会话存活期间关闭；执行前复核，拒绝路径绝不触达查询服务或网络。
+              if (this.settings.read_setting().agent_term_lookup_enabled !== true)
+                throw new AgentToolError({ code: "term_lookup.disabled" });
+              const configured = this.read_languages?.();
+              const languages =
+                configured === undefined
+                  ? { source: "JA", target: "ZH", isDefault: true }
+                  : {
+                      source: configured.source_language,
+                      target: configured.target_language,
+                      isDefault: false,
+                    };
+              return this.term_lookup!({ ...request, languages }, signal);
+            }),
+          ]),
       ...(this.novel_chapters === undefined
         ? []
         : [

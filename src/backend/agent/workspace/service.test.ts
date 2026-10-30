@@ -433,6 +433,7 @@ describe("AgentWorkspaceService", () => {
       ),
     ).toBe(true);
     expect(read_json(path.join(active_path, AGENT_WORKSPACE_PATHS.projectMeta))).toMatchObject({
+      glossary_enabled: true,
       files: [
         {
           file_path: "script.txt",
@@ -1146,6 +1147,7 @@ async function create_fixture(temp_dir: string, native_fs?: NativeFs) {
   const items = [create_item(1), create_item(2)];
   const item_by_id = new Map(items.map((item) => [item.item_id, item]));
   const quality = create_empty_quality_rule_block();
+  quality.glossary.enabled = true;
   quality.glossary.entries = normalize_quality_rule_entries(QualityRule.from_json("glossary"), [
     create_quality_entry("glossary"),
   ]);
