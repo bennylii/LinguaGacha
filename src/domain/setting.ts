@@ -21,9 +21,18 @@ export {
   type TargetLanguageCode,
 } from "./language";
 
+export const CONTEXT_LINES_THRESHOLD_MIN = 0;
+export const CONTEXT_LINES_THRESHOLD_MAX = 9_999_999;
+
 export const PROJECT_SAVE_MODES = ["MANUAL", "FIXED", "SOURCE"] as const; // ProjectSaveMode 是项目保存位置策略，页面和设置服务都从这里取合法值
 
 export type ProjectSaveMode = (typeof PROJECT_SAVE_MODES)[number];
+export const TRANSLATION_SAVE_MODES = ["MANUAL", "FIXED", "PROJECT"] as const; // 译文以工程文件作为相对位置基准。
+export type TranslationSaveMode = (typeof TRANSLATION_SAVE_MODES)[number];
+/** 在页面输入和设置读取处收窄译文保存模式。 */
+export function is_translation_save_mode(value: unknown): value is TranslationSaveMode {
+  return TRANSLATION_SAVE_MODES.includes(value as TranslationSaveMode);
+}
 /** 应用级工程写入审批偏好，跨对话、工程和应用重启保留。 */
 export const AGENT_APPROVAL_MODES = ["manual", "auto"] as const;
 export type AgentApprovalMode = (typeof AGENT_APPROVAL_MODES)[number];
@@ -69,15 +78,21 @@ export const SETTING_SNAPSHOT_SCHEMA = Type.Object(
     app_language: Type.Enum(APP_LANGUAGE_DEFINITIONS.map(({ code }) => code)), // 界面与日志文案的应用语言。
     project_save_mode: Type.Enum(PROJECT_SAVE_MODES), // 新建工程的保存位置策略。
     project_fixed_path: Type.String(), // 固定保存模式使用的工程目录。
+    translation_save_mode: Type.Enum(TRANSLATION_SAVE_MODES), // GUI 译文生成的保存位置策略。
+    translation_fixed_path: Type.String(), // 译文固定模式使用的输出父目录。
     output_folder_open_on_finish: Type.Boolean(), // 译文生成成功后是否打开输出目录。
     network_proxy_mode: Type.Enum(NETWORK_PROXY_MODES), // 出站请求的代理模式。
     network_proxy_address: Type.String(), // 自定义代理模式使用的 `主机:端口`。
     novelia_bridge_enabled: Type.Boolean(), // 是否监听本机端口接收 ntr-toolbox 推送的站点凭据。
     request_timeout: Type.Number(), // 等待模型回复的超时时间，单位为秒。
-    preceding_lines_threshold: Type.Number(), // 单个翻译任务最多携带的参考上文行数。
-    clean_ruby: Type.Boolean(), // 翻译文本的注音清理开关。
-    deduplication_in_bilingual: Type.Boolean(), // 双语文件原译文相同时是否只写一份正文。
-    write_translated_name_fields_to_file: Type.Boolean(), // 导出时是否使用角色译名。
+    preceding_lines_threshold: Type.Integer({
+      minimum: CONTEXT_LINES_THRESHOLD_MIN,
+      maximum: CONTEXT_LINES_THRESHOLD_MAX,
+    }), // 参考前文按文本条目计数。
+    following_lines_threshold: Type.Integer({
+      minimum: CONTEXT_LINES_THRESHOLD_MIN,
+      maximum: CONTEXT_LINES_THRESHOLD_MAX,
+    }), // 参考后文按文本条目计数。
     prompt_enhancement_enable: Type.Boolean(), // 翻译提示词增强开关。
     mtool_optimizer_enable: Type.Boolean(), // MTool 文本预过滤优化开关。
     skip_duplicate_source_text_enable: Type.Boolean(), // 重复来源条目的过滤开关。
@@ -109,15 +124,15 @@ export const DEFAULT_SETTING: SettingSnapshot & JsonRecord = {
   app_language: "ZH",
   project_save_mode: "MANUAL",
   project_fixed_path: "",
+  translation_save_mode: "PROJECT",
+  translation_fixed_path: "",
   output_folder_open_on_finish: false,
   network_proxy_mode: "system",
   network_proxy_address: DEFAULT_NETWORK_PROXY_ADDRESS,
   novelia_bridge_enabled: true,
   request_timeout: 180,
   preceding_lines_threshold: 0,
-  clean_ruby: false,
-  deduplication_in_bilingual: true,
-  write_translated_name_fields_to_file: true,
+  following_lines_threshold: 0,
   prompt_enhancement_enable: true,
   mtool_optimizer_enable: true,
   skip_duplicate_source_text_enable: true,
@@ -144,10 +159,10 @@ const PROJECT_SAVE_MODE_SET = new Set<ProjectSaveMode>(PROJECT_SAVE_MODES);
 const NETWORK_PROXY_ADDRESS_PATTERN = /^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})$/;
 
 /**
- * Setting 是 userdata/config.json 的业务实体；文件名保留 config.json，但领域语义统一为设置
+ * `Setting` 是 `userdata/config.json` 的业务实体。
  */
 export class Setting {
-  public readonly data: JsonRecord; // 完整设置文件形状；设置快照只从白名单计算
+  public readonly data: JsonRecord; // 设置快照只消费白名单字段。
 
   /** 保存从 JSON 归一后的设置字段。 */
   private constructor(data: JsonRecord) {
@@ -258,11 +273,17 @@ export class Setting {
     if (key === "project_save_mode") {
       return Setting.normalize_project_save_mode(value);
     }
+    if (key === "translation_save_mode") {
+      return is_translation_save_mode(value) ? value : "PROJECT";
+    }
     if (key === "recent_projects") {
       return normalize_recent_project_settings(value) as unknown as JsonValue;
     }
     if (key === "model_selection") {
       return normalize_model_selection(value) as unknown as JsonValue;
+    }
+    if (key === "preceding_lines_threshold" || key === "following_lines_threshold") {
+      return normalize_context_lines_threshold(value);
     }
     const schema = SETTING_SNAPSHOT_SCHEMA.properties[key as SettingKey];
     if (Type.IsBoolean(schema)) {
@@ -443,3 +464,11 @@ function normalize_recent_project_settings(value: unknown): RecentProjectSetting
 }
 
 export const normalize_project_save_mode = Setting.normalize_project_save_mode;
+
+/** 前后文共用整数边界，旧小数沿用截断口径。 */
+export function normalize_context_lines_threshold(value: unknown): number {
+  return Math.min(
+    CONTEXT_LINES_THRESHOLD_MAX,
+    Math.max(CONTEXT_LINES_THRESHOLD_MIN, Math.trunc(normalize_number_setting(value, 0))),
+  );
+}

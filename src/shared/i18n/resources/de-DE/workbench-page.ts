@@ -12,10 +12,8 @@ export const de_de_workbench_page = {
     agent: "AGENT",
     agent_only: "Übersetzung nur mit AGENT möglich",
     agent_recommended: "Wir empfehlen AGENT für die Übersetzung",
-    actions: "Aktionen",
   },
   feedback: {
-    add_file_loading_toast: "Dateien werden hinzugefügt …",
     no_valid_file: "Keine gültigen Dateien können hinzugefügt werden",
     close_project_failed:
       "Fehler beim Schließen des Projekts. Bitte versuchen Sie es später erneut …",
@@ -23,7 +21,7 @@ export const de_de_workbench_page = {
   action: {
     add_file: "Hinzufügen",
     close_project: "Schließen",
-    reset: "Übersetzung zurücksetzen",
+    reset: "Dateidaten zurücksetzen",
     translation_task: "Übersetzung",
     start_translation: "Übersetzung starten",
     reset_task_all: "Alle Daten zurücksetzen",
@@ -36,12 +34,13 @@ export const de_de_workbench_page = {
     },
     inherit_import: {
       description:
-        "Abgeschlossene Übersetzungen aus dem aktuellen Projekt verwenden, um die neuen Dateien zu füllen …?",
+        "Abgeschlossene Übersetzungen verwenden, um die importierten Dateien zu füllen …?",
       fill: "Füllen",
       do_not_fill: "Nicht füllen",
     },
     reset: {
-      description: "Übersetzungsstatus dieser Datei wirklich zurücksetzen …?",
+      description:
+        "Ausgewählte Datei und alle zugehörigen Übersetzungseinträge wirklich zurücksetzen …?",
     },
     delete: {
       description:

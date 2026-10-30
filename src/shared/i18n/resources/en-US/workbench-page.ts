@@ -12,17 +12,15 @@ export const en_us_workbench_page = {
     agent: "AGENT",
     agent_only: "Translation is only available with AGENT",
     agent_recommended: "We recommend using AGENT for translation",
-    actions: "Actions",
   },
   feedback: {
-    add_file_loading_toast: "Adding files …",
     no_valid_file: "No valid files can be added",
     close_project_failed: "Failed to close the project. Please try again later …",
   },
   action: {
     add_file: "Add",
     close_project: "Close",
-    reset: "Reset Translation",
+    reset: "Reset File Data",
     translation_task: "Translation",
     start_translation: "Start Translation",
     reset_task_all: "Reset All Data",
@@ -33,12 +31,12 @@ export const en_us_workbench_page = {
       description: "{COUNT} files with the same name were detected. Choose how to handle them …",
     },
     inherit_import: {
-      description: "Use completed translations from the current project to fill the new files …?",
+      description: "Use completed translations to fill the imported files …?",
       fill: "Fill",
       do_not_fill: "Do Not Fill",
     },
     reset: {
-      description: "Confirm resetting this file's translation status …?",
+      description: "Confirm resetting the selected file and all of its translation entries …?",
     },
     delete: {
       description: "Confirm deleting the selected file and all of its translation entries …?",

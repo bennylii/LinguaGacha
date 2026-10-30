@@ -1,3 +1,5 @@
+import { read_project_additional_files } from "../project/project-additional-files";
+import { GameDirectoryOperations } from "./shared/game/game-directory-operations";
 import type { PDFExecution } from "./pdf/pdf-worker";
 import { AppError, is_app_error } from "../../shared/error";
 import type {
@@ -8,6 +10,7 @@ import { render_pdf_translation } from "./pdf/pdf-translation";
 import { PDFFormat } from "./pdf/pdf-format";
 import path from "node:path";
 import type { PDFDocumentRecord } from "../../shared/pdf";
+import type { JsonRecord } from "../../domain/json";
 
 import type { ProjectDatabase } from "../database/database-operations";
 import type { LogManager } from "../log/log-manager";
@@ -47,6 +50,7 @@ export class TranslationFileGenerationService {
    * 译文生成服务依赖当前 .lg 数据库、设置和项目会话，不直接读取渲染进程状态
    */
   public constructor(
+    private readonly game_directory_operations: GameDirectoryOperations,
     private readonly database: ProjectDatabase, // 译文生成读取工程事实和原稿资产的入口
     private readonly app_setting_service: AppSettingService, // 译文生成格式和完成后动作
     private readonly session_state: ProjectSessionState, // 当前 .lg 工程身份
@@ -59,14 +63,34 @@ export class TranslationFileGenerationService {
   /**
    * GUI 译文生成固定本次设置快照，读取项目条目并补齐重复译文。
    */
-  public async generate_files(): Promise<TranslationFileGenerationResult> {
-    return this.run_generation(async (project_path, config) => {
+  public async generate_files(request: unknown): Promise<TranslationFileGenerationResult> {
+    return this.run_generation(async (project_path, setting) => {
+      // 请求校验先于工程读取，防止目录选择期间切换工程后生成错误的内容。
+      if (typeof request !== "object" || request === null || Array.isArray(request)) {
+        throw new Error("Invalid generation request");
+      }
+      const input = request as Record<string, unknown>;
+      if (
+        input.project_path !== project_path ||
+        typeof input.output_directory !== "string" ||
+        !path.isAbsolute(input.output_directory)
+      ) {
+        throw new Error("Invalid project or output directory");
+      }
+      if (!this.native_fs.stat(input.output_directory).isDirectory()) {
+        throw new Error("Output path is not a directory");
+      }
+      const config = await this.read_execution_settings(project_path, setting);
       const items = await this.read_project_items(project_path);
       const documents = await this.read_generation_pdf_files(
         project_path,
         Object.keys(await this.database.read_pdf_summaries(project_path)),
       );
-      const paths = this.build_generation_paths(project_path, config.app_language);
+      const paths = this.build_generation_paths(
+        project_path,
+        input.output_directory,
+        config.app_language,
+      );
       await this.generate_to_paths(project_path, items, paths, config);
       const pdf_files = await this.write_pdf_files(project_path, paths, documents);
       return {
@@ -84,7 +108,8 @@ export class TranslationFileGenerationService {
     output_dir: string,
     excluded_files: readonly string[] = [],
   ): Promise<TranslationFileGenerationResult> {
-    return this.run_generation(async (project_path, config) => {
+    return this.run_generation(async (project_path, setting) => {
+      const config = await this.read_execution_settings(project_path, setting);
       const items = await this.read_project_items(project_path);
       const documents = await this.read_generation_pdf_files(
         project_path,
@@ -106,10 +131,7 @@ export class TranslationFileGenerationService {
 
   /** GUI 与 CLI 共享任务终态和未知异常归属，日志直接保留原始原因与调用栈。 */
   private async run_generation(
-    write: (
-      project_path: string,
-      config: ProjectExecutionSettings,
-    ) => Promise<TranslationFileGenerationResult>,
+    write: (project_path: string, setting: JsonRecord) => Promise<TranslationFileGenerationResult>,
     open_output_folder: boolean,
   ): Promise<TranslationFileGenerationResult> {
     const setting = this.app_setting_service.read_setting();
@@ -120,14 +142,7 @@ export class TranslationFileGenerationService {
     );
     try {
       const project_path = this.session_state.require_loaded_project_path();
-      // GUI 与 CLI 共用项目语言和应用导出选项，本次生成固定使用这份组合快照。
-      const languages = read_project_language_settings(
-        await this.database.get_all_meta(project_path),
-      );
-      const result = await write(
-        project_path,
-        build_project_execution_settings(setting, languages),
-      );
+      const result = await write(project_path, setting);
       this.log_manager?.info(
         `${this.generation_log_text(config, "app.translation_generation.log.succeeded")}\n${result.output_path}`,
         { source: FILE_GENERATION_LOG_SOURCE },
@@ -151,6 +166,17 @@ export class TranslationFileGenerationService {
     }
   }
 
+  /** 请求通过校验后读取工程语言，与本次应用设置合成固定快照。 */
+  private async read_execution_settings(
+    project_path: string,
+    setting: JsonRecord,
+  ): Promise<ProjectExecutionSettings> {
+    const languages = read_project_language_settings(
+      await this.database.get_all_meta(project_path),
+    );
+    return build_project_execution_settings(setting, languages);
+  }
+
   /**
    * 按调用方指定的目录组写出译文，GUI 和 CLI 共享格式分发与 asset 读取逻辑。
    */
@@ -164,16 +190,18 @@ export class TranslationFileGenerationService {
     const output_items = items.filter((item) => !excluded_files.includes(item.file_path));
     this.fill_duplicated_translations(output_items);
     const format_service = new FileFormatService(
+      this.game_directory_operations,
       {
         target_language: config.target_language,
-        deduplication_in_bilingual: config.deduplication_in_bilingual,
-        write_translated_name_fields_to_file: config.write_translated_name_fields_to_file,
       },
       this.pdf_execution,
       this.native_fs,
     );
     await format_service.write_items(output_items, {
       paths,
+      additional_files: read_project_additional_files(
+        await this.database.get_all_meta(project_path),
+      ),
       asset_reader: (rel_path) => this.database.read_asset_content(project_path, rel_path),
       source_files: (await this.database.get_all_asset_records(project_path)).filter(
         (file) => !excluded_files.includes(file.path),
@@ -270,22 +298,28 @@ export class TranslationFileGenerationService {
    */
   private build_generation_paths(
     project_path: string,
+    output_directory: string,
     app_language: AppLanguage,
   ): GeneratedFilePaths {
     const text = create_text_resolver(resolve_app_locale(app_language));
     const translated_suffix = text("app.translation_generation.directory.translated");
     const bilingual_suffix = text("app.translation_generation.directory.bilingual");
-    const project_dir = path.dirname(project_path);
     const stem = path.parse(project_path).name;
     const translated_base = `${stem}_${translated_suffix}`;
     const bilingual_base = `${stem}_${bilingual_suffix}`;
-    const needs_timestamp =
-      this.native_fs.exists(path.join(project_dir, translated_base)) ||
-      this.native_fs.exists(path.join(project_dir, bilingual_base));
-    const timestamp = needs_timestamp ? this.timestamp_suffix() : "";
+    let suffix = "";
+    let index = 0;
+    let timestamp = ""; // 同一次生成的重名候选共用时间戳，后续冲突只递增编号。
+    while (
+      this.native_fs.exists(path.join(output_directory, `${translated_base}${suffix}`)) ||
+      this.native_fs.exists(path.join(output_directory, `${bilingual_base}${suffix}`))
+    ) {
+      if (suffix === "") suffix = timestamp = this.timestamp_suffix();
+      else suffix = `${timestamp}_${++index}`;
+    }
     return {
-      translated_path: path.join(project_dir, `${translated_base}${timestamp}`),
-      bilingual_path: path.join(project_dir, `${bilingual_base}${timestamp}`),
+      translated_path: path.join(output_directory, `${translated_base}${suffix}`),
+      bilingual_path: path.join(output_directory, `${bilingual_base}${suffix}`),
     };
   }
 

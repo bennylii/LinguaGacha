@@ -2,7 +2,12 @@ import { is_json_record } from "../../../domain/json";
 import { restore_evb_launcher } from "../shared/evb/pe";
 import path from "node:path";
 import type { NativeFs } from "../../../native/native-fs";
-import type { GamePreparation } from "../shared/game/prepare";
+import {
+  complete_game_preparation,
+  source_diagnostic,
+  type SourceDiagnostic,
+  type GamePreparation,
+} from "../shared/game/preparation";
 import {
   assert_regular_path,
   collect_existing_files,
@@ -11,7 +16,16 @@ import {
 import { read_evb, extract_evb_member } from "../shared/evb/archive";
 import { read_evb_game, type RPGMakerSource } from "./source";
 import { RPGMakerJsonCodec } from "./json-codec";
-import { decrypt_media, MEDIA_EXTENSIONS } from "./media";
+import { decrypt_media } from "./media";
+
+/** 输出沿用引擎请求的路径，`.png` 可以承载原游戏中的其他图片格式。 */
+const MEDIA_EXTENSIONS: Readonly<Record<string, string>> = {
+  ".rpgmvp": ".png",
+  ".rpgmvo": ".ogg",
+  ".rpgmvm": ".m4a",
+  ".png_": ".png",
+  ".ogg_": ".ogg",
+};
 
 /** worker 只拥有暂存目录，来源目录中的文件始终只读。 */
 export async function stage_rpgmaker_source(
@@ -23,6 +37,9 @@ export async function stage_rpgmaker_source(
   const { root, data_root, executable } = game;
   const writes = new Set<string>();
   const removes = new Set<string>();
+  const unavailable = new Set<string>();
+  const diagnostics: SourceDiagnostic[] = [];
+  let complete = true;
   assert_regular_path(root, fs);
   if (executable) {
     assert_regular_path(executable, fs);
@@ -35,8 +52,15 @@ export async function stage_rpgmaker_source(
         throw new Error("EVB game identity changed before preparation");
       for (const member of archive.members) {
         signal?.throwIfAborted();
-        await extract_evb_member(handle, member, path.join(staging, member.name), fs, signal);
-        writes.add(member.name);
+        try {
+          await extract_evb_member(handle, member, path.join(staging, member.name), fs, signal);
+          writes.add(member.name);
+        } catch (error) {
+          signal?.throwIfAborted();
+          complete = false;
+          unavailable.add(member.name);
+          diagnostics.push(source_diagnostic("read", error, member.name));
+        }
       }
       const launcher = path.basename(executable);
       validate_game_path(launcher);
@@ -46,13 +70,42 @@ export async function stage_rpgmaker_source(
         fs.unlink(path.join(staging, collision));
         writes.delete(collision);
       }
-      await restore_evb_launcher(handle, archive, path.join(staging, launcher), fs, signal);
-      writes.add(launcher);
+      try {
+        await restore_evb_launcher(handle, archive, path.join(staging, launcher), fs, signal);
+        writes.add(launcher);
+      } catch (error) {
+        signal?.throwIfAborted();
+        complete = false;
+        diagnostics.push(source_diagnostic("prepare", error, launcher));
+      }
     } finally {
       await handle.close();
     }
   }
-  await stage_media(game, staging, writes, removes, fs, signal);
+  try {
+    await stage_media(game, staging, writes, removes, fs, signal, unavailable);
+  } catch (error) {
+    signal?.throwIfAborted();
+    complete = false;
+    diagnostics.push(source_diagnostic("prepare", error));
+  }
+  if (!complete) {
+    const prepared = complete_game_preparation(staging, {
+      writes: [...writes],
+      removes: [...removes],
+    });
+    return {
+      sources: {
+        ...prepared.sources,
+        files: new Map([
+          ...prepared.sources.files,
+          ...[...unavailable].map((name) => [name, null] as const),
+        ]),
+      },
+      changes: null,
+      diagnostics,
+    };
+  }
   const prefix = path.relative(root, data_root).replaceAll("\\", "/");
   const resolve = (name: string) => path.join(writes.has(name) ? staging : root, name);
   const internal = (name: string) => [prefix, name].filter(Boolean).join("/");
@@ -64,7 +117,7 @@ export async function stage_rpgmaker_source(
     )
   )
     throw new Error("Prepared game is missing MV/MZ engine files");
-  return { writes: [...writes], removes: [...removes] };
+  return complete_game_preparation(staging, { writes: [...writes], removes: [...removes] });
 }
 
 /** 包内资源覆盖散装资源，原生媒体按整类成功结果关闭配置。 */
@@ -75,6 +128,7 @@ async function stage_media(
   removes: Set<string>,
   fs: NativeFs,
   signal?: AbortSignal,
+  unavailable?: Set<string>,
 ): Promise<void> {
   const { root, data_root } = game;
   const prefix = path.relative(root, data_root).replaceAll("\\", "/");
@@ -118,6 +172,7 @@ async function stage_media(
       throw new Error("Multiple encrypted media sources: " + output);
     outputs.add(output.toLowerCase());
     if (writes.has(output)) fs.unlink(path.join(staging, output));
+    unavailable?.add(output);
     await decrypt_media(
       path.join(writes.has(name) ? staging : root, name),
       path.join(staging, output),
@@ -125,6 +180,7 @@ async function stage_media(
       fs,
       signal,
     );
+    unavailable?.delete(output);
     writes.add(output);
     writes.delete(name); // 已消费的包内密文只留在暂存区，随事务工作区清理。
     if (existing.has(name)) removes.add(name); // 正式目录密文由目录事务删除并负责恢复。

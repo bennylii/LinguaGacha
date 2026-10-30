@@ -59,7 +59,7 @@ export interface EpubBlockTextDocumentUnit {
   text: string; // 排除注音后组装的可见正文
 }
 
-/** 原始 DOM 中连续兄弟节点的半开区间；不插入包装节点，保持旧项目路径有效。 */
+/** 使用原始 DOM 的兄弟节点半开区间，保持旧工程路径有效。 */
 export interface EpubTextRunRef {
   container_path: string; // 原始 DOM 中父容器的元素路径
   start: number; // children 起始索引，包含文本与注释节点
@@ -149,10 +149,14 @@ const SKIP_SUBTREE_TAGS = new Set([
   "rt",
 ]);
 
-/** 资源节点不能随着正文片段被替换；链接和锚点容器单独递归，保留目标与属性。 */
+/** 单独处理链接和锚点容器，避免正文替换破坏资源、目标和属性。 */
 const TEXT_RUN_RESOURCE_TAGS = new Set(["svg", "math", "video", "audio", "iframe", "object"]);
 
-// br/img 等 void 标签只作边界；宽松 XML 解析可能让它们带有后续正文，仍需沿原树遍历。
+// 仅用于写回。提取规则参与已有条目的摘要核验。
+const BLOCK_TRANSLATION_RUBY_CONTAINERS = new Set(["ruby", "rb"]); // 解除容器语义，保留正文和属性。
+const BLOCK_TRANSLATION_RUBY_ANNOTATIONS = new Set(["rt", "rp", "rtc"]); // 删除注音及回退展示内容。
+
+// 宽松 XML 解析可能将后续正文挂在 `br`、`img` 下，因此仍需遍历其子节点。
 const TEXT_RUN_BOUNDARY_TAGS = new Set([
   "br",
   "hr",
@@ -265,7 +269,7 @@ export class EpubAst {
   }
 
   /**
-   * manifest href 在入口解码一次；ZIP 文件名与已保存的 doc_path 保持原样，避免误解码字面百分号。
+   * 仅在入口解码 `manifest.href`，保留 ZIP 文件名与已保存的 `doc_path` 中的字面百分号。
    */
   public resolve_href(base_dir: string, href: string): string {
     let decoded_href = href;
@@ -762,7 +766,7 @@ export class EpubAst {
   }
 
   /**
-   * 收集跳过子树之外的可见文本，并统一归一成 block_text 的规范正文
+   * 导入、迁移和写回共用 `block_text` 正文，空白归一和跳过子树的语义必须保持一致。
    */
   public build_canonical_block_text(block: Element): string {
     return this.build_canonical_nodes_text([block]);
@@ -783,7 +787,7 @@ export class EpubAst {
   }
 
   /**
-   * 判断块内是否存在 EPUB 结构化 ruby，命中后必须使用 block_text 协议
+   * 判断结构化 `ruby`，含注音的叶子块使用 `block_text`。
    */
   public has_ruby_descendant(elem: Element): boolean {
     return this.flatten_elements(elem).some((node) => this.local_name(node.name) === "ruby");
@@ -938,7 +942,7 @@ export class EpubAst {
     return items;
   }
 
-  /** 三种正文模式共用 Item 组装；slot 摘要使用 NUL 分隔，整块和片段使用可见正文摘要。 */
+  /** `slot_per_line` 摘要使用 NUL 分隔，`block_text` 和 `text_run` 使用可见正文摘要。 */
   private create_item_from_unit(
     unit: EpubDocumentUnit,
     doc_path: string,
@@ -1046,17 +1050,15 @@ export class EpubAst {
     return cloneNode(elem, true);
   }
 
-  /**
-   * block_text 写回会接管整个块的 children，统一重连 DOM 节点关系
-   */
-  public replace_element_children_with_text(elem: Element, text: string): void {
-    this.replace_element_children(elem, [new Text(text)]);
-  }
-
   /** 修改兄弟节点集合后统一重连 DOM，供片段写回和整块替换复用。 */
   public replace_element_children(elem: Element, children: ChildNode[]): void {
     elem.children = children;
     this.relink_children(elem);
+  }
+
+  /** 整块替换为纯文本，复用同一重连路径。 */
+  public replace_element_children_with_text(elem: Element, text: string): void {
+    this.replace_element_children(elem, [new Text(text)]);
   }
 
   /**
@@ -1161,9 +1163,10 @@ export class EpubAst {
       .join("");
   }
 
-  /** 整块译文写入首个正文文本槽，保留锚点、链接、资源和跳过子树的原节点。 */
+  /** 整块翻译失去原文底字与注音的对应关系，写回时解除注音结构。 */
   public write_block_translation(block: Element, text: string): void {
     let first: Text | null = null; // 整块译文只有一个写入槽，其他正文槽清空。
+    // 先处理子树再展开容器，使首个正文节点的引用继续有效。
     const walk = (element: Element): void => {
       const children: ChildNode[] = [];
       for (const node of element.children) {
@@ -1172,8 +1175,8 @@ export class EpubAst {
           node.data = "";
         } else if (isTag(node)) {
           const tag = this.local_name(node.name);
-          if (tag === "rt") {
-            // 注音失去对应原文后移除，带身份的节点转为无正文锚点。
+          if (BLOCK_TRANSLATION_RUBY_ANNOTATIONS.has(tag)) {
+            // 注音文字删除后，保留链接仍可能引用的节点身份。
             const anchors = this.flatten_elements(node).filter(
               (n) => n.attribs["id"] !== undefined || n.attribs["name"] !== undefined,
             );
@@ -1182,6 +1185,13 @@ export class EpubAst {
             continue;
           }
           if (!SKIP_SUBTREE_TAGS.has(tag) && !TEXT_RUN_RESOURCE_TAGS.has(tag)) walk(node);
+          if (BLOCK_TRANSLATION_RUBY_CONTAINERS.has(tag)) {
+            if (Object.keys(node.attribs).length === 0) {
+              children.push(...node.children);
+              continue;
+            }
+            node.name = "span";
+          }
         }
         children.push(node);
       }

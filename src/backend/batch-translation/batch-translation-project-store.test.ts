@@ -246,14 +246,11 @@ describe("BatchTranslationProjectStore", () => {
   }> {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "linguagacha-task-project-store-"));
     const project_path = path.join(directory, "task.lg");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const session_state = new ProjectSessionState();
     const cache_manager = new CacheManager({
       database,
       logManager: null,
-      appSettingService: {
-        read_setting: () => ({ source_language: "JA", target_language: "ZH" }),
-      } as never,
       workerClient: {
         run: async () => ({}),
         dispose: async () => undefined,

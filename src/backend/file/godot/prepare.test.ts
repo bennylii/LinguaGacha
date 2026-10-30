@@ -19,41 +19,117 @@ import { stage_godot_source } from "./prepare";
 import { GODOT_CRYPT_HEADER_BYTES } from "./crypt";
 import { setImmediate } from "node:timers/promises";
 
-it.each(["external", "embedded"])("%s 载体准备、字体回退、重复导入与原载体备份", async (kind) => {
-  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-prepare-"));
-  const native = new NativeFs(),
-    files = create_godot_fixture();
+it("字体候选写入失败保留可靠原件，目录转换仍可提交", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-font-write-"));
+  const native = new NativeFs();
+  const files = create_godot_fixture();
+  const name = ".godot/imported/font.fontdata";
   files.set(
-    ".godot/imported/font.fontdata",
+    name,
     build_resource(
       "FontFile",
       new Map([["allow_system_fallback", Buffer.concat([u32(2), u32(0)])]]),
     ),
   );
-  const prefix = Buffer.alloc(256, 42),
-    bytes = godot_pack_fixture(files, { prefix: kind === "embedded" ? prefix : undefined });
-  const carrier = path.join(temp.path, kind === "embedded" ? "game.exe" : "game.pck");
-  fs.writeFileSync(carrier, bytes);
-  if (kind === "external") fs.writeFileSync(path.join(temp.path, "game.exe"), prefix);
-  const game = (await discover_godot_source(path.join(temp.path, "game.exe"), native))!;
-  expect(Boolean(game.embedded)).toBe(kind === "embedded");
+  native.write_file_sync(path.join(temp.path, "game.pck"), godot_pack_fixture(files));
+  const game = (await discover_godot_source(temp.path, native))!;
+  const write = native.write_file.bind(native);
+  vi.spyOn(native, "write_file").mockImplementation(async (file, bytes) => {
+    if (file.endsWith(".fontdata")) {
+      await write(file, Buffer.from("partial"));
+      throw new Error("font write failed");
+    }
+    await write(file, bytes);
+  });
+  const write_sync = native.write_file_sync.bind(native);
+  vi.spyOn(native, "write_file_sync").mockImplementation((file, bytes) => {
+    if (path.dirname(file).endsWith(path.join(".godot", "imported"))) {
+      write_sync(file, Buffer.from("partial"));
+      throw new Error("font write failed");
+    }
+    write_sync(file, bytes);
+  });
   await prepare_game_source({ kind: "game", file_type: "GODOT", game }, native);
-  expect(
-    fs.readFileSync(path.join(temp.path, "backup_lg", path.basename(carrier))).equals(bytes),
-  ).toBe(true);
-  expect(fs.readFileSync(path.join(temp.path, "game.exe")).equals(prefix)).toBe(true);
-  expect(fs.existsSync(path.join(temp.path, "game.pck"))).toBe(false);
-  expect(
-    read_resource(fs.readFileSync(path.join(temp.path, ".godot/imported/font.fontdata")))
-      .properties[0]!.value.value,
-  ).toBe(true);
-  const loose = (await discover_godot_source(temp.path, native))!;
-  expect(loose.embedded).toBeNull();
-  expect(loose.external).toEqual([]);
-  const create = vi.spyOn(native, "make_dir_exclusive");
-  await prepare_game_source({ kind: "game", file_type: "GODOT", game: loose }, native);
-  expect(create).not.toHaveBeenCalled();
+  expect(native.read_file(path.join(temp.path, name))).toEqual(files.get(name));
 });
+
+it("载体转换失败仍交付已验证资源，正式目录保持原状", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-carrier-write-"));
+  const native = new NativeFs();
+  const original = godot_pack_fixture(create_godot_fixture(), {
+    prefix: godot_executable_fixture(),
+  });
+  native.write_file_sync(path.join(temp.path, "game.exe"), original);
+  const game = (await discover_godot_source(temp.path, native))!;
+  const open = native.open_file.bind(native);
+  vi.spyOn(native, "open_file").mockImplementation(async (file, flags) => {
+    if (flags === "wx" && file.endsWith("game.exe")) throw new Error("carrier write failed");
+    return open(file, flags);
+  });
+  let captured: Uint8Array | undefined;
+  await prepare_game_source(
+    { kind: "game", file_type: "GODOT", game },
+    native,
+    undefined,
+    undefined,
+    async (prepared) => {
+      expect(prepared.changes).toBeNull();
+      expect(prepared.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            stage: "prepare",
+            error: expect.objectContaining({ message: "carrier write failed" }),
+          }),
+        ]),
+      );
+      captured = native.read_file(prepared.sources.files.get("project.binary")!);
+    },
+  );
+  expect(captured).toEqual(create_godot_fixture().get("project.binary"));
+  expect(native.read_file(path.join(temp.path, "game.exe"))).toEqual(original);
+  expect(native.exists(path.join(temp.path, "project.binary"))).toBe(false);
+});
+
+it.each(["external", "embedded"])(
+  "%s 载体准备、字体回退、重复导入并覆盖或移除原载体",
+  async (kind) => {
+    using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-prepare-"));
+    const native = new NativeFs(),
+      files = create_godot_fixture();
+    files.set("first.txt", Buffer.from("old"));
+    files.set("later.txt", Buffer.from("winner"));
+    files.set(
+      ".godot/imported/font.fontdata",
+      build_resource(
+        "FontFile",
+        new Map([["allow_system_fallback", Buffer.concat([u32(2), u32(0)])]]),
+      ),
+    );
+    const prefix = Buffer.alloc(256, 42),
+      bytes = godot_pack_fixture(files, { prefix: kind === "embedded" ? prefix : undefined });
+    bytes.write("first.txt", bytes.indexOf("later.txt")); // 同包重名由生产准备流程选择胜出成员。
+    const carrier = path.join(temp.path, kind === "embedded" ? "game.exe" : "game.pck");
+    fs.writeFileSync(carrier, bytes);
+    if (kind === "external") fs.writeFileSync(path.join(temp.path, "game.exe"), prefix);
+    const game = (await discover_godot_source(path.join(temp.path, "game.exe"), native))!;
+    expect(Boolean(game.embedded)).toBe(kind === "embedded");
+    await prepare_game_source({ kind: "game", file_type: "GODOT", game }, native);
+    expect(native.read_text_file(path.join(temp.path, "first.txt"))).toBe("winner");
+    expect(fs.existsSync(path.join(temp.path, "backup_lg"))).toBe(false);
+    expect(fs.readFileSync(path.join(temp.path, "game.exe")).equals(prefix)).toBe(true);
+    expect(fs.existsSync(path.join(temp.path, "game.pck"))).toBe(false);
+    expect(
+      read_resource(fs.readFileSync(path.join(temp.path, ".godot/imported/font.fontdata")))
+        .properties[0]!.value.value,
+    ).toBe(true);
+    const loose = (await discover_godot_source(temp.path, native))!;
+    expect(loose.embedded).toBeNull();
+    expect(loose.external).toEqual([]);
+    const create = vi.spyOn(native, "make_dir_exclusive");
+    await prepare_game_source({ kind: "game", file_type: "GODOT", game: loose }, native);
+    expect(create).not.toHaveBeenCalled();
+  },
+);
 
 it.each(["io", "cancel"])("并发提取 %s 后等待全部写入与句柄收尾", async (kind) => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-extraction-settle-"));
@@ -104,9 +180,13 @@ it.each(["io", "cancel"])("并发提取 %s 后等待全部写入与句柄收尾"
   const task = stage_godot_source({ game, staging }, native, controller.signal).finally(() => {
     settled = true;
   });
-  const rejected = expect(task).rejects.toThrow(
-    kind === "cancel" ? "extraction cancelled" : "extraction IO failure",
-  );
+  const rejected =
+    kind === "cancel"
+      ? expect(task).rejects.toThrow("extraction cancelled")
+      : expect(task).resolves.toMatchObject({
+          changes: null,
+          diagnostics: [expect.objectContaining({ member: "bad.bin" })],
+        });
   try {
     await failure_started.promise;
     await setImmediate();
@@ -116,8 +196,8 @@ it.each(["io", "cancel"])("并发提取 %s 后等待全部写入与句柄收尾"
   }
   await rejected;
   expect(handles.every((handle) => handle.fd === -1)).toBe(true);
-  for (const name of ["slow.bin", "bad.bin"])
-    expect(native.exists(path.join(staging, name))).toBe(false);
+  // 已完成成员留在暂存区，由外层目录事务清理。
+  expect(native.exists(path.join(staging, "bad.bin"))).toBe(false);
   expect(native.read_file(path.join(temp.path, "game.pck"))).toEqual(bytes);
 });
 
@@ -171,7 +251,6 @@ it("选择同目录启动器时仍将 EXE 前缀写回内嵌载体，保留启�
   await prepare_game_source({ kind: "game", file_type: "GODOT", game }, native);
   expect(fs.readFileSync(launcher, "utf8")).toBe("launcher");
   expect(fs.readFileSync(executable)).toEqual(prefix);
-  expect(fs.readFileSync(path.join(temp.path, "backup_lg/game.exe"))).toEqual(bytes);
 });
 
 it.each([false, true])(
@@ -248,7 +327,7 @@ it.each([false, true])(
   },
 );
 
-it("被覆盖成员的损坏仍阻止提交，全部原载体保留", async () => {
+it("被覆盖成员的损坏不影响最终资源提交", async () => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-hidden-corruption-"));
   const native = new NativeFs(),
     main = godot_pack_fixture(
@@ -262,11 +341,10 @@ it("被覆盖成员的损坏仍阻止提交，全部原载体保留", async () =
   native.write_file_sync(path.join(temp.path, "game.pck"), main);
   native.write_file_sync(path.join(temp.path, "patch.pck"), patch);
   const game = (await discover_godot_source(temp.path, native))!;
-  await expect(
-    prepare_game_source({ kind: "game", file_type: "GODOT", game }, native),
-  ).rejects.toThrow("MD5");
-  expect(native.read_file(path.join(temp.path, "game.pck"))).toEqual(main);
-  expect(native.read_file(path.join(temp.path, "patch.pck"))).toEqual(patch);
+  await prepare_game_source({ kind: "game", file_type: "GODOT", game }, native);
+  expect(native.read_file(path.join(temp.path, "main.gd")).toString()).toBe("new");
+  expect(native.read_file(path.join(temp.path, "project.binary")).toString()).toBe("base");
+  expect(fs.existsSync(path.join(temp.path, "game.pck"))).toBe(false);
   expect(fs.existsSync(path.join(temp.path, "backup_lg"))).toBe(false);
   expect(fs.existsSync(path.join(temp.path, ".tmp"))).toBe(false);
 });

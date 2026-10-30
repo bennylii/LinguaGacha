@@ -27,7 +27,6 @@ import type {
 } from "@frontend/app/state/desktop-project-write";
 import { useI18n } from "@frontend/app/locale/locale-context";
 import { api_fetch } from "@frontend/app/desktop/desktop-api";
-import { format_source_file_parse_failure_error_toast } from "@frontend/app/feedback/source-file-parse-failure-feedback";
 import {
   close_dialog_state,
   useWorkbenchImportFilesFlow,
@@ -214,6 +213,7 @@ function resolve_workbench_selection_after_snapshot(args: {
 
 export type UseWorkbenchPageStateResult = {
   godot_pack_order: ReturnType<typeof useWorkbenchImportFilesFlow>["godot_pack_order"];
+  game_backup_confirm: ReturnType<typeof useWorkbenchImportFilesFlow>["game_backup_confirm"];
   cache_status: "idle" | "refreshing" | "ready" | "error";
   consumed_revisions: ProjectDataSectionRevisions;
   required_sections: ProjectDataSection[];
@@ -231,7 +231,6 @@ export type UseWorkbenchPageStateResult = {
   dialog_state: WorkbenchDialogState;
   refresh_snapshot: () => Promise<WorkbenchSnapshot>;
   apply_table_selection: (payload: AppTableSelectionChange) => void;
-  prepare_entry_action: (entry_id: string) => void;
   request_add_file: () => Promise<void>;
   request_add_files_from_paths: (source_paths: string[]) => Promise<void>;
   notify_add_file_drop_issue: (issue: WorkbenchAddFileDropIssue) => void;
@@ -570,27 +569,6 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
     [apply_selection_state],
   );
 
-  const prepare_entry_action = useCallback(
-    (entry_id: string): void => {
-      const current_state = selection_state_ref.current;
-      if (current_state.selected_entry_ids.includes(entry_id)) {
-        apply_selection_state({
-          selected_entry_ids: current_state.selected_entry_ids,
-          active_entry_id: entry_id,
-          anchor_entry_id: current_state.anchor_entry_id ?? entry_id,
-        });
-        return;
-      }
-
-      apply_selection_state({
-        selected_entry_ids: [entry_id],
-        active_entry_id: entry_id,
-        anchor_entry_id: entry_id,
-      });
-    },
-    [apply_selection_state],
-  );
-
   const request_delete_entries = useCallback(
     (entry_ids: string[]): void => {
       if (!can_edit_files) {
@@ -719,6 +697,7 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
         await run_project_file_write(reset_plan, async (body) => {
           return await api_fetch<ProjectWriteResultPayload>("/api/workbench/file/reset", body);
         });
+        push_toast("success", t("app.feedback.operation_success"));
         set_dialog_state(close_dialog_state());
         return;
       }
@@ -756,12 +735,6 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
         }
       }
     } catch (error) {
-      const parse_failure_toast = format_source_file_parse_failure_error_toast(error);
-      if (parse_failure_toast !== null) {
-        push_error_toast(t("app.feedback.operation_failed"), parse_failure_toast);
-        set_dialog_submitting(false);
-        return;
-      }
       const fallback_message =
         current_dialog_state.kind === "close-project"
           ? t("workbench_page.feedback.close_project_failed")
@@ -792,6 +765,7 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
 
   return {
     godot_pack_order: import_files_flow.godot_pack_order,
+    game_backup_confirm: import_files_flow.game_backup_confirm,
     cache_status,
     consumed_revisions,
     required_sections: WORKBENCH_REQUIRED_SECTIONS,
@@ -809,7 +783,6 @@ export function useWorkbenchPageState(): UseWorkbenchPageStateResult {
     dialog_state,
     refresh_snapshot,
     apply_table_selection,
-    prepare_entry_action,
     request_add_file,
     request_add_files_from_paths,
     notify_add_file_drop_issue,

@@ -27,7 +27,7 @@
   - 十秒钟一份字幕，一分钟一本小说，五分钟一部游戏
 - 内置 `AGENT` 模式，通过对话自动完成各种任务　`👈👈 独家绝技`
   - 无需任何技术知识，游戏即翻即玩
-  - 主流引擎覆盖 - `RenPy` `Godot` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
+  - 主流引擎全覆盖 `Godot` `RenPy` `Tyrano` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
 
 ## 基本流程 🛸
 - 从 [发布页](https://github.com/neavo/LinguaGacha/releases) 下载应用
@@ -67,16 +67,16 @@
 - 功能说明
   - [AGENT](https://github.com/neavo/LinguaGacha/wiki/Agent)　　[校对](https://github.com/neavo/LinguaGacha/wiki/Proofreading)
   - [术语表](https://github.com/neavo/LinguaGacha/wiki/Glossary)　　[文本保护](https://github.com/neavo/LinguaGacha/wiki/TextPreserve)　　[文本替换](https://github.com/neavo/LinguaGacha/wiki/Replacement)
-  - [MTool 优化器](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizer)　　[命令行模式](https://github.com/neavo/LinguaGacha/wiki/CLIMode)
+  - [MTool 优化器](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizer)　　[命令行模式](https://github.com/neavo/LinguaGacha/wiki/CLIMode)　　[高级功能](https://github.com/neavo/LinguaGacha/wiki/AdvancedFeatures)
 - 引擎实践
-  - [高质量翻译 RenPy 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)
   - [高质量翻译 Godot 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)
+  - [高质量翻译 RenPy 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)
+  - [高质量翻译 Tyrano 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForTyrano)
   - [高质量翻译 WOLFRPG 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)
   - [高质量翻译 RPGMAKER 引擎游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)
 - 社区经验
   - [无复杂加密 kirikiri 引擎机翻笔记](https://github.com/neavo/LinguaGacha/discussions/181)
 - 你可以在 [Wiki](https://github.com/neavo/LinguaGacha/wiki) 找到各项功能的更详细介绍
-- 也欢迎在 [讨论区](https://github.com/neavo/LinguaGacha/discussions) 投稿你的使用心得
 
 ## 文本格式 🏷️
 | 类型 | 格式 | 说明 |
@@ -86,18 +86,19 @@
 | Markdown | `.md` | - |
 | `KV-JSON` 游戏文本 | `.json` | 来源 [[MTool](https://mtool.app)] [[SExtractor](https://github.com/satan53x/SExtractor)] |
 | `Message-JSON` 游戏文本 | `.json` | 来源 [[SExtractor](https://github.com/satan53x/SExtractor)] [[VNTextPatch](https://github.com/arcusmaximus/VNTranslationTools)] |
-| `RenPy` 游戏文本 | `.rpy` | 教程 [[高质量翻译 RenPy 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)] |
-| `Godot 4` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 Godot 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)] |
-| `WOLFRPG 3` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 WOLFRPG 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)] |
+| `Godot` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 Godot 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)] |
+| `RenPy` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 RenPy 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)] |
+| `Tyrano` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 Tyrano 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForTyrano)] |
+| `WOLFRPG` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 WOLFRPG 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)] |
 | `RPGMAKER MV/MZ` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 RPGMAKER 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)] |
 | `RPGMAKER XP/VX/VXAce` 游戏文件 | `.exe` 或 游戏目录 | 教程 [[高质量翻译 RPGMAKER 游戏的最佳实践](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)] |
+| `.rpy` 游戏文本 | `.rpy` | `👈 即将停止支持` |
 | `.xlsx` 游戏文本 | `.xlsx` | 来源 [SExtractor](https://github.com/satan53x/SExtractor) [Translator++](https://dreamsavior.net/translator-plusplus) [WOLF 官方翻译工具](https://silversecond.booth.pm/items/5151747)　`👈 即将停止支持` |
 | `.trans` 项目文件 | `.trans` | 来源 [Translator++](https://dreamsavior.net/translator-plusplus)　`👈 即将停止支持` |
 
 ## 近期更新 📅
-- 20261021 v0.130.1
-  - 原生 `Godot 4` 加密游戏支持 [#1011](../../issues/1011)
-  - 修复与改进 [#1013](../../issues/1013) [#1014](../../issues/1014) [#1015](../../issues/1015)
+- 20261029 v0.132.1
+  - 修复与改进 [#1049](../../issues/1049) [#1050](../../issues/1050) [#1052](../../issues/1052) [#1053](../../issues/1053) [#1054](../../issues/1054)
 
 ## 开发指南 🛠️
 - 安装 [ [Go](https://go.dev) ] 和 [ [`Node.js`](https://nodejs.org) ]

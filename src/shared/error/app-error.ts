@@ -29,6 +29,11 @@ export const APP_ERROR_DEFINITIONS = {
     severity: "expected",
   },
   "project.not_loaded": { message: "No project is loaded.", status: 409, severity: "expected" },
+  "project.newer_app_version": {
+    message: "The project targets a newer application version. Confirmation is required.",
+    status: 409,
+    severity: "expected",
+  },
   "project.not_found": {
     message: "The project file does not exist.",
     status: 404,
@@ -45,6 +50,7 @@ export const APP_ERROR_DEFINITIONS = {
     severity: "fault",
   },
   "file.not_found": { message: "The file does not exist.", status: 404, severity: "expected" },
+  "file.busy": { message: "The game directory is busy.", status: 423, severity: "expected" },
   "file.preview_too_large": {
     message: "The file exceeds the preview size limit.",
     status: 415,
@@ -70,6 +76,11 @@ export const APP_ERROR_DEFINITIONS = {
   "database.busy": { message: "The project database is busy.", status: 423, severity: "warning" },
   "project.already_exists": {
     message: "The project file already exists.",
+    status: 409,
+    severity: "expected",
+  },
+  "project.path_conflict": {
+    message: "The output project must differ from the source projects and the loaded project.",
     status: 409,
     severity: "expected",
   },

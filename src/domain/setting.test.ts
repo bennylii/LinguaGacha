@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CONTEXT_LINES_THRESHOLD_MAX,
   DEFAULT_NETWORK_PROXY_ADDRESS,
   DEFAULT_SETTING,
   is_network_proxy_address,
@@ -13,6 +14,53 @@ import {
 import { Check } from "typebox/value";
 
 describe("设置快照", () => {
+  it("旧设置默认保存到工程旁，译文固定目录可独立保留", () => {
+    const old = Setting.from_json({ project_fixed_path: "E:/projects" });
+    expect(old.to_snapshot()).toMatchObject({
+      translation_save_mode: "PROJECT",
+      translation_fixed_path: "",
+    });
+    const updated = old
+      .with_setting_value("translation_save_mode", "FIXED")
+      .with_setting_value("translation_fixed_path", "E:/translations");
+    expect(Setting.from_json(updated.to_json()).to_snapshot()).toMatchObject({
+      project_fixed_path: "E:/projects",
+      translation_save_mode: "FIXED",
+      translation_fixed_path: "E:/translations",
+    });
+  });
+  it("序列化与快照均移除旧输出设置", () => {
+    const setting = Setting.from_json({
+      deduplication_in_bilingual: false,
+      write_translated_name_fields_to_file: true,
+      preceding_lines_threshold: 7,
+    });
+    for (const output of [setting.to_json(), setting.to_snapshot()]) {
+      expect(output).not.toHaveProperty("deduplication_in_bilingual");
+      expect(output).not.toHaveProperty("write_translated_name_fields_to_file");
+      expect(output).toHaveProperty("preceding_lines_threshold", 7);
+      expect(output).toHaveProperty("following_lines_threshold", 0);
+    }
+  });
+  it.each([
+    ["3.9", 3],
+    [-2.8, 0],
+    [Infinity, 0],
+    [NaN, 0],
+    ["bad", 0],
+    [CONTEXT_LINES_THRESHOLD_MAX + 1, CONTEXT_LINES_THRESHOLD_MAX],
+  ])("前后文读取、更新与快照使用同一计数边界：%s", (value, expected) => {
+    for (const field of ["preceding_lines_threshold", "following_lines_threshold"] as const) {
+      const setting = Setting.from_json({ [field]: value });
+      expect(setting.to_json()[field]).toBe(expected);
+      expect(setting.to_snapshot()[field]).toBe(expected);
+      expect(Setting.from_json({}).with_setting_value(field, value).to_snapshot()[field]).toBe(
+        expected,
+      );
+      expect(normalize_setting_snapshot({ [field]: value })[field]).toBe(expected);
+      expect(Check(SETTING_SNAPSHOT_SCHEMA, setting.to_snapshot())).toBe(true);
+    }
+  });
   it("读取与更新的结果满足同一快照结构，并保留文本边界", () => {
     const setting = Setting.from_json({
       source_language: " en ",
@@ -22,10 +70,11 @@ describe("设置快照", () => {
       recent_projects: [{ path: " p.lg ", name: "工程" }],
     });
     expect(setting.to_json()["project_fixed_path"]).toBe(" Mixed/Path ");
+    expect(setting.to_json()).not.toHaveProperty("clean_ruby");
+    expect(setting.to_snapshot()).not.toHaveProperty("clean_ruby");
     expect(setting.to_json()).not.toHaveProperty("source_language"); // 语言归项目所有，旧配置字段不再保留
     expect(setting.to_snapshot()).toMatchObject({
       project_fixed_path: "Mixed/Path",
-      clean_ruby: true,
       request_timeout: 45,
     });
     expect(Check(SETTING_SNAPSHOT_SCHEMA, setting.to_snapshot())).toBe(true);

@@ -1,13 +1,21 @@
 import { godot_member_kind } from "./member";
+import assert from "node:assert/strict";
+import { GODOT_RESOURCE_MAX_BYTES } from "./binary";
 import type { JsonRecord, JsonValue } from "../../../domain/json";
 import type { GameFiles } from "../shared/game/format";
+import {
+  readable_json,
+  write_projection,
+  type ProjectionFailure,
+  type ReadableFile,
+} from "../shared/game/readable";
 import type { GodotLocation } from "./item";
 import { read_gdsc, print_gdsc } from "./gdsc";
 import { read_source } from "./gdscript";
 import { read_project } from "./project";
 import { read_po } from "./po";
 import { read_resource, read_resource_type, RESOURCE_VARIANT_TYPES } from "./resource";
-import { read_scene } from "./scene";
+import { read_scene, scene_strings } from "./scene";
 import {
   check_locale_member,
   plan_translation_locale,
@@ -18,18 +26,34 @@ import {
 } from "./translation";
 import { all_values, MARSHAL_VARIANT_TYPES, type Value } from "./variant";
 
-type ReadableFile = readonly [name: string, content: Uint8Array];
 type ReadableString = { location: GodotLocation; text: string; context: string | null };
 type VariantTypes = Readonly<Record<number, string>>;
 
 /**
- * 原字节旁写出 JSON 投影，`strings[].location` 与条目的 `godot.location` 结构相同。
+ * 只生成可读视图，`strings[].location` 与条目的 `godot.location` 结构相同。
  * 语言表最后处理：优化表只存哈希，用其他成员和语言表中出现过的字符串反查消息键。
  */
-export async function* read_godot_sources(files: GameFiles): AsyncGenerator<ReadableFile> {
+export async function* read_godot_projections(
+  files: GameFiles,
+  report?: ProjectionFailure,
+  signal?: AbortSignal,
+): AsyncGenerator<ReadableFile> {
   const members = new Map<string, Buffer>();
-  for (const [name, member] of files)
-    members.set(name, Buffer.from(await member.async("uint8array")));
+  for (const [name, member] of files) {
+    signal?.throwIfAborted();
+    try {
+      const bytes = Buffer.from(await member.async("uint8array"));
+      signal?.throwIfAborted();
+      assert(
+        bytes.length <= GODOT_RESOURCE_MAX_BYTES,
+        "Godot member exceeds format processing limit: " + name,
+      );
+      members.set(name, bytes);
+    } catch (error) {
+      signal?.throwIfAborted();
+      report?.(name, error);
+    }
+  }
   const context = new Map<string, Buffer>();
   for (const [name, bytes] of members) {
     try {
@@ -44,10 +68,7 @@ export async function* read_godot_sources(files: GameFiles): AsyncGenerator<Read
   for (const [file, bytes] of members) {
     const type = table_type(file, bytes);
     if (type !== null) tables.set(file, type);
-    else {
-      yield [file, bytes];
-      yield* write_projection(file, () => read_member(file, bytes, plan, keys));
-    }
+    else yield* write_projection(file, () => read_member(file, bytes, plan, keys), report, signal);
   }
   // 非优化表的消息键也是优化表的候选，先写出非优化表。
   const order = [...tables].sort(
@@ -55,8 +76,7 @@ export async function* read_godot_sources(files: GameFiles): AsyncGenerator<Read
   );
   for (const [file] of order) {
     const bytes = members.get(file)!;
-    yield [file, bytes];
-    yield* write_projection(file, () => read_table(file, bytes, plan, keys));
+    yield* write_projection(file, () => read_table(file, bytes, plan, keys), report, signal);
   }
 }
 
@@ -70,30 +90,6 @@ function table_type(file: string, bytes: Buffer): string | null {
     return null;
   }
 }
-
-/** 单个成员解析失败时写出错误投影，原字节已经写出。 */
-function* write_projection(
-  file: string,
-  read: () => (readonly [string, string])[],
-): Generator<ReadableFile> {
-  let outputs: (readonly [string, string])[];
-  try {
-    outputs = read();
-  } catch (error) {
-    outputs = [
-      [
-        file + ".json",
-        json({
-          internal_file_path: file,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      ],
-    ];
-  }
-  for (const [name, text] of outputs) yield [name, Buffer.from(text)];
-}
-
-const json = (value: unknown): string => JSON.stringify(value, null, 2); // 序列化供工作区读取的成员投影。
 
 /** 语言表以外的成员。`.gd`、`.po` 原文可读，不生成投影，只提供反查消息键的候选。 */
 function read_member(
@@ -114,8 +110,8 @@ function read_member(
       settings[s.name] = variant_json(s.value, MARSHAL_VARIANT_TYPES);
     return [
       [
-        file + ".json",
-        json({
+        file + ".reference.json",
+        readable_json({
           internal_file_path: file,
           type: "ProjectSettings",
           settings,
@@ -138,8 +134,11 @@ function read_member(
         });
     }
     return [
-      [file + ".gd", print_gdsc(g)],
-      [file + ".json", json({ internal_file_path: file, type: "GDSC", strings })],
+      [file + ".reference.gd", print_gdsc(g)],
+      [
+        file + ".reference.json",
+        readable_json({ internal_file_path: file, type: "GDSC", strings }),
+      ],
     ];
   }
   if (kind !== "resource") return [];
@@ -166,12 +165,8 @@ function read_member(
       }));
     for (const p of scene.properties) {
       nodes[p.node]!.properties[p.property] = variant_json(p.value, RESOURCE_VARIANT_TYPES);
-      if ((p.value.type === 5 || p.value.type === 44) && typeof p.value.value === "string")
-        strings.push({
-          location: { kind: "scene", node: p.node, property: p.property },
-          text: p.value.value,
-          context: `${p.path}:${p.property}`,
-        });
+      for (const entry of scene_strings(p))
+        strings.push({ location: entry.location, text: entry.value.value, context: entry.context });
     }
     body = { external: doc.external, resources, nodes, connections: scene.connections };
   } else {
@@ -186,7 +181,12 @@ function read_member(
     body = { external: doc.external, resources };
   }
   for (const s of strings) keys.add(s.text);
-  return [[file + ".json", json({ internal_file_path: file, type: doc.type, ...body, strings })]];
+  return [
+    [
+      file + ".reference.json",
+      readable_json({ internal_file_path: file, type: doc.type, ...body, strings }),
+    ],
+  ];
 }
 
 /** 全部 locale 的语言表都写出投影，未选中的表只作对照语料，`selected` 与条目范围一致。 */
@@ -224,8 +224,8 @@ function read_table(
     }
   return [
     [
-      file + ".json",
-      json({
+      file + ".reference.json",
+      readable_json({
         internal_file_path: file,
         type: doc.type,
         locale: String(doc.properties.find((p) => p.name === "locale")?.value.value ?? "en"),

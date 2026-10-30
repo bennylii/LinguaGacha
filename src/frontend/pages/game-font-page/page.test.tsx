@@ -61,6 +61,7 @@ describe("GameFontPage", () => {
     await act(async () => root.unmount());
     container.remove();
     vi.mocked(api_fetch).mockReset();
+    vi.useRealTimers();
   });
 
   /** 从游戏菜单选择目录，再点击字体框选择字体。 */
@@ -70,21 +71,27 @@ describe("GameFontPage", () => {
     await act(async () => get_button("点击或拖拽字体文件").click());
   }
 
-  it("菜单选择游戏目录并选择字体后启用动作，确认目标与提交一致", async () => {
+  it("选择游戏和字体后显示标准倒计时确认框，确认后提交所选路径", async () => {
     expect(get_button("开始修改")).toHaveProperty("disabled", true);
     await select_game_and_font();
 
     const paths = { font_path: FONT_PATH, game_path: GAME_PATH };
     expect(api_fetch).toHaveBeenCalledWith("/api/toolbox/game-font/inspect", paths);
-    expect(container.textContent).toContain(GAME_PATH);
+    expect(get_button("demo")).toBeDefined(); // 卡片单行显示路径末段。
+    expect(get_button("custom.ttf")).toBeDefined();
     expect(get_button("开始修改")).toHaveProperty("disabled", false);
 
+    vi.useFakeTimers();
     await act(async () => get_button("开始修改").click());
-    const details = [...document.querySelectorAll('[data-slot="alert-dialog-details"] dd')];
-    expect(details.map((element) => element.textContent)).toEqual([GAME_PATH, FONT_PATH]);
-    await act(async () =>
-      document.querySelector<HTMLElement>('[data-slot="alert-dialog-primary-action"]')!.click(),
-    );
+    const primary = document.querySelector<HTMLButtonElement>(
+      '[data-slot="alert-dialog-primary-action"]',
+    )!;
+    expect(primary.disabled).toBe(true); // 备份提示倒计时结束前不能开始。
+    const seconds = Number.parseInt(primary.textContent!, 10);
+    act(() => vi.advanceTimersByTime(seconds * 1_000));
+    expect(primary.disabled).toBe(false);
+    expect(api_fetch).not.toHaveBeenCalledWith("/api/toolbox/game-font/apply", paths);
+    await act(async () => primary.click());
     expect(api_fetch).toHaveBeenLastCalledWith("/api/toolbox/game-font/apply", paths);
   });
 });

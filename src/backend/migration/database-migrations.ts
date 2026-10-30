@@ -1,4 +1,6 @@
+import { update_project_file_version } from "../database/project-file-version";
 import { run_asset_file_type_migration } from "./database/asset-file-type-migration";
+import { run_renpy_rpy_file_type_migration } from "./database/renpy-rpy-file-type-migration";
 import type { DatabaseSync } from "node:sqlite";
 import type { DatabaseWritebackMigration } from "./migration-types";
 import { JsonTool } from "../../shared/utils/json-tool";
@@ -10,7 +12,7 @@ import { run_project_rule_storage_migration } from "./database/project-rule-stor
 import { run_quality_rule_entry_identity_migration } from "./database/quality-rule-entry-identity-migration";
 import { run_trans_item_metadata_migration } from "./database/trans-item-metadata-migration";
 
-// 顺序是历史升级契约：规则存储先于身份，基础 Item 先于 TRANS，最后补公开字段。
+// 顺序属于升级契约：先补齐条目，再将文件身份移交资产，最后重命名旧 Ren’Py 格式。
 const DATABASE_WRITEBACK_MIGRATIONS: readonly DatabaseWritebackMigration[] = [
   { id: "project-rule-storage", run: run_project_rule_storage_migration },
   { id: "quality-rule-entry-identity", run: run_quality_rule_entry_identity_migration },
@@ -18,22 +20,28 @@ const DATABASE_WRITEBACK_MIGRATIONS: readonly DatabaseWritebackMigration[] = [
   { id: "trans-item-metadata", run: run_trans_item_metadata_migration },
   { id: "project-item-public-contract", run: run_project_item_public_contract_migration },
   { id: "asset-file-type", run: run_asset_file_type_migration },
+  { id: "renpy-rpy-file-type", run: run_renpy_rpy_file_type_migration },
 ];
 export const PROJECT_DATABASE_APPLIED_WRITEBACK_MIGRATIONS_META_KEY =
   "applied_writeback_migrations";
 
-/** 首次打开连接先补结构，再执行逐项原子写回。完成标记与数据在同一事务保存。 */
+/** 创建或打开准备先补结构，再执行逐项原子写回。完成标记与数据在同一事务保存。 */
 export function run_project_database_migrations(
   db: DatabaseSync,
+  current_app_version: string,
   writeback_migrations: readonly DatabaseWritebackMigration[] = DATABASE_WRITEBACK_MIGRATIONS,
 ): void {
-  run_in_transaction(db, () => run_project_schema_migration(db));
+  run_in_transaction(db, () => {
+    run_project_schema_migration(db);
+    update_project_file_version(db, current_app_version);
+  });
   const writeback_ids = writeback_migrations.map(({ id }) => id);
   const applied_ids = read_applied_writeback_migration_ids(db);
   for (const migration of writeback_migrations) {
     if (applied_ids.has(migration.id)) continue;
     run_in_transaction(db, () => {
       migration.run(db);
+      update_project_file_version(db, current_app_version);
       applied_ids.add(migration.id);
       write_applied_writeback_migration_ids(db, applied_ids, writeback_ids);
     });

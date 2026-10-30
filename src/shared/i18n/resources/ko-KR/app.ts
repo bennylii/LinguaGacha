@@ -6,6 +6,7 @@ export const ko_kr_app = {
     title: "리소스 팩 우선순위",
     description: "뒤에 있는 리소스 팩이 앞에 있는 팩의 같은 이름 리소스를 덮어씁니다",
   },
+  game_backup_warning: "작업 전에 게임 폴더 전체를 백업하는 것을 권장합니다 …!",
   media: {
     zoom_out: "축소",
     zoom_in: "확대",
@@ -63,6 +64,7 @@ export const ko_kr_app = {
     select_folder: "폴더 선택",
   },
   feedback: {
+    activate_link: "링크를 처리하지 못했습니다 …",
     load_failed: "불러오기 실패 …",
     refresh_failed: "새로 고침 실패 …",
     query_failed: "조회 실패 …",
@@ -74,6 +76,8 @@ export const ko_kr_app = {
     export_failed: "내보내기 실패 …",
     copy_failed: "복사 실패 …",
     read_failed: "읽기 실패 …",
+    operation_running: "작업 실행 중 …",
+    operation_success: "작업 성공 …",
     operation_failed: "작업 실패 …",
     content_unavailable: "콘텐츠를 사용할 수 없습니다",
     save_failed: "저장 실패 …",
@@ -85,7 +89,6 @@ export const ko_kr_app = {
     no_valid_data: "유효한 데이터가 없습니다",
     update_failed: "업데이트에 실패했습니다 …",
     project_settings_aligned: "현재 설정에 맞춰 프로젝트 설정을 업데이트했습니다",
-    project_cache_loading: "프로젝트 캐시 새로 고치는 중 …",
   },
   error_boundary: {
     eyebrow: "Renderer Runtime",
@@ -105,7 +108,7 @@ export const ko_kr_app = {
     duplicate_description: "중복 규칙 {COUNT}개를 발견했습니다. 처리 방법을 선택해 주세요 …",
   },
   update: {
-    confirm_description: "LinguaGacha v{VERSION} 업데이트가 있습니다. 다운로드할까요 …?",
+    action: "업데이트",
     restart_confirm: "다시 시작하여 업데이트",
     launching: "처리 중 …",
   },
@@ -202,10 +205,12 @@ export const ko_kr_app = {
   },
   prompt: {
     source: "원문",
-    builder_control_character_samples: "제어 문자 예시:",
-    builder_glossary_header: "용어집 <원문 용어> -> <번역 용어> #<용어 정보>:",
-    builder_input: "입력:",
-    builder_preceding_context: "앞선 문맥:",
+    builder_control_character_samples: "제어 문자 예시 (그대로 유지):",
+    builder_glossary_header:
+      "용어집 (문맥과 용어 설명에 따라 적용) <원문 용어> -> <번역 용어> #<용어 설명>:",
+    builder_input: "입력 (항목별로 번역하고 항목 내 줄바꿈 유지):",
+    builder_preceding_context: "앞 문맥 (참고용):",
+    builder_following_context: "뒤 문맥 (참고용):",
   },
   translation_generation: {
     action: "번역문 생성",
@@ -214,7 +219,7 @@ export const ko_kr_app = {
       checking: "교정 경고 확인 중 …",
       check_failed: "교정 경고를 읽지 못했습니다. 현재 번역문 생성은 계속할 수 있습니다 …",
       warning_description:
-        "교정 경고가 {COUNT}개 있습니다. AGENT로 자동 교정한 후 번역문을 생성하는 것을 권장합니다. 계속할까요 …?",
+        "교정 경고가 {COUNT}개 감지되었습니다. 경고가 반드시 오류를 의미하지는 않지만, 먼저 AGENT로 자동 교정을 최소 한 번 실행하는 것을 권장합니다. 번역문을 계속 생성할까요 …?",
       retry_check: "다시 확인",
       continue_generate: "생성 계속",
     },
@@ -235,7 +240,7 @@ export const ko_kr_app = {
     json_files: "JSON 파일 (*.json)",
     excel_files: "Excel 파일 (*.xlsx)",
     supported_txt_files: "지원 파일 (*.txt)",
-    font_files: "글꼴 파일 (*.ttf *.otf)",
+    font_files: "글꼴 파일 (*.ttf)",
     executable_files: "실행 파일 (*.exe)",
   },
   diagnostic: {

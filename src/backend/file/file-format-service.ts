@@ -1,9 +1,14 @@
+import { collect_game_import_files } from "./shared/game/source-files";
+import { resolve_game_source_input } from "./shared/game/source-input";
+import { GameDirectoryOperations } from "./shared/game/game-directory-operations";
+import { assert_game_directory_ready } from "./shared/game/directory";
+import { source_diagnostic, type SourceDiagnostic } from "./shared/game/preparation";
+import type { PreparedRead, PreparedSource } from "./file-format-types";
 import type { GodotPackOrder } from "../../shared/godot";
 import { apply_godot_pack_order, godot_pack_preview } from "./godot/source";
 import { GAME_ENGINES, prepare_game_source } from "./shared/game/engines";
-import { write_game_backup } from "./shared/game/backup";
+import type { GameImport } from "./shared/game/source-files";
 import { GameFormat } from "./shared/game/format";
-import { build_source_file_parse_failure } from "./source-file-parse-failure-reporter";
 import {
   discover_source,
   discover_sources,
@@ -14,11 +19,7 @@ import type { GamePrepareExecution } from "./shared/game/prepare-worker";
 import { is_game_file_type, type GameFileType } from "../../shared/project-source-formats";
 import { format_local_timestamp } from "../../shared/utils/format-local-timestamp";
 import { normalize_project_asset_path } from "../../shared/project/project-asset-paths";
-import {
-  SourceFilePathIndex,
-  GAME_WORKSPACE_DIRECTORY,
-  assert_regular_path,
-} from "./source-file-paths";
+import { SourceFilePathIndex } from "./source-file-paths";
 import type { PDFExecution } from "./pdf/pdf-worker";
 import { PDFFormat } from "./pdf/pdf-format";
 import path from "node:path";
@@ -28,11 +29,11 @@ import { ASSFormat } from "./subtitle/ass-ssa-format";
 import { KVJSONFormat } from "./kvjson/kvjson-format";
 import { MDV2Format } from "./markdown/md-v2-format";
 import { MESSAGEJSONFormat } from "./messagejson/messagejson-format";
-import { RenPyFormat } from "./renpy/renpy-format";
+import { RenpyRpyFormat } from "./renpy-rpy/renpy-rpy-format";
 import { SRTFormat } from "./subtitle/srt-format";
 import { VTTFormat } from "./subtitle/vtt-format";
 import { LRCFormat } from "./subtitle/lrc-format";
-import { AppError } from "../../shared/error";
+import { AppError, is_app_error } from "../../shared/error";
 import { decode_text_content } from "../../shared/utils/text-tool";
 import { JsonTool } from "../../shared/utils/json-tool";
 import type { JsonValue } from "../../domain/json";
@@ -73,7 +74,7 @@ export class FileFormatService {
   private readonly messagejson: MESSAGEJSONFormat;
   private readonly xlsx: XLSXFormat;
   private readonly trans: TRANSFormat;
-  private readonly renpy: RenPyFormat;
+  private readonly renpy_rpy: RenpyRpyFormat;
   private readonly epub: EPUBFormat;
   private readonly games: Record<GameFileType, GameFormat>;
 
@@ -81,6 +82,7 @@ export class FileFormatService {
    * 构造时固定各格式处理器，保证一次服务实例内配置一致
    */
   public constructor(
+    private readonly game_directory_operations: GameDirectoryOperations,
     config: FileFormatServiceConfig,
     private readonly pdf_execution: PDFExecution,
     native_fs: NativeFs = default_native_fs,
@@ -90,20 +92,20 @@ export class FileFormatService {
     this.games = Object.fromEntries(
       Object.entries(GAME_ENGINES).map(([type, engine]) => [
         type,
-        new GameFormat(engine.create_adapter(config), native_fs),
+        new GameFormat(this.game_directory_operations, engine.create_adapter(), native_fs),
       ]),
     ) as Record<GameFileType, GameFormat>;
-    this.txt = new TXTFormat(config);
+    this.txt = new TXTFormat();
     this.md = new MDV2Format();
-    this.ass = new ASSFormat(config);
-    this.srt = new SRTFormat(config);
+    this.ass = new ASSFormat();
+    this.srt = new SRTFormat();
     this.vtt = new VTTFormat(config);
-    this.lrc = new LRCFormat(config);
+    this.lrc = new LRCFormat();
     this.kvjson = new KVJSONFormat();
-    this.messagejson = new MESSAGEJSONFormat(config);
+    this.messagejson = new MESSAGEJSONFormat();
     this.xlsx = new XLSXFormat();
     this.trans = new TRANSFormat();
-    this.renpy = new RenPyFormat(config);
+    this.renpy_rpy = new RenpyRpyFormat();
     this.epub = new EPUBFormat(config);
   }
 
@@ -114,12 +116,19 @@ export class FileFormatService {
     rel_path: string,
     content: Uint8Array,
     file_type?: string,
+    additional_files: readonly string[] = [],
+    signal?: AbortSignal,
   ): Promise<FileFormatReadResult> {
     if (is_game_file_type(file_type))
       return {
         kind: "items",
         file_type,
-        ...(await this.games[file_type].read_from_stream(content, rel_path)),
+        ...(await this.games[file_type].read_from_stream(
+          content,
+          rel_path,
+          additional_files,
+          signal,
+        )),
       };
     const by_extension: Record<string, string> = {
       ".txt": "TXT",
@@ -130,11 +139,13 @@ export class FileFormatService {
       ".vtt": "VTT",
       ".lrc": "LRC",
       ".epub": "EPUB",
-      ".rpy": "RENPY",
+      ".rpy": "RENPY_RPY",
       ".trans": "TRANS",
       ".pdf": "PDF",
     };
-    let type = file_type ?? by_extension[path.extname(rel_path).toLowerCase()];
+    let type =
+      (file_type === "NONE" ? undefined : file_type) ??
+      by_extension[path.extname(rel_path).toLowerCase()];
     if (
       type === "KVJSON" ||
       type === "MESSAGEJSON" ||
@@ -190,7 +201,7 @@ export class FileFormatService {
       VTT: this.vtt,
       LRC: this.lrc,
       EPUB: this.epub,
-      RENPY: this.renpy,
+      RENPY_RPY: this.renpy_rpy,
     };
     if (!type || !Object.hasOwn(formats, type))
       return { kind: "items", file_type: "NONE", items: [] };
@@ -200,6 +211,23 @@ export class FileFormatService {
       file_type: type as ItemFileType,
       items: await format.read_from_stream(content, rel_path),
     };
+  }
+
+  /** 来源发现到原稿固化共用一次占用，内部发现与准备不重复申请。 */
+  public async with_source_directories<T>(
+    source_paths: readonly string[],
+    operation: (signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const directories = source_paths.map((input) => {
+      try {
+        return resolve_game_source_input(input, this.native_fs)?.root ?? input;
+      } catch {
+        // 来源检查统一归集读取失败；失败的 EXE 仍保守占用其父目录。
+        return path.extname(input).toLowerCase() === ".exe" ? path.dirname(input) : input;
+      }
+    });
+    return this.game_directory_operations.run(directories, operation, signal);
   }
 
   /** 新建、摘要和预览共用发现结果，正式导入重新识别本次选定来源。 */
@@ -214,7 +242,7 @@ export class FileFormatService {
     );
   }
 
-  /** 导入确认后的目标路径固定；识别错误也保留在同一批次中。 */
+  /** 导入确认后的目标路径固定。识别错误也保留在同一批次中。 */
   public async discover_import_sources(
     entries: readonly ProjectSourceFileEntry[],
     signal?: AbortSignal,
@@ -223,10 +251,24 @@ export class FileFormatService {
     const result: DiscoveredSource[] = [];
     for (const entry of entries) {
       const resolved = await discover_source(entry.source_path, this.native_fs, signal);
+      const file_type = entry.file_type ?? resolved.file_type;
+      // 游戏容器只能由同一引擎的来源形成，身份不符时来源无法交付目标资产的原稿。
+      const mismatched =
+        resolved.source.kind !== "failure" &&
+        file_type !== resolved.file_type &&
+        (is_game_file_type(file_type) || resolved.source.kind === "game");
       result.push({
         ...resolved,
         rel_path: entry.rel_path,
-        file_type: entry.file_type ?? resolved.file_type,
+        file_type,
+        ...(mismatched && {
+          source: {
+            kind: "failure",
+            error: new AppError("file.invalid_structure", {
+              public_details: { file: entry.rel_path },
+            }),
+          },
+        }),
       });
     }
     assert_source_identities(result, this.native_fs);
@@ -272,7 +314,7 @@ export class FileFormatService {
     const assigned = new SourceFilePathIndex();
     const result: T[] = [...entries];
     const directories = new Map<string, string>(); // 同一准备操作中的目录前缀只改名一次，子文件共同迁移。
-    // 普通目录先占位，游戏避让；结果仍按用户输入顺序返回。
+    // 普通目录先占位，游戏避让。结果仍按用户输入顺序返回。
     const order = entries
       .map((entry, index) => ({ entry, index }))
       .sort(
@@ -331,48 +373,130 @@ export class FileFormatService {
     return result;
   }
 
-  /** 正式导入准备游戏并固化容器，备份成功后才返回原稿。 */
-  public async prepare_source(entry: DiscoveredSource, signal?: AbortSignal) {
+  /** 正式导入准备游戏并固化容器后返回原稿。 */
+  public async prepare_source(
+    entry: DiscoveredSource,
+    signal?: AbortSignal,
+  ): Promise<PreparedSource> {
     signal?.throwIfAborted();
     const { source, rel_path } = entry;
     if (source.kind === "failure") throw source.error;
     if (source.kind !== "file") {
-      // 散装游戏不经过解包事务，须在此拦截上次遗留的恢复材料。
-      const workspace = path.join(source.game.root, GAME_WORKSPACE_DIRECTORY);
-      assert_regular_path(workspace, this.native_fs);
-      if (this.native_fs.exists(workspace))
-        throw new Error("Unfinished game operation; recovery files: " + workspace);
-      await prepare_game_source(source, this.native_fs, this.game_prepare_execution, signal);
+      assert_game_directory_ready(source.game.root, this.native_fs);
       const format = this.games[source.file_type];
-      const files = GAME_ENGINES[source.file_type].collect(source, this.native_fs, signal);
-      const container = await format.create_container(
-        files.data,
-        rel_path,
-        source.game.root,
-        signal,
-      );
-      await write_game_backup(
-        source.game.root,
-        new Map([...files.data, ...files.fonts]),
-        this.native_fs,
-        signal,
-      );
-      return container;
+      const engine = GAME_ENGINES[source.file_type];
+      const diagnostics: SourceDiagnostic[] = [];
+      let captured:
+        | { content: Uint8Array; additional_files: readonly string[]; read?: PreparedRead }
+        | undefined;
+      let directory_changed = false;
+      let archive_error: unknown;
+      try {
+        await prepare_game_source(
+          source,
+          this.native_fs,
+          this.game_prepare_execution,
+          signal,
+          async (prepared) => {
+            diagnostics.push(...prepared.diagnostics);
+            directory_changed =
+              prepared.changes !== null &&
+              (prepared.changes.writes.length > 0 || Boolean(prepared.changes.removes?.length));
+            const files = new Map(prepared.sources.files);
+            let members_complete = true; // 只追踪本次原稿收集的读取遗漏。
+            const sources = {
+              ...prepared.sources,
+              files,
+              on_read_failure: (diagnostic: SourceDiagnostic) => {
+                members_complete = false;
+                if (!diagnostics.some((existing) => existing.member === diagnostic.member))
+                  diagnostics.push(diagnostic);
+                if (diagnostic.member) files.set(diagnostic.member, null);
+              },
+            };
+            try {
+              const translation = await engine.collect(source, this.native_fs, signal, sources);
+              const translation_complete = members_complete; // 附加原稿的遗漏不改变格式的跨成员语义。
+              const collected = collect_game_import_files(
+                source.game.root,
+                translation,
+                (name) => engine.includes_additional_file(source, name),
+                this.native_fs,
+                signal,
+                sources,
+              );
+              // 导入语义只消费即将固化的同一份快照，已完成的读取随原稿交付，避免固化后再次解析。
+              let imported: GameImport | undefined;
+              let read: PreparedRead | undefined;
+              try {
+                imported = await engine.prepare_import?.(
+                  source,
+                  { data: collected.data, files: collected.files, complete: translation_complete },
+                  this.native_fs,
+                  signal,
+                  (diagnostic) => diagnostics.push(diagnostic),
+                );
+              } catch (error) {
+                signal?.throwIfAborted();
+                read = { ok: false, error };
+              }
+              const content = await format.create_container(
+                collected.data,
+                rel_path,
+                collected.files.join("\n"),
+                signal,
+                imported?.metadata,
+              );
+              if (imported?.read)
+                read = {
+                  ok: true,
+                  result: {
+                    kind: "items",
+                    file_type: source.file_type,
+                    ...format.collect_read(imported.read, rel_path),
+                  },
+                };
+              captured = {
+                content,
+                additional_files: collected.additional_files,
+                ...(read && { read }),
+              };
+            } catch (error) {
+              signal?.throwIfAborted();
+              archive_error = error;
+            }
+          },
+          this.game_directory_operations.report_cleanup,
+        );
+      } catch (error) {
+        if (signal?.aborted) throw error; // 目录恢复失败保留完整异常和恢复材料位置。
+        if (!captured) throw error;
+        directory_changed = is_app_error(error) && error.public_details?.directory_changed === true;
+        diagnostics.push(source_diagnostic("directory", error));
+      }
+      if (!captured)
+        throw new AppError("file.parse_failed", {
+          cause: archive_error,
+          public_details: { directory_changed },
+        });
+      return { ...captured, directory_changed, diagnostics };
     }
-    return { content: this.native_fs.read_file(entry.source_path), warnings: [] };
+    return {
+      content: this.native_fs.read_file(entry.source_path),
+      additional_files: [],
+      directory_changed: false,
+      diagnostics: [],
+    };
   }
 
   /**
    * 按文件发现的同一去重口径汇总总数和互斥扩展名命中数，不提前解析文件内容。
    */
   public async summarize_source_files(source_paths: string[]): Promise<ProjectSourceFileSummary> {
-    const entries = await this.collect_source_file_entries(source_paths);
-    const source_files = entries.filter((entry) => entry.source.kind !== "failure");
-    const failed_files = entries.flatMap((entry) =>
-      entry.source.kind === "failure"
-        ? [build_source_file_parse_failure({ ...entry, error: entry.source.error })]
-        : [],
+    const entries = await this.with_source_directories(source_paths, (signal) =>
+      this.collect_source_file_entries(source_paths, signal),
     );
+    const source_files = entries.filter((entry) => entry.source.kind !== "failure");
     const format_hit_counts = Object.fromEntries(
       PROJECT_SOURCE_FORMATS.map((format) => [format.id, 0]),
     ) as ProjectSourceFormatHitCounts;
@@ -398,8 +522,8 @@ export class FileFormatService {
         : [],
     );
     return {
-      ...(failed_files.length ? { failed_files } : {}),
       ...(godot_packs.length ? { godot_packs } : {}),
+      contains_game: source_files.some((entry) => entry.source.kind === "game"),
       source_file_count: source_files.length,
       format_hit_counts,
     };
@@ -410,7 +534,15 @@ export class FileFormatService {
    */
   public async write_items(items: Item[], context: FileFormatServiceWriteContext): Promise<void> {
     const { paths, asset_reader } = context;
-    for (const game of Object.values(this.games)) await game.write_to_path(items, context);
+    const failures: unknown[] = [];
+    for (const game of Object.values(this.games)) {
+      try {
+        await game.write_to_path(items, context);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "runtime.disposed") throw error;
+        failures.push(error);
+      }
+    }
     await this.txt.write_to_path(items, paths);
     await this.md.write_to_path(items, paths);
     await this.write_subtitles(items, context);
@@ -418,8 +550,10 @@ export class FileFormatService {
     await this.messagejson.write_to_path(items, paths);
     await this.xlsx.write_to_path(items, paths, asset_reader);
     await this.trans.write_to_path(items, paths, asset_reader);
-    await this.renpy.write_to_path(items, paths, asset_reader);
+    await this.renpy_rpy.write_to_path(items, paths, asset_reader);
     await this.epub.write_to_path(items, paths, asset_reader);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, "Game assets could not be exported");
   }
 
   /** 文件集合拥有导出调度，格式处理器只组装当前文件的两种正文。 */

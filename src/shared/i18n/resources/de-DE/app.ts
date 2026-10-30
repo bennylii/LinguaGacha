@@ -7,6 +7,8 @@ export const de_de_app = {
     description:
       "Spätere Ressourcenpakete überschreiben gleichnamige Ressourcen aus früheren Paketen",
   },
+  game_backup_warning:
+    "Vor dem Fortfahren wird eine vollständige Sicherung des Spielordners empfohlen …!",
   media: {
     zoom_out: "Verkleinern",
     zoom_in: "Vergrößern",
@@ -65,6 +67,7 @@ export const de_de_app = {
     select_folder: "Ordner auswählen",
   },
   feedback: {
+    activate_link: "Der Link konnte nicht verarbeitet werden …",
     load_failed: "Laden fehlgeschlagen …",
     refresh_failed: "Aktualisieren fehlgeschlagen …",
     query_failed: "Abfrage fehlgeschlagen …",
@@ -76,6 +79,8 @@ export const de_de_app = {
     export_failed: "Export fehlgeschlagen …",
     copy_failed: "Kopieren fehlgeschlagen …",
     read_failed: "Lesen fehlgeschlagen …",
+    operation_running: "Vorgang wird ausgeführt …",
+    operation_success: "Vorgang erfolgreich …",
     operation_failed: "Vorgang fehlgeschlagen …",
     content_unavailable: "Inhalt nicht verfügbar",
     save_failed: "Speichern fehlgeschlagen …",
@@ -88,7 +93,6 @@ export const de_de_app = {
     no_valid_data: "Keine gültigen Daten",
     update_failed: "Aktualisierung fehlgeschlagen …",
     project_settings_aligned: "Projekteinstellungen von aktuellen Einstellungen übernommen",
-    project_cache_loading: "Projekt-Cache wird aktualisiert …",
   },
   error_boundary: {
     eyebrow: "Renderer-Laufzeit",
@@ -110,7 +114,7 @@ export const de_de_app = {
       "{COUNT} doppelte Regeln wurden erkannt. Wählen Sie, wie damit umgegangen werden soll …",
   },
   update: {
-    confirm_description: "LinguaGacha v{VERSION} ist verfügbar. Update herunterladen …?",
+    action: "Aktualisieren",
     restart_confirm: "Neustarten und aktualisieren",
     launching: "Wird verarbeitet …",
   },
@@ -214,11 +218,12 @@ export const de_de_app = {
   },
   prompt: {
     source: "Ausgangstext",
-    builder_control_character_samples: "Steuerzeichen-Beispiele:",
+    builder_control_character_samples: "Steuerzeichen-Beispiele (unverändert beibehalten):",
     builder_glossary_header:
-      "Glossar <Originalbegriff> -> <Übersetzter Begriff> #<Begriffsinformation>:",
-    builder_input: "Eingabe:",
-    builder_preceding_context: "Vorhergehender Kontext:",
+      "Glossar (je nach Kontext und Begriffshinweis anwenden) <Originalbegriff> -> <Übersetzter Begriff> #<Begriffshinweis>:",
+    builder_input: "Eingabe (jeden Eintrag übersetzen, Zeilenumbrüche im Eintrag beibehalten):",
+    builder_preceding_context: "Vorheriger Kontext (nur als Referenz):",
+    builder_following_context: "Folgender Kontext (nur als Referenz):",
   },
   translation_generation: {
     action: "Übersetzung erstellen",
@@ -228,7 +233,7 @@ export const de_de_app = {
       check_failed:
         "Korrekturwarnungen konnten nicht geladen werden. Die aktuelle Übersetzung kann trotzdem erstellt werden …",
       warning_description:
-        "Es wurden {COUNT} Korrekturwarnungen gefunden. Wir empfehlen, sie vor dem Erstellen der Übersetzung automatisch mit AGENT zu prüfen und zu beheben. Trotzdem fortfahren …?",
+        "Es wurden {COUNT} Korrekturwarnungen erkannt. Warnungen weisen nicht unbedingt auf Fehler hin. Wir empfehlen jedoch, zuerst mindestens eine automatische Prüfung mit AGENT durchzuführen. Mit dem Erstellen der Übersetzung fortfahren …?",
       retry_check: "Erneut prüfen",
       continue_generate: "Trotzdem erstellen",
     },
@@ -249,7 +254,7 @@ export const de_de_app = {
     json_files: "JSON-Dateien (*.json)",
     excel_files: "Excel-Dateien (*.xlsx)",
     supported_txt_files: "Unterstützte Dateien (*.txt)",
-    font_files: "Schriftdateien (*.ttf *.otf)",
+    font_files: "Schriftdateien (*.ttf)",
     executable_files: "Ausführbare Dateien (*.exe)",
   },
   diagnostic: {

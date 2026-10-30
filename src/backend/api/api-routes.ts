@@ -298,14 +298,17 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.postJson("/api/quality/prompts/presets/rename", (body) => prompts.rename_preset(body));
   context.postJson("/api/quality/prompts/presets/delete", (body) => prompts.delete_preset(body));
 
-  context.postJson("/api/translation/files/generate", () =>
-    services.files.translationGeneration.generate_files(),
+  context.postJson("/api/translation/files/generate", (body) =>
+    services.files.translationGeneration.generate_files(body),
   );
 
   context.postJson("/api/toolbox/game-font/inspect", (body) =>
     services.files.gameFont.inspect(body),
   );
   context.postJson("/api/toolbox/game-font/apply", (body) => services.files.gameFont.apply(body));
+  context.postJson("/api/toolbox/translation-transfer/apply", (body) =>
+    services.project.translationTransfer.apply(body),
+  );
 
   const settings = services.app.settings;
   context.postJson("/api/settings/app", () => settings.get_app_settings());

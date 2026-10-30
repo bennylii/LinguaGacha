@@ -73,7 +73,7 @@ async function create_fixture(options: {
   /** 提供时按整本 EPUB 资产构造工程，缺失映射用于覆盖旧工程。 */
   epub?: { documents: VolumeDocumentFixture[]; with_map: boolean };
 }): Promise<Fixture> {
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   const lg_path = path.join(temp_dir, "demo.lg");
   await database.create_project(lg_path, "demo");
   const session_state = new ProjectSessionState();

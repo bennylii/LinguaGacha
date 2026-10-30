@@ -1,5 +1,5 @@
 import type { ProjectSummaryService } from "../../backend/project/project-summary-service";
-import fs from "node:fs";
+import { default_native_fs as fs } from "../../native/native-fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -11,6 +11,13 @@ import type { JsonRecord } from "../../domain/json";
 import type { CLICommandOptions } from "../cli-parser";
 import type { CLIJsonStatusReporter } from "../cli-status-reporter";
 import { build_cli_task_input } from "./cli-task-input";
+import { write_stderr } from "../cli-output";
+import { format_i18n_message } from "../../shared/i18n";
+import {
+  read_source_operation_result,
+  type SourceOperationResult,
+} from "../../shared/source-operation";
+import { is_app_error } from "../../shared/error";
 
 type CLIJobStatusReporter = Pick<
   CLIJsonStatusReporter,
@@ -48,26 +55,36 @@ export async function run_cli_job(
   let transient_overrides_active = false; // 防止输入校验失败时写入多余撤销调用
   let excluded_files: string[] = [];
   const failures: unknown[] = []; // 按发生顺序保留业务与收尾错误，同时继续后续清理
+  let source_operation: SourceOperationResult | undefined;
 
   try {
     assert_existing_inputs(command);
-    fs.mkdirSync(command.outputDir, { recursive: true });
-    temp_root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "linguagacha-cli-"));
+    fs.make_dir(command.outputDir);
+    temp_root = await fs.make_temp_dir(path.join(os.tmpdir(), "linguagacha-cli-"));
     const project_path = path.join(temp_root, "cli-job.lg");
     backend_services.app.settings.set_transient_overrides({
       ...build_cli_default_preset_overrides(),
       output_folder_open_on_finish: false,
     });
     transient_overrides_active = true;
-    await backend_services.project.lifecycle.create_project_commit({
-      path: project_path,
-      source_paths: command.inputPaths,
-      // 命令语言直接写入临时项目，翻译与导出读取同一项目事实。
-      languages: {
-        source_language: command.sourceLanguage,
-        target_language: command.targetLanguage,
+    const created = await backend_services.project.lifecycle.create_project_commit(
+      {
+        path: project_path,
+        source_paths: command.inputPaths,
+        // 命令语言直接写入临时项目，翻译与导出读取同一项目事实。
+        languages: {
+          source_language: command.sourceLanguage,
+          target_language: command.targetLanguage,
+        },
       },
-    });
+      () => {
+        // 正式来源发现后、任何游戏准备前输出，stdout 保留给 JSONL 协议。
+        write_stderr(
+          `${format_i18n_message("zh-CN", "app.game_backup_warning")} | ${format_i18n_message("en-US", "app.game_backup_warning")}`,
+        );
+      },
+    );
+    source_operation = read_source_operation_result(created.source_operation);
     await backend_services.project.lifecycle.apply_task_input(await build_cli_task_input(command));
 
     const { entries } = (await backend_services.project.summary.read()).snapshot;
@@ -81,6 +98,8 @@ export async function run_cli_job(
       excluded_files,
     );
   } catch (error) {
+    if (is_app_error(error))
+      source_operation ??= read_source_operation_result(error.public_details?.source_operation);
     failures.push(error);
   }
 
@@ -98,7 +117,7 @@ export async function run_cli_job(
       failures.push(error);
     }
     try {
-      await fs.promises.rm(temp_root, { recursive: true, force: true });
+      await fs.remove_async(temp_root, { recursive: true, force: true });
     } catch (error) {
       failures.push(error);
     }
@@ -109,11 +128,11 @@ export async function run_cli_job(
       failures.length === 1
         ? failures[0]
         : new AggregateError(failures, "CLI job execution or temporary resource cleanup failed.");
-    status_reporter.emit_finished("error", error);
+    status_reporter.emit_finished("error", error, [], source_operation);
     throw error;
   }
 
-  status_reporter.emit_finished("done", undefined, excluded_files);
+  status_reporter.emit_finished("done", undefined, excluded_files, source_operation);
 }
 
 /**
@@ -134,12 +153,12 @@ function build_cli_default_preset_overrides(): JsonRecord {
  */
 function assert_existing_inputs(command: CLICommandOptions): void {
   for (const input_path of command.inputPaths) {
-    if (!fs.existsSync(input_path)) {
+    if (!fs.exists(input_path)) {
       throw new Error(`Input path does not exist: ${input_path}`);
     }
   }
   for (const resource_path of collect_resource_paths(command)) {
-    if (!fs.existsSync(resource_path)) {
+    if (!fs.exists(resource_path)) {
       throw new Error(`Resource file does not exist: ${resource_path}`);
     }
   }

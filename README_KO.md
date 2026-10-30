@@ -27,7 +27,7 @@
   - 자막 한 편은 10초, 소설 한 권은 1분, 게임 한 편은 5분
 - 대화를 통해 다양한 작업을 자동으로 수행하는 `AGENT` 모드 내장　`👈👈 독보적인 기능`
   - 기술 지식 없이도 게임을 번역 후 바로 플레이 가능
-  - 주요 엔진 지원 - `RenPy` `Godot` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
+  - 주요 엔진 전체 지원 `Godot` `RenPy` `Tyrano` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
 
 ## 기본 사용 흐름 🛸
 - [릴리스 페이지](https://github.com/neavo/LinguaGacha/releases)에서 앱을 다운로드합니다
@@ -67,16 +67,16 @@
 - 기능 설명
   - [AGENT](https://github.com/neavo/LinguaGacha/wiki/Agent)　　[교정](https://github.com/neavo/LinguaGacha/wiki/Proofreading)
   - [용어집](https://github.com/neavo/LinguaGacha/wiki/Glossary)　　[텍스트 보호](https://github.com/neavo/LinguaGacha/wiki/TextPreserve)　　[텍스트 치환](https://github.com/neavo/LinguaGacha/wiki/Replacement)
-  - [MTool 최적화 도구](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizer)　　[명령줄 모드](https://github.com/neavo/LinguaGacha/wiki/CLIMode)
+  - [MTool 최적화 도구](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizer)　　[명령줄 모드](https://github.com/neavo/LinguaGacha/wiki/CLIMode)　　[고급 기능](https://github.com/neavo/LinguaGacha/wiki/AdvancedFeatures)
 - 엔진별 가이드
-  - [RenPy 엔진 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)
   - [Godot 엔진 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)
+  - [RenPy 엔진 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)
+  - [Tyrano 엔진 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForTyrano)
   - [WOLFRPG 엔진 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)
   - [RPGMAKER 엔진 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)
 - 커뮤니티 경험
   - [복잡한 암호화가 없는 kirikiri 엔진 기계 번역 노트](https://github.com/neavo/LinguaGacha/discussions/181)
 - 각 기능에 대한 더 자세한 설명은 [Wiki](https://github.com/neavo/LinguaGacha/wiki)에서 확인할 수 있습니다
-- [토론 게시판](https://github.com/neavo/LinguaGacha/discussions)에 사용 경험을 공유해 주세요
 
 ## 지원 파일 형식 🏷️
 | 유형 | 형식 | 설명 |
@@ -86,18 +86,19 @@
 | Markdown | `.md` | - |
 | `KV-JSON` 게임 텍스트 | `.json` | 출처 [[MTool](https://mtool.app)] [[SExtractor](https://github.com/satan53x/SExtractor)] |
 | `Message-JSON` 게임 텍스트 | `.json` | 출처 [[SExtractor](https://github.com/satan53x/SExtractor)] [[VNTextPatch](https://github.com/arcusmaximus/VNTranslationTools)] |
-| `RenPy` 게임 텍스트 | `.rpy` | 가이드 [[RenPy 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)] |
-| `Godot 4` 게임 파일 | `.exe` 또는 게임 폴더 | 가이드 [[Godot 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)] |
-| `WOLFRPG 3` 게임 파일 | `.exe` 또는 게임 폴더 | 가이드 [[WOLFRPG 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)] |
+| `Godot` 게임 파일 | `.exe` 또는 게임 폴더 | 가이드 [[Godot 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)] |
+| `RenPy` 게임 파일 | `.exe` 또는 게임 폴더 | 가이드 [[RenPy 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)] |
+| `Tyrano` 게임 파일 | `.exe` 또는 게임 폴더 | 가이드 [[Tyrano 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForTyrano)] |
+| `WOLFRPG` 게임 파일 | `.exe` 또는 게임 폴더 | 가이드 [[WOLFRPG 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)] |
 | `RPGMAKER MV/MZ` 게임 파일 | `.exe` 또는 게임 폴더 | 가이드 [[RPGMAKER 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)] |
 | `RPGMAKER XP/VX/VXAce` 게임 파일 | `.exe` 또는 게임 폴더 | 가이드 [[RPGMAKER 게임 고품질 번역 가이드](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)] |
+| `.rpy` 게임 텍스트 | `.rpy` | `👈 지원 종료 예정` |
 | `.xlsx` 게임 텍스트 | `.xlsx` | 출처 [SExtractor](https://github.com/satan53x/SExtractor) [Translator++](https://dreamsavior.net/translator-plusplus) [WOLF 공식 번역 도구](https://silversecond.booth.pm/items/5151747)　`👈 지원 종료 예정` |
 | `.trans` 프로젝트 파일 | `.trans` | 출처 [Translator++](https://dreamsavior.net/translator-plusplus)　`👈 지원 종료 예정` |
 
 ## 최근 업데이트 📅
-- 20261021 v0.130.1
-  - 암호화된 `Godot 4` 게임 네이티브 지원 [#1011](../../issues/1011)
-  - 수정 및 개선 [#1013](../../issues/1013) [#1014](../../issues/1014) [#1015](../../issues/1015)
+- 20261029 v0.132.1
+  - 수정 및 개선 [#1049](../../issues/1049) [#1050](../../issues/1050) [#1052](../../issues/1052) [#1053](../../issues/1053) [#1054](../../issues/1054)
 
 ## 개발 안내 🛠️
 - [Go](https://go.dev)와 [`Node.js`](https://nodejs.org)를 설치합니다

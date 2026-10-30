@@ -1,3 +1,4 @@
+import { DesktopApiError } from "@frontend/app/desktop/desktop-api";
 import { type ReactNode, act, cloneElement, isValidElement } from "react";
 
 import { createRoot, type Root } from "react-dom/client";
@@ -8,25 +9,17 @@ import { ProjectPage } from "@frontend/pages/project-page/page";
 import { PROJECT_LANGUAGE_PREFERENCE_STORAGE_KEY } from "./project-language-preference";
 import { create_desktop_bridge_api_mock } from "../../../test/desktop-bridge-mock";
 
-const {
-  api_fetch_mock,
-  desktop_runtime_fixture,
-  dismiss_toast_mock,
-  push_progress_toast_mock,
-  push_toast_mock,
-  update_progress_toast_mock,
-} = vi.hoisted(() => {
-  return {
-    api_fetch_mock: vi.fn(),
-    desktop_runtime_fixture: {
-      current: null as ReturnType<typeof create_desktop_runtime_fixture> | null,
-    },
-    dismiss_toast_mock: vi.fn(),
-    push_progress_toast_mock: vi.fn(() => "project-loading-toast"),
-    push_toast_mock: vi.fn(),
-    update_progress_toast_mock: vi.fn(),
-  };
-});
+const { api_fetch_mock, desktop_runtime_fixture, run_modal_progress_toast_mock, push_toast_mock } =
+  vi.hoisted(() => {
+    return {
+      api_fetch_mock: vi.fn(),
+      desktop_runtime_fixture: {
+        current: null as ReturnType<typeof create_desktop_runtime_fixture> | null,
+      },
+      run_modal_progress_toast_mock: vi.fn((args: { task: () => Promise<unknown> }) => args.task()),
+      push_toast_mock: vi.fn(),
+    };
+  });
 
 vi.mock("@frontend/app/desktop/desktop-api", async () => {
   const actual = await vi.importActual<typeof import("@frontend/app/desktop/desktop-api")>(
@@ -45,11 +38,9 @@ vi.mock("@frontend/app/state/use-desktop-state", () => {
 });
 
 vi.mock("@frontend/app/feedback/desktop-toast", () => ({
-  dismiss_toast: dismiss_toast_mock,
-  push_progress_toast: push_progress_toast_mock,
+  run_modal_progress_toast: run_modal_progress_toast_mock,
   push_error_toast: push_toast_mock,
   push_toast: push_toast_mock,
-  update_progress_toast: update_progress_toast_mock,
 }));
 
 vi.mock("@frontend/widgets/app-context-menu", () => {
@@ -150,11 +141,6 @@ vi.mock("@frontend/features/project-language/project-language-select", () => {
   };
 });
 
-vi.mock("@frontend/widgets/app-alert-dialog", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@frontend/widgets/app-alert-dialog")>()),
-  AppConfirmDialog: () => null,
-}));
-
 /** 构造项目页需要的最小设置快照，并允许场景定点覆写。 */
 function create_settings_snapshot(overrides: Record<string, unknown> = {}) {
   return {
@@ -164,9 +150,7 @@ function create_settings_snapshot(overrides: Record<string, unknown> = {}) {
     output_folder_open_on_finish: false,
     request_timeout: 120,
     preceding_lines_threshold: 0,
-    clean_ruby: false,
-    deduplication_in_bilingual: true,
-    write_translated_name_fields_to_file: true,
+    following_lines_threshold: 0,
     mtool_optimizer_enable: true,
     skip_duplicate_source_text_enable: true,
     glossary_default_preset: "",
@@ -183,7 +167,6 @@ function create_settings_snapshot(overrides: Record<string, unknown> = {}) {
 /** 构造页面公开依赖的 DesktopState 测试替身。 */
 function create_desktop_runtime_fixture(settings_overrides: Record<string, unknown> = {}) {
   return {
-    project_session_stage: null,
     settings_snapshot: create_settings_snapshot(settings_overrides),
     refresh_project_snapshot: vi.fn(),
     set_project_session_status: vi.fn(),
@@ -200,7 +183,7 @@ function install_desktop_app_fixture(): void {
     value: create_desktop_bridge_api_mock({
       methods: {
         getPathForFile: vi.fn(() => ""),
-        pickFixedProjectDirectory: vi.fn(async () => ({ canceled: true, paths: [] })),
+        pickDirectory: vi.fn(async () => ({ canceled: true, paths: [] })),
         pickProjectFilePath: vi.fn(async () => ({ canceled: true, paths: [] })),
         pickProjectSavePath: vi.fn(async () => ({ canceled: true, paths: [] })),
         pickProjectSourceDirectoryPath: vi.fn(async () => ({ canceled: true, paths: [] })),
@@ -284,11 +267,10 @@ describe("ProjectPage", () => {
     container = null;
     root = null;
     api_fetch_mock.mockReset();
-    dismiss_toast_mock.mockReset();
-    push_progress_toast_mock.mockClear();
+    run_modal_progress_toast_mock.mockClear();
     push_toast_mock.mockReset();
-    update_progress_toast_mock.mockReset();
     vi.restoreAllMocks();
+    vi.useRealTimers();
     window.localStorage.removeItem(PROJECT_LANGUAGE_PREFERENCE_STORAGE_KEY);
   });
 
@@ -347,15 +329,32 @@ describe("ProjectPage", () => {
     };
   }
 
-  it.each([false, true])("多外部包排序取消=%s，确认后才创建工程", async (cancel) => {
+  it.each(["backup", "order", null])("游戏确认取消于 %s，完成确认后才创建工程", async (cancel) => {
     const game_root = "E:/game";
     api_fetch_mock.mockResolvedValueOnce({
       source_file_count: 1,
+      contains_game: true,
       format_hit_counts: { godot: 1 },
       godot_packs: [{ game_root, game_name: "game", external_pcks: ["base.pck", "patch.pck"] }],
     });
     await mount_page();
+    vi.useFakeTimers();
     await open_create_languages();
+    const primary = [...document.querySelectorAll("button")].find((button) =>
+      /^\d+s/u.test(button.textContent ?? ""),
+    )!;
+    expect(primary.disabled).toBe(true);
+    expect(document.querySelector('[data-field="source_language"]')).toBeNull();
+    if (cancel === "backup") {
+      await act(async () => get_button_by_text(document.body, "取消").click());
+      expect(document.querySelector('[data-field="source_language"]')).toBeNull();
+      expect(
+        api_fetch_mock.mock.calls.some(([path]) => path === "/api/session/project/create"),
+      ).toBe(false);
+      return;
+    }
+    act(() => vi.advanceTimersByTime(Number.parseInt(primary.textContent!, 10) * 1_000));
+    await act(async () => primary.click());
     await confirm_create_languages();
     expect(document.querySelector('[role="dialog"] ol')?.textContent).toContain("base.pck");
     expect(api_fetch_mock.mock.calls.some(([path]) => path === "/api/session/project/create")).toBe(
@@ -375,6 +374,82 @@ describe("ProjectPage", () => {
           godot_pack_orders: [{ game_root, ordered_pcks: ["base.pck", "patch.pck"] }],
         }),
       );
+  });
+
+  it.each(["loading", "failed"])("预览 %s 时仍能打开，打开后的迟到结果不再消费", async (state) => {
+    const preview = Promise.withResolvers<object>();
+    api_fetch_mock.mockImplementation((path: string) =>
+      path.endsWith("/preview") ? preview.promise : Promise.resolve({}),
+    );
+    await mount_page();
+    await drop_paths(get_button_by_text(container!, "点击或拖拽 .lg 文件"), ["E:/open.lg"]);
+    if (state === "failed") await act(async () => preview.reject(new Error("preview failed")));
+    expect(get_button_by_text(container!, "打开工程").disabled).toBe(false);
+    expect(run_modal_progress_toast_mock).not.toHaveBeenCalled();
+    push_toast_mock.mockClear();
+    await act(async () => get_button_by_text(container!, "打开工程").click());
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/session/project/open", {
+      path: "E:/open.lg",
+    });
+    if (state === "loading") {
+      expect(
+        api_fetch_mock.mock.calls.find(([path]) => path.endsWith("/preview"))?.[2].aborted,
+      ).toBe(true);
+      await act(async () => preview.reject(new Error("late preview failure")));
+      expect(push_toast_mock).not.toHaveBeenCalled();
+    }
+    expect(get_button_by_text(container!, "open.lg")).toBeDefined();
+  });
+
+  it("点击失效最近工程立即确认移除，取消后保留记录并禁用打开", async () => {
+    desktop_runtime_fixture.current = create_desktop_runtime_fixture({
+      recent_projects: [{ path: "E:/missing.lg", name: "失效工程" }],
+    });
+    api_fetch_mock.mockRejectedValueOnce(new DesktopApiError({ code: "project.not_found" }));
+    await mount_page();
+    await act(async () => get_button_by_text(container!, "失效工程").click());
+    expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+    expect(get_button_by_text(container!, "点击或拖拽 .lg 文件")).toBeDefined(); // 失效工程未被选中。
+    expect(get_button_by_text(container!, "打开工程").disabled).toBe(true);
+    expect(push_toast_mock).not.toHaveBeenCalled();
+    api_fetch_mock.mockClear();
+    await act(async () => get_button_by_text(document.body, "取消").click());
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(get_button_by_text(container!, "失效工程")).toBeDefined();
+    expect(get_button_by_text(container!, "打开工程").disabled).toBe(true);
+    expect(api_fetch_mock).not.toHaveBeenCalled();
+  });
+
+  it("高版本确认强调完整版本并接入延迟确认", async () => {
+    api_fetch_mock.mockImplementation(async (path: string, body: Record<string, unknown>) => {
+      if (path.endsWith("/preview")) throw new Error("preview unavailable");
+      if (path.endsWith("/open") && !body.confirmed_target_app_version)
+        throw new DesktopApiError({
+          code: "project.newer_app_version",
+          details: {
+            target_app_version: "2.1.0",
+            current_app_version: "1.0.0",
+          },
+        });
+      return {};
+    });
+    await mount_page();
+    await drop_paths(get_button_by_text(container!, "点击或拖拽 .lg 文件"), ["E:/newer.lg"]);
+    push_toast_mock.mockClear();
+    vi.useFakeTimers();
+    await act(async () => get_button_by_text(container!, "打开工程").click());
+    expect(document.querySelector(".project-home__version-emphasis")?.textContent).toBe("v2.1.0");
+    expect(push_toast_mock).not.toHaveBeenCalled();
+    const primary = [...document.querySelectorAll("button")].find((button) =>
+      /^\d+s/u.test(button.textContent ?? ""),
+    )!;
+    expect(primary.disabled).toBe(true);
+    act(() => vi.advanceTimersByTime(Number.parseInt(primary.textContent!, 10) * 1000));
+    await act(async () => primary.click());
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/session/project/open", {
+      path: "E:/newer.lg",
+      confirmed_target_app_version: "2.1.0",
+    });
   });
 
   it("保留预览文件顺序并用当前工程文件名记录最近打开", async () => {
@@ -586,12 +661,6 @@ describe("ProjectPage", () => {
     });
 
     expect(document.body.textContent).toContain("工程语言");
-    expect(
-      document.querySelector('[data-field="source_language"]')?.getAttribute("data-value"),
-    ).toBe("JA");
-    expect(
-      document.querySelector('[data-field="target_language"]')?.getAttribute("data-value"),
-    ).toBe("ZH");
     await act(async () => {
       get_button_by_text(document.body, "取消").click();
     });
@@ -707,51 +776,7 @@ describe("ProjectPage", () => {
     );
   });
 
-  it("打开工程直接请求后端，并按打开响应中的对齐摘要提示", async () => {
-    const project_path = "E:/Source/aligned.lg";
-    desktop_runtime_fixture.current = create_desktop_runtime_fixture({
-      recent_projects: [{ path: project_path, name: "aligned" }],
-    });
-    api_fetch_mock.mockImplementation(async (path: string) => {
-      if (path === "/api/session/project/preview")
-        return {
-          preview: {
-            file_paths: [],
-            translation_stats: {
-              total_items: 0,
-              completed_count: 0,
-              skipped_count: 0,
-              failed_count: 0,
-              pending_count: 0,
-              completion_percent: 0,
-            },
-          },
-        };
-      if (path === "/api/session/project/open")
-        return {
-          project: { path: project_path, loaded: true },
-          settings_alignment: {
-            settings: { mtool_optimizer_enable: false, skip_duplicate_source_text_enable: true },
-            changed: { mtool_optimizer_enable: true, skip_duplicate_source_text_enable: false },
-          },
-        };
-      return {};
-    });
-    await mount_page();
-    await act(async () => {
-      get_button_by_text(container!, "aligned").click();
-    });
-    await act(async () => {
-      get_button_by_text(container!, "打开工程").click();
-    });
-
-    expect(api_fetch_mock.mock.calls.map(([path]) => path)).not.toContain(
-      "/api/session/project/open-preview",
-    );
-    expect(push_toast_mock).toHaveBeenCalledWith("info", expect.stringContaining("MTool 优化器"));
-  });
-
-  it("来源摘要全部失败时展示具体文件原因，重新选择仍可恢复", async () => {
+  it("来源摘要没有可用文件时只提示结果，重新选择仍可恢复", async () => {
     const source = "E:/Source/broken.exe";
     vi.mocked(window.desktopApp.pickProjectSourceFilePath).mockResolvedValueOnce({
       canceled: false,
@@ -762,15 +787,6 @@ describe("ProjectPage", () => {
         ? {
             source_file_count: 0,
             format_hit_counts: {},
-            failed_files: [
-              {
-                source_path: source,
-                rel_path: "broken.exe",
-                filename: "broken.exe",
-                code: "file.io_failed",
-                message: "EVB header damaged",
-              },
-            ],
           }
         : {},
     );
@@ -778,14 +794,7 @@ describe("ProjectPage", () => {
     await act(async () => {
       get_button_by_text(container as HTMLElement, "选择文件").click();
     });
-    expect(push_toast_mock).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining("broken.exe"),
-    );
-    expect(push_toast_mock).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining("EVB header damaged"),
-    );
+    expect(push_toast_mock).toHaveBeenCalledOnce();
     vi.mocked(window.desktopApp.pickProjectSourceFilePath).mockResolvedValueOnce({
       canceled: false,
       paths: ["E:/Source/good.txt"],

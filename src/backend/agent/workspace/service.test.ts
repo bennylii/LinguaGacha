@@ -79,6 +79,64 @@ describe("AgentWorkspaceService", () => {
     vi.restoreAllMocks();
   });
 
+  it("原稿全部读取失败仍执行脚本并记录问题，同修订只重试失败资产，成功后清空记录", async () => {
+    const fixture = await create_fixture(temp_dir);
+    const issues = path.join(fixture.workspace_root, AGENT_WORKSPACE_PATHS.sourceIssues);
+    fixture.read_asset_content.mockRejectedValueOnce(new Error("read failure"));
+    await run_workspace(fixture);
+    expect(fixture.run).toHaveBeenCalledOnce();
+    expect(read_jsonl(issues)).toEqual([
+      { asset_path: "script.txt", stage: "read", message: "read failure" },
+    ]);
+    await run_workspace(fixture);
+    expect(read_jsonl(issues)).toEqual([]);
+    const reads = fixture.read_asset_content.mock.calls.length;
+    await run_workspace(fixture);
+    expect(fixture.read_asset_content).toHaveBeenCalledTimes(reads);
+    expect(read_jsonl(issues)).toEqual([]);
+  });
+
+  it("原稿读取期间取消，等待读取收尾后停止准备且不执行脚本", async () => {
+    const fixture = await create_fixture(temp_dir);
+    const controller = new AbortController();
+    const cancellation = new Error("cancel source preparation");
+    fixture.read_asset_content.mockImplementationOnce(async () => {
+      controller.abort(cancellation);
+      return Buffer.from("original");
+    });
+    await expect(fixture.service.run(VALID_WORKSPACE_SCRIPT, controller.signal)).rejects.toBe(
+      cancellation,
+    );
+    expect(fixture.run).not.toHaveBeenCalled();
+    expect(fixture.read_asset_content).toHaveBeenCalledOnce();
+    expect(fs.existsSync(path.join(fixture.workspace_root, "sources", "script.txt"))).toBe(false);
+    expect(
+      fs.existsSync(path.join(fixture.workspace_root, AGENT_WORKSPACE_PATHS.sourceIssues)),
+    ).toBe(false);
+  });
+
+  it("重试成果的记录发布失败时保留重试范围，下次重新读取并发布", async () => {
+    const native = new NativeFs();
+    const fixture = await create_fixture(temp_dir, native);
+    const issues = path.join(fixture.workspace_root, AGENT_WORKSPACE_PATHS.sourceIssues);
+    fixture.read_asset_content.mockRejectedValueOnce(new Error("read failure"));
+    await run_workspace(fixture);
+    const previous = fs.readFileSync(issues, "utf8");
+    const write = vi.spyOn(native, "write_file_atomic").mockImplementationOnce(() => {
+      throw new Error("issue write failed");
+    });
+    await expect(run_workspace(fixture)).rejects.toMatchObject({
+      public_details: { action: "workspace_run", phase: "prepare_workspace" },
+    });
+    expect(fixture.run).toHaveBeenCalledOnce();
+    expect(fs.readFileSync(issues, "utf8")).toBe(previous);
+    const reads = fixture.read_asset_content.mock.calls.length;
+    write.mockRestore();
+    await run_workspace(fixture);
+    expect(fixture.read_asset_content).toHaveBeenCalledTimes(reads + 1);
+    expect(read_jsonl(issues)).toEqual([]);
+  });
+
   it("脚本图片按调用顺序固定字节，文件覆盖与删除不改变已接收内容", async () => {
     const fixture = await create_fixture(temp_dir);
     fixture.run.mockImplementationOnce(async (request, signal) => {
@@ -567,11 +625,14 @@ describe("AgentWorkspaceService", () => {
     await fixture.service.close();
     await fixture.service.activate_chat("test0001", [], async () => {});
     expect(fs.existsSync(path.join(fixture.workspace_root, "sources"))).toBe(false);
+    expect(
+      fs.existsSync(path.join(fixture.workspace_root, AGENT_WORKSPACE_PATHS.sourceIssues)),
+    ).toBe(false);
     await run_workspace(fixture);
     expect(fixture.read_asset_content).toHaveBeenCalledTimes(3);
   });
 
-  it("RGSS 明文随修订重建，落盘失败清理后允许重试", async () => {
+  it("RGSS 可读视图与附加原稿清单随修订重建，落盘失败清理后允许重试", async () => {
     const file_path = "game.rpgmaker";
     const native = new NativeFs();
     const fixture = await create_fixture(temp_dir, native);
@@ -579,23 +640,29 @@ describe("AgentWorkspaceService", () => {
       { rel_path: file_path, file_type: "RPGMAKER_RGSS", sort_index: 0 },
     ]);
     const empty = encode(ruby_array([]));
-    // 两份原稿仅改变成员名，用于观察旧明文清理和新明文发布。
+    // 两份原稿仅改变成员名，用于观察可读视图的清理和发布。
     const archive = async (name: string) =>
       new JSZip()
         .file("Game.ini", "[Game]\n")
         .file("Data/System.rvdata2", empty)
         .file("Data/Scripts.rvdata2", empty)
         .file(`Data/${name}.rvdata2`, empty)
+        .file(`custom/${name}.json`, "{")
         .generateAsync({ type: "nodebuffer" });
     fixture.read_asset_content.mockResolvedValue(await archive("Old"));
     await run_workspace(fixture);
 
     fixture.snapshot.sectionRevisions.files = 2;
+    fixture.read_meta.mockResolvedValue({ additional_files: { [file_path]: ["custom/New.json"] } });
     fixture.read_asset_content.mockResolvedValue(await archive("New"));
     await run_workspace(fixture);
     const game = path.join(fixture.workspace_root, "sources", file_path);
-    const new_file = path.join(game, "Data/New.rvdata2.json");
-    expect(fs.existsSync(path.join(game, "Data/Old.rvdata2.json"))).toBe(false);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(fixture.workspace_root, "project_meta.json"), "utf8"))
+        .additional_files,
+    ).toEqual({ [file_path]: ["custom/New.json"] });
+    const new_file = path.join(game, "Data/New.rvdata2.reference.json");
+    expect(fs.existsSync(path.join(game, "Data/Old.rvdata2.reference.json"))).toBe(false);
     expect(JSON.parse(fs.readFileSync(new_file, "utf8"))).toEqual([]);
 
     fixture.snapshot.sectionRevisions.files += 1;
@@ -604,11 +671,22 @@ describe("AgentWorkspaceService", () => {
       await write(file, ...args);
       if (file === new_file) throw new Error("source write failed");
     });
-    await expect(run_workspace(fixture)).rejects.toThrow();
-    expect(fs.existsSync(path.join(fixture.workspace_root, "sources"))).toBe(false);
+    const issues = path.join(fixture.workspace_root, AGENT_WORKSPACE_PATHS.sourceIssues);
+    await run_workspace(fixture);
+    expect(read_jsonl(issues)).toEqual([
+      {
+        asset_path: file_path,
+        member_path: "Data/New.rvdata2.reference.json",
+        stage: "write",
+        message: "source write failed",
+      },
+    ]);
+    expect(fs.existsSync(new_file)).toBe(false);
+    expect(fs.existsSync(path.join(game, "Game.ini"))).toBe(true);
     fail.mockRestore();
     await run_workspace(fixture);
     expect(JSON.parse(fs.readFileSync(new_file, "utf8"))).toEqual([]);
+    expect(read_jsonl(issues)).toEqual([]);
   });
 
   it("work 跨快照、apply 与普通 revision 变化保留，显式 reset 时清理", async () => {
@@ -722,9 +800,7 @@ describe("AgentWorkspaceService", () => {
       cause: expect.objectContaining({ message: "contract write failed" }),
     });
     expect(cleanup_started_while_write_pending).toBe(false);
-    expect(fs.readdirSync(fixture.workspace_root).sort()).toEqual(
-      [...environment_files, "sources"].sort(),
-    );
+    expect(fs.readdirSync(fixture.workspace_root).sort()).toEqual([...environment_files].sort());
   });
 
   it("脚本错误和 runtime 故障保留已经写入的工作文件与阶段", async () => {
@@ -1261,6 +1337,7 @@ async function create_fixture(temp_dir: string, native_fs?: NativeFs) {
     originalWidth: 1,
     originalHeight: 1,
   }));
+  const read_meta = vi.fn(async () => ({}) as JsonRecord);
   const service = new AgentWorkspaceService({
     images: { prepare: prepare_image },
     runtimeDirectory: create_workspace_runtime_fixture(temp_dir),
@@ -1271,7 +1348,7 @@ async function create_fixture(temp_dir: string, native_fs?: NativeFs) {
     cache,
     proofreading: { query_warnings },
     database: {
-      get_all_meta: async () => ({}),
+      get_all_meta: read_meta,
       read_asset_content,
       read_pdf_document: async () => null,
       read_pdf_documents: async () => [],
@@ -1300,6 +1377,7 @@ async function create_fixture(temp_dir: string, native_fs?: NativeFs) {
     write_store,
     items,
     read_asset_content,
+    read_meta,
     active_path: () =>
       fs.existsSync(path.join(workspace_root, AGENT_WORKSPACE_PATHS.contract))
         ? workspace_root
@@ -1414,7 +1492,7 @@ it("PDF 零条目工程按页保存、隔离旧指纹，语言变化后重建工
     appRoot: directory.path,
     builtinRoot: path.join(directory.path, "builtin"),
     logTargets: { console: false, window: false },
-    systemProxyResolver: { resolveProxy: async () => "DIRECT" },
+    proxyResolver: { resolveProxy: async () => "DIRECT" },
   });
   const pdfHost = vi.fn<PDFHost>(async () => create_pdf_fixture(["Translated page"]));
   const services = new BackendServices({
@@ -1660,7 +1738,10 @@ it("PDF 零条目工程按页保存、隔离旧指纹，语言变化后重建工
         )
       )["status"],
     ).toBe("applied");
-    const output = await services.files.translationGeneration.generate_files();
+    const output = await services.files.translationGeneration.generate_files({
+      project_path: services.state.session.require_loaded_project_path(),
+      output_directory: path.dirname(services.state.session.require_loaded_project_path()),
+    });
     expect(pdfHost.mock.calls[0]?.[0].html).toContain(draft.translation.markdown);
     expect(output.pdf_files).toEqual([
       {
@@ -1691,10 +1772,26 @@ it("PDF 零条目工程按页保存、隔离旧指纹，语言变化后重建工
             }),
         )
       )["sectionRevisions"];
-    await services.project.content.reset_files({
+    const before_reset = (await revision()) as Record<string, number>;
+    await expect(
+      services.project.content.reset_files({
+        rel_paths: ["book.pdf"],
+        expected_section_revisions: { ...before_reset, pdf: (before_reset.pdf ?? 0) + 1 },
+      }),
+    ).rejects.toMatchObject({ code: "data.revision_conflict" });
+    expect((await read_document()).pages[0]).toMatchObject(draft);
+    const reset = await services.project.content.reset_files({
       rel_paths: ["book.pdf"],
-      expected_section_revisions: (await revision())!,
+      expected_section_revisions: before_reset,
     });
+    expect(reset.changes[0]).toMatchObject({
+      source: "project_reset_files",
+      updatedSections: ["items", "pdf"],
+    });
+    const after_reset = (await revision()) as Record<string, number>;
+    expect(after_reset.files).toBe(before_reset.files);
+    expect(after_reset.items).toBe((before_reset.items ?? 0) + 1);
+    expect(after_reset.pdf).toBe((before_reset.pdf ?? 0) + 1);
     expect(
       (await read_document()).pages.every(
         (page) => page.translation === null && !page.reviewed && page.notes === "",

@@ -1,7 +1,9 @@
+import { GameDirectoryOperations } from "../file/shared/game/game-directory-operations";
+import { configure_python_parser } from "../file/renpy/python-syntax";
 import { GamePrepareWorker } from "../file/shared/game/prepare-worker";
 import { GameFontService } from "../file/game-font-service";
 import { configure_rgss_parser } from "../file/rpgmaker-rgss/ruby";
-import { configure_rpgmaker_parser } from "../file/rpgmaker-mv-mz/javascript";
+import { configure_javascript_parser } from "../file/shared/javascript";
 import type { SettingsUpdateResponse } from "../../shared/settings";
 import { ProofreadingPagePreview } from "../proofreading/proofreading-page-preview";
 import { resolve_workspace_runtime_entry } from "../../native/workspace-runtime";
@@ -41,6 +43,7 @@ import { RuntimeOperationGate } from "../runtime-operation-gate";
 import { ProjectLifecycleService } from "../project/project-lifecycle-service";
 import { ProjectSessionState } from "../project/project-session-state";
 import { ProjectSummaryService } from "../project/project-summary-service";
+import { ProjectTranslationTransferService } from "../project/project-translation-transfer-service";
 import { ProjectWriteStore } from "../project/project-write-store";
 import { ProofreadingQueryService } from "../proofreading/proofreading-query-service";
 import { ProofreadingService } from "../proofreading/proofreading-service";
@@ -79,7 +82,7 @@ export interface BackendServicesOptions {
   appSettingService: AppSettingService; // 配置文件唯一读写入口
   database: ProjectDatabase; // 由 Bootstrap 持有并负责关闭，服务层只组合业务能力
   logManager: LogManager; // Backend 内部日志和任务日志的唯一汇聚点
-  publishEvent: (topic: string, payload: JsonRecord) => void; // 入口层选择公开传输或无输出；业务服务不依赖 SSE
+  publishEvent: (topic: string, payload: JsonRecord) => void; // 公开事件的传输方式归入口层选择。
   openOutputFolder: OutputFolderOpener; // GUI 专用副作用，CLI 注入空实现
   focusWindow?: (() => Promise<void>) | undefined; // GUI 宿主窗口聚焦；CLI 缺席
   openProjectWindow?: ((project_path: string) => Promise<void>) | undefined; // 新进程窗口入口
@@ -113,6 +116,7 @@ export interface BackendProjectServices {
 
   summary: ProjectSummaryService;
   content: ProjectContentService;
+  translationTransfer: ProjectTranslationTransferService;
 }
 
 export interface BackendProofreadingServices {
@@ -142,7 +146,7 @@ export interface BackendRemoteServices {
 }
 
 /**
- * GUI 与 CLI 共享的业务服务组合根；状态拥有者只在这里装配。
+ * GUI 与 CLI 共用此组合根装配业务服务及其状态拥有者。
  */
 export class BackendServices {
   public readonly modelAuth: ChatGPTAuthService; // GUI、CLI 和 Agent 共用账户生命周期。
@@ -155,6 +159,7 @@ export class BackendServices {
   private readonly pdf_worker: PDFWorker; // 独立文档计算与取消，随业务根释放
   private readonly compute_worker_client: ComputeWorkerClient; // 缓存的校对与质量统计共享，随业务根释放
   private readonly task_runtime: BatchTranslationRuntime; // 关闭时先等待任务收束，再释放执行池
+  private readonly game_directory_operations: GameDirectoryOperations; // 所有文件服务共用目录占用，独立于模型运行。
   private readonly runtime_gate = new RuntimeOperationGate(); // 执行占用与工程写入共享的唯一门禁
   private readonly work_unit_worker_pool: TranslationWorkerPool;
   private readonly planning_worker_pool: PlanningWorkerPool;
@@ -181,8 +186,9 @@ export class BackendServices {
    */
   public constructor(options: BackendServicesOptions) {
     if (options.workspaceRuntimeDirectory) {
-      configure_rpgmaker_parser(options.workspaceRuntimeDirectory);
+      configure_javascript_parser(options.workspaceRuntimeDirectory);
       configure_rgss_parser(options.workspaceRuntimeDirectory);
+      configure_python_parser(options.workspaceRuntimeDirectory);
     }
     this.publish_event = options.publishEvent;
     const paths = options.paths;
@@ -193,6 +199,7 @@ export class BackendServices {
 
     this.app_setting_service = options.appSettingService;
     this.logManager = options.logManager;
+    this.game_directory_operations = new GameDirectoryOperations(undefined, this.logManager);
     this.modelCatalog = new PiModelCatalog(paths, this.logManager);
     this.modelAuth = new ChatGPTAuthService(paths, this.runtime_gate, options.publishEvent);
     const llm_client = new LLMClient({
@@ -216,6 +223,7 @@ export class BackendServices {
         : options.workerExecution.gamePrepareWorkerEntryUrl,
       undefined,
       this.logManager,
+      options.workspaceRuntimeDirectory,
     );
     this.compute_worker_client = new ComputeWorkerClient({
       execution: options.workerExecution,
@@ -223,7 +231,6 @@ export class BackendServices {
     this.cache_manager = new CacheManager({
       database: options.database,
       logManager: this.logManager,
-      appSettingService: this.app_setting_service,
       workerClient: this.compute_worker_client,
     });
     const apply_committed_change = this.cache_manager.applyCommittedChange.bind(this.cache_manager);
@@ -246,12 +253,12 @@ export class BackendServices {
     const remote_snapshots = new RemoteSnapshotStore({ paths });
     const project_lock = new ProjectFileLock();
     const project_content = new ProjectContentService(
+      this.game_directory_operations,
       options.database,
       this.runtime_gate,
       session_state,
       write_store,
       this.pdf_worker.run,
-      this.app_setting_service,
       undefined,
       this.logManager,
       this.game_prepare_worker.run,
@@ -312,6 +319,7 @@ export class BackendServices {
 
     this.task_runtime = new BatchTranslationRuntime(session_state, database, this.runtime_gate);
     const lifecycle = new ProjectLifecycleService(
+      this.game_directory_operations,
       options.database,
       this.runtime_gate,
       session_state,
@@ -368,6 +376,11 @@ export class BackendServices {
 
       summary: new ProjectSummaryService(session_state, this.cache_manager),
       content: project_content,
+      translationTransfer: new ProjectTranslationTransferService(
+        options.database,
+        this.runtime_gate,
+        session_state,
+      ),
     };
     const settings_commands = new AppSettingsCommandService(
       this.app_setting_service,
@@ -419,6 +432,7 @@ export class BackendServices {
     };
     this.files = {
       translationGeneration: new TranslationFileGenerationService(
+        this.game_directory_operations,
         options.database,
         this.app_setting_service,
         session_state,
@@ -426,7 +440,7 @@ export class BackendServices {
         this.pdf_worker.run,
         this.logManager,
       ),
-      gameFont: new GameFontService(this.runtime_gate, this.game_prepare_worker.run),
+      gameFont: new GameFontService(this.game_directory_operations, this.game_prepare_worker.run),
     };
     this.model = new ModelService(
       paths,
@@ -482,7 +496,7 @@ export class BackendServices {
     await this.instances.start(api_base_url);
   }
 
-  /** GUI 启动后后台检查一次；CLI 只使用已加载缓存。 */
+  /** GUI 启动后检查一次。CLI 使用已加载缓存。 */
   public start_model_catalog_check(): void {
     if (this.catalog_check !== null) return;
     this.catalog_check = this.modelCatalog.check((models, commit, signal) =>
@@ -492,13 +506,16 @@ export class BackendServices {
     );
   }
 
-  /** Gateway 排空在途导入前，先取消并等待完整工程写操作收尾。 */
-  public async stop_project_writes(): Promise<void> {
-    await this.runtime_gate.stop_project_writes();
+  /** Gateway 排空请求前，取消并等待工程写入与游戏目录操作收尾。 */
+  public async stop_file_operations(): Promise<void> {
+    await Promise.all([
+      this.runtime_gate.stop_project_writes(),
+      this.game_directory_operations.stop(),
+    ]);
   }
 
   /**
-   * 释放组合根拥有的运行态资源；数据库和日志由 Bootstrap 关闭。
+   * 组合根释放运行态资源。Bootstrap 关闭数据库和日志。
    */
   public async dispose(): Promise<void> {
     const errors: unknown[] = [];
@@ -507,7 +524,7 @@ export class BackendServices {
     } catch (error) {
       errors.push(error);
     }
-    const project_writes = this.stop_project_writes();
+    const file_operations = this.stop_file_operations();
     const remote_workspace = this.remote.workspace.dispose().catch((error: unknown) => {
       errors.push(error);
     });
@@ -532,7 +549,11 @@ export class BackendServices {
     } catch (error) {
       errors.push(error);
     }
-    await project_writes; // 写占用释放前，准备线程、目录恢复和工程操作必须全部收尾。
+    try {
+      await file_operations; // 目录恢复和业务收尾完成后才能释放准备线程。
+    } catch (error) {
+      errors.push(error);
+    }
     const worker_results = await Promise.allSettled([
       this.model.dispose(),
       this.work_unit_worker_pool.dispose(),

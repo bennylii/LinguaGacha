@@ -30,7 +30,7 @@
   - 10秒で字幕1本、1分で小説1冊、5分でゲーム1本
 - 対話を通じてさまざまなタスクを自動で完了する内蔵 `AGENT` モード　`👈👈 独自の強み`
   - 技術的な知識は不要。ゲームは翻訳後すぐにプレイ可能
-  - 主要エンジンに対応 - `RenPy` `Godot` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
+  - 主要エンジンを網羅 `Godot` `RenPy` `Tyrano` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
 
 ## ワークフロー 🛸
 - [リリースページ](https://github.com/neavo/LinguaGacha/releases) からアプリケーションをダウンロード
@@ -70,16 +70,16 @@
 - Feature Description
   - [AGENT](https://github.com/neavo/LinguaGacha/wiki/AgentEN)　　[Proofreading](https://github.com/neavo/LinguaGacha/wiki/ProofreadingEN)
   - [Glossary](https://github.com/neavo/LinguaGacha/wiki/GlossaryEN)　　[Text Preserve](https://github.com/neavo/LinguaGacha/wiki/TextPreserveEN)　　[Text Replacement](https://github.com/neavo/LinguaGacha/wiki/ReplacementEN)
-  - [MTool Optimizer](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizerEN)　　[CLI Mode](https://github.com/neavo/LinguaGacha/wiki/CLIModeEN)
+  - [MTool Optimizer](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizerEN)　　[CLI Mode](https://github.com/neavo/LinguaGacha/wiki/CLIModeEN)　　[Advanced Features](https://github.com/neavo/LinguaGacha/wiki/AdvancedFeaturesEN)
 - Engine Best Practices
-  - [Best Practices for High-Quality Translation of RenPy Engine Games](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPyEN)
   - [Best Practices for High-Quality Translation of Godot Engine Games](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodotEN)
+  - [Best Practices for High-Quality Translation of RenPy Engine Games](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPyEN)
+  - [Best Practices for High-Quality Translation of Tyrano Engine Games](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForTyranoEN)
   - [Best Practices for High-Quality Translation of WOLFRPG Engine Games](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPGEN)
   - [Best Practices for High-Quality Translation of RPGMAKER Engine Games](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMakerEN)
 - Community Notes
   - [Machine Translation Notes for Kirikiri Engine Games Without Complex Encryption](https://github.com/neavo/LinguaGacha/discussions/181)
 - You can find more details on each feature in the [Wiki](https://github.com/neavo/LinguaGacha/wiki)
-- You are welcome to share your experience in the [Discussions](https://github.com/neavo/LinguaGacha/discussions)
 
 ## 対応フォーマット 🏷️
 | 種類 | 形式 | 説明 |
@@ -89,18 +89,19 @@
 | Markdown | `.md` | - |
 | `KV-JSON` ゲームテキスト | `.json` | 出力元 [[MTool](https://mtool.app)] [[SExtractor](https://github.com/satan53x/SExtractor)] |
 | `Message-JSON` ゲームテキスト | `.json` | 出力元 [[SExtractor](https://github.com/satan53x/SExtractor)] [[VNTextPatch](https://github.com/arcusmaximus/VNTranslationTools)] |
-| `RenPy` ゲームテキスト | `.rpy` | ガイド [[RenPy ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPyEN)] |
-| `Godot 4` ゲームファイル | `.exe` またはゲームフォルダー | ガイド [[Godot ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodotEN)] |
-| `WOLFRPG 3` ゲームファイル | `.exe` またはゲームフォルダー | ガイド [[WOLFRPG ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPGEN)] |
+| `Godot` ゲームファイル | `.exe` またはゲームフォルダー | ガイド [[Godot ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodotEN)] |
+| `RenPy` ゲームファイル | `.exe` またはゲームフォルダー | ガイド [[RenPy ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPyEN)] |
+| `Tyrano` ゲームファイル | `.exe` またはゲームフォルダー | ガイド [[Tyrano ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForTyranoEN)] |
+| `WOLFRPG` ゲームファイル | `.exe` またはゲームフォルダー | ガイド [[WOLFRPG ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPGEN)] |
 | `RPGMAKER MV/MZ` ゲームファイル | `.exe` またはゲームフォルダー | ガイド [[RPGMAKER ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMakerEN)] |
 | `RPGMAKER XP/VX/VXAce` ゲームファイル | `.exe` またはゲームフォルダー | ガイド [[RPGMAKER ゲームの高品質翻訳ガイド](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMakerEN)] |
+| `.rpy` ゲームテキスト | `.rpy` | `👈 サポート終了予定` |
 | `.xlsx` ゲームテキスト | `.xlsx` | 出力元 [SExtractor](https://github.com/satan53x/SExtractor) [Translator++](https://dreamsavior.net/translator-plusplus) [WOLF 公式翻訳ツール](https://silversecond.booth.pm/items/5151747)　`👈 サポート終了予定` |
 | `.trans` プロジェクトファイル | `.trans` | 出力元 [Translator++](https://dreamsavior.net/translator-plusplus)　`👈 サポート終了予定` |
 
 ## 最近の更新 📅
-- 20261021 v0.130.1
-  - 暗号化された `Godot 4` ゲームのネイティブサポート [#1011](../../issues/1011)
-  - 修正と改善 [#1013](../../issues/1013) [#1014](../../issues/1014) [#1015](../../issues/1015)
+- 20261029 v0.132.1
+  - 修正と改善 [#1049](../../issues/1049) [#1050](../../issues/1050) [#1052](../../issues/1052) [#1053](../../issues/1053) [#1054](../../issues/1054)
 
 ## 開発ガイド 🛠️
 - [Go](https://go.dev) と [`Node.js`](https://nodejs.org) をインストール

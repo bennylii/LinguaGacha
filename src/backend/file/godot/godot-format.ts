@@ -1,17 +1,19 @@
 import { godot_member_kind } from "./member";
 import assert from "node:assert/strict";
+import { GODOT_RESOURCE_MAX_BYTES } from "./binary";
 import { create_item, type Item } from "../../../domain/item";
 import { AppError } from "../../../shared/error";
-import type { GameFormatAdapter } from "../shared/game/format";
+import type { GameMemberAdapter } from "../shared/game/format";
 import { read_godot_metadata, type GodotLocation } from "./item";
 import { create_text_extractor } from "./extract";
 import { patch_gdsc } from "./gdsc";
 import { patch_source } from "./gdscript";
 import { patch_po } from "./po";
-import { read_scene, patch_scene } from "./scene";
+import { read_scene, patch_scene, type SceneChange } from "./scene";
 import { patch_resource, read_resource, resource_string } from "./resource";
 import { all_values } from "./variant";
-import { string, u32, type Edit } from "./binary";
+import { string, u32 } from "./binary";
+import { type Edit } from "../shared/splice";
 import {
   check_locale_member,
   read_translation,
@@ -22,8 +24,9 @@ import {
 type Change = { original: string; text: string };
 
 /** 每次容器操作共用一次语言表计划，坏成员保留到成员边界报告告警。 */
-export function create_godot_adapter(): GameFormatAdapter {
+export function create_godot_adapter(): GameMemberAdapter {
   return {
+    scope: "member",
     file_type: "GODOT",
     internal_path: (item) => read_godot_metadata(item.extra_field).internal_file_path, // 按持久坐标定位原稿成员。
     /** 为一次容器操作建立语言表计划，并保留成员级解析失败。 */
@@ -33,6 +36,10 @@ export function create_godot_adapter(): GameFormatAdapter {
       for (const [name, member] of files) {
         try {
           const bytes = Buffer.from(await member.async("uint8array"));
+          assert(
+            bytes.length <= GODOT_RESOURCE_MAX_BYTES,
+            "Godot member exceeds format processing limit: " + name,
+          );
           if (check_locale_member(name, bytes)) context.set(name, bytes);
         } catch (error) {
           failures.set(name, error);
@@ -42,6 +49,10 @@ export function create_godot_adapter(): GameFormatAdapter {
       return {
         /** 按成员原坐标提取条目，失败继续交给容器边界报告。 */
         async read_file(content, file) {
+          assert(
+            content.length <= GODOT_RESOURCE_MAX_BYTES,
+            "Godot member exceeds format processing limit: " + file,
+          );
           if (failures.has(file)) throw failures.get(file);
           return {
             items: extractor.extract(file, Buffer.from(content)).map((entry, row) =>
@@ -91,13 +102,15 @@ function render_member(bytes: Buffer, file: string, items: readonly Item[]): Buf
     const key =
       location.kind === "scene"
         ? `${location.kind}:${location.node}:${location.property}`
-        : location.kind === "gdsc"
-          ? `${location.kind}:${location.token}`
-          : location.kind === "resource"
-            ? `${location.kind}:${location.offset}`
-            : location.kind === "slot"
-              ? `${location.kind}:${location.word}`
-              : `${location.kind}:${location.start}`;
+        : location.kind === "scene_value"
+          ? `${location.kind}:${location.node}:${location.property}:${location.offset}`
+          : location.kind === "gdsc"
+            ? `${location.kind}:${location.token}`
+            : location.kind === "resource"
+              ? `${location.kind}:${location.offset}`
+              : location.kind === "slot"
+                ? `${location.kind}:${location.word}`
+                : `${location.kind}:${location.start}`;
     assert(!changes.has(key), "Duplicate Godot location");
     changes.set(key, { location, change: { original: item.src, text: item.dst } });
   }
@@ -105,16 +118,18 @@ function render_member(bytes: Buffer, file: string, items: readonly Item[]): Buf
   const gdsc = new Map<number, Change>(),
     source = new Map<number, Change & { end: number }>(),
     po = new Map<number, Change & { end: number }>(),
-    scenes = new Map<string, Change>(),
+    scenes: SceneChange[] = [],
     slots = new Map<number, Change>(),
     edits: Edit[] = [];
   const kind = godot_member_kind(file, bytes);
   const resource = kind === "resource" || kind === "translation" ? read_resource(bytes) : null;
   const values = new Map(
-    resource?.properties.flatMap((property) =>
-      [...all_values(property.value)].map((value) => [value.start, value] as const),
-    ),
-  ); // 原稿偏移只索引一次，全部译文共用。
+    resource && resource.type !== "PackedScene" && resource.type !== "OptimizedTranslation"
+      ? resource.properties.flatMap((property) =>
+          [...all_values(property.value)].map((value) => [value.start, value] as const),
+        )
+      : [],
+  ); // 资源偏移共用一次索引。场景和优化语言表由各自写入器定位。
   for (const { location, change } of changes.values()) {
     switch (location.kind) {
       case "gdsc":
@@ -132,8 +147,9 @@ function render_member(bytes: Buffer, file: string, items: readonly Item[]): Buf
         break;
       }
       case "scene":
+      case "scene_value":
         assert(resource?.type === "PackedScene");
-        scenes.set(`${location.node}:${location.property}`, change);
+        scenes.push({ location, ...change });
         break;
       case "slot":
         assert(resource?.type === "OptimizedTranslation");
@@ -166,7 +182,7 @@ function render_member(bytes: Buffer, file: string, items: readonly Item[]): Buf
   if (gdsc.size) return patch_gdsc(bytes, gdsc);
   if (source.size) return Buffer.from(patch_source(bytes.toString("utf8"), source));
   if (po.size) return Buffer.from(patch_po(bytes.toString("utf8"), po));
-  if (scenes.size) return patch_scene(read_scene(resource!), scenes);
+  if (scenes.length) return patch_scene(read_scene(resource!), scenes);
   if (slots.size) return patch_translation(read_translation(resource!), slots);
   assert(resource);
   return patch_resource(resource, edits);

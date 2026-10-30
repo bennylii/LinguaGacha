@@ -8,7 +8,7 @@ export const ko_kr_game_font_page = {
     font_file: {
       title: "글꼴 파일",
       description: "클릭하거나 글꼴 파일 놓기",
-      hint: "TTF, OTF 지원",
+      hint: "TTF 지원",
     },
   },
   action: {
@@ -16,11 +16,7 @@ export const ko_kr_game_font_page = {
     pick_directory: "게임 폴더 선택",
     start: "변경 시작",
   },
-  confirm: { description: "게임 글꼴을 변경하시겠습니까 …?" },
   feedback: {
     inspect_failed: "인식하지 못했습니다 …",
-    apply_failed: "변경하지 못했습니다 …",
-    applying: "게임 글꼴을 변경하는 중 …",
-    apply_success: "게임 글꼴 변경을 완료했습니다 …",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_game_font_page>;

@@ -1,3 +1,4 @@
+import { GameDirectoryOperations } from "../file/shared/game/game-directory-operations";
 import { create_pdf_execution } from "../file/pdf/test-support";
 import fs from "node:fs";
 import os from "node:os";
@@ -23,7 +24,7 @@ afterEach(() => {
 /** 配置和 .lg 使用真实存储，故障只注入提交与发布边界。 */
 async function create_service() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lg-settings-command-"));
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   cleanup.push(async () => {
     await database.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -51,12 +52,12 @@ async function create_service() {
   const on_commit = vi.fn();
   const writes = new ProjectWriteStore(database, on_commit, null);
   const content = new ProjectContentService(
+    new GameDirectoryOperations(),
     database,
     gate,
     session,
     writes,
     create_pdf_execution(),
-    settings,
   );
   return {
     service: new AppSettingsCommandService(settings, gate, session, content),

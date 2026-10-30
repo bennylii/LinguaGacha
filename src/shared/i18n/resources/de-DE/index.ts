@@ -1,13 +1,13 @@
 import { de_de_game_font_page } from "./game-font-page";
+import { de_de_translation_transfer_page } from "./translation-transfer-page";
 import { de_de_toolbox_page } from "./toolbox-page";
 import { de_de_skills_page } from "./skills-page";
 import { de_de_batch_translation } from "./batch-translation";
 import { de_de_agent_page } from "./agent-page";
 import { de_de_agent_runtime } from "./agent-runtime";
 import { de_de_app } from "./app";
-import { de_de_basic_settings_page } from "./basic-settings-page";
+import { de_de_function_settings_page } from "./function-settings-page";
 import { de_de_custom_prompt_page } from "./custom-prompt-page";
-import { de_de_expert_settings_page } from "./expert-settings-page";
 import { de_de_glossary_page } from "./glossary-page";
 import { de_de_laboratory_page } from "./laboratory-page";
 import { de_de_log_window_page } from "./log-window-page";
@@ -31,13 +31,13 @@ export const de_de_messages = {
   agent_page: de_de_agent_page,
   agent_runtime: de_de_agent_runtime,
   app: de_de_app,
-  basic_settings_page: de_de_basic_settings_page,
+  function_settings_page: de_de_function_settings_page,
   custom_prompt_page: de_de_custom_prompt_page,
-  expert_settings_page: de_de_expert_settings_page,
   glossary_page: de_de_glossary_page,
   laboratory_page: de_de_laboratory_page,
   toolbox_page: de_de_toolbox_page,
   game_font_page: de_de_game_font_page,
+  translation_transfer_page: de_de_translation_transfer_page,
   log_window_page: de_de_log_window_page,
   model_page: de_de_model_page,
   post_translation_replacement_page: de_de_post_translation_replacement_page,

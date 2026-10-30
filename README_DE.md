@@ -27,7 +27,7 @@
   - Untertitel in zehn Sekunden, ein Roman in einer Minute, ein Spiel in fünf Minuten
 - Integrierter `AGENT`-Modus, der verschiedene Aufgaben automatisch im Dialog erledigt　`👈👈 Exklusive Funktion`
   - Keine technischen Kenntnisse erforderlich: übersetzen und sofort spielen
-  - Unterstützt gängige Engines: `RenPy` `Godot` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
+  - Unterstützt alle gängigen Engines: `Godot` `RenPy` `Tyrano` `WOLFRPG` `RPGMAKER` `Kirikiri` `ACTION GAME MAKER`
 
 ## Erste Schritte 🛸
 - Laden Sie die Anwendung von der [Release-Seite](https://github.com/neavo/LinguaGacha/releases) herunter
@@ -67,16 +67,16 @@
 - Funktionsbeschreibungen
   - [AGENT](https://github.com/neavo/LinguaGacha/wiki/Agent)　　[Korrekturlesen](https://github.com/neavo/LinguaGacha/wiki/Proofreading)
   - [Glossar](https://github.com/neavo/LinguaGacha/wiki/Glossary)　　[Textschutz](https://github.com/neavo/LinguaGacha/wiki/TextPreserve)　　[Textersetzung](https://github.com/neavo/LinguaGacha/wiki/Replacement)
-  - [MTool-Optimierer](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizer)　　[Befehlszeilenmodus](https://github.com/neavo/LinguaGacha/wiki/CLIMode)
+  - [MTool-Optimierer](https://github.com/neavo/LinguaGacha/wiki/MToolOptimizer)　　[Befehlszeilenmodus](https://github.com/neavo/LinguaGacha/wiki/CLIMode)　　[Erweiterte Funktionen](https://github.com/neavo/LinguaGacha/wiki/AdvancedFeatures)
 - Engine-Praxis
-  - [Bewährte Vorgehensweisen für hochwertige Übersetzungen von RenPy-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)
   - [Bewährte Vorgehensweisen für hochwertige Übersetzungen von Godot-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)
+  - [Bewährte Vorgehensweisen für hochwertige Übersetzungen von RenPy-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)
+  - [Bewährte Vorgehensweisen für hochwertige Übersetzungen von Tyrano-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForTyrano)
   - [Bewährte Vorgehensweisen für hochwertige Übersetzungen von WOLFRPG-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)
   - [Bewährte Vorgehensweisen für hochwertige Übersetzungen von RPGMAKER-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)
 - Erfahrungen der Community
   - [Notizen zur maschinellen Übersetzung von Kirikiri-Spielen ohne komplexe Verschlüsselung](https://github.com/neavo/LinguaGacha/discussions/181)
 - Ausführlichere Informationen zu den Funktionen finden Sie im [Wiki](https://github.com/neavo/LinguaGacha/wiki)
-- Teilen Sie Ihre Erfahrungen gerne in den [Diskussionen](https://github.com/neavo/LinguaGacha/discussions)
 
 ## Unterstützte Formate 🏷️
 | Typ | Format | Hinweise |
@@ -86,18 +86,19 @@
 | Markdown | `.md` | - |
 | `KV-JSON` Spieltexte | `.json` | Quelle: [[MTool](https://mtool.app)] [[SExtractor](https://github.com/satan53x/SExtractor)] |
 | `Message-JSON` Spieltexte | `.json` | Quelle: [[SExtractor](https://github.com/satan53x/SExtractor)] [[VNTextPatch](https://github.com/arcusmaximus/VNTranslationTools)] |
-| `RenPy` Spieltexte | `.rpy` | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von RenPy-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)] |
-| `Godot 4` Spieldateien | `.exe` oder Spielverzeichnis | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von Godot-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)] |
-| `WOLFRPG 3` Spieldateien | `.exe` oder Spielverzeichnis | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von WOLFRPG-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)] |
+| `Godot` Spieldateien | `.exe` oder Spielverzeichnis | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von Godot-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForGodot)] |
+| `RenPy` Spieldateien | `.exe` oder Spielverzeichnis | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von RenPy-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRenPy)] |
+| `Tyrano` Spieldateien | `.exe` oder Spielverzeichnis | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von Tyrano-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForTyrano)] |
+| `WOLFRPG` Spieldateien | `.exe` oder Spielverzeichnis | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von WOLFRPG-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForWOLFRPG)] |
 | `RPGMAKER MV/MZ` Spieldateien | `.exe` oder Spielverzeichnis | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von RPGMAKER-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)] |
 | `RPGMAKER XP/VX/VXAce` Spieldateien | `.exe` oder Spielverzeichnis | Anleitung: [[Bewährte Vorgehensweisen für hochwertige Übersetzungen von RPGMAKER-Spielen](https://github.com/neavo/LinguaGacha/wiki/BestPracticeForRPGMaker)] |
+| `.rpy` Spieltexte | `.rpy` | `👈 Unterstützung endet bald` |
 | `.xlsx` Spieltexte | `.xlsx` | Quelle: [SExtractor](https://github.com/satan53x/SExtractor) [Translator++](https://dreamsavior.net/translator-plusplus) [offizielles WOLF-Übersetzungswerkzeug](https://silversecond.booth.pm/items/5151747)　`👈 Unterstützung endet bald` |
 | `.trans` Projektdateien | `.trans` | Quelle: [Translator++](https://dreamsavior.net/translator-plusplus)　`👈 Unterstützung endet bald` |
 
 ## Neueste Updates 📅
-- 20261021 v0.130.1
-  - Native Unterstützung für verschlüsselte `Godot 4`-Spiele [#1011](../../issues/1011)
-  - Korrekturen und Verbesserungen [#1013](../../issues/1013) [#1014](../../issues/1014) [#1015](../../issues/1015)
+- 20261029 v0.132.1
+  - Korrekturen und Verbesserungen [#1049](../../issues/1049) [#1050](../../issues/1050) [#1052](../../issues/1052) [#1053](../../issues/1053) [#1054](../../issues/1054)
 
 ## Entwicklung 🛠️
 - Installieren Sie [Go](https://go.dev) und [`Node.js`](https://nodejs.org)

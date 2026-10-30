@@ -205,7 +205,7 @@ it.each([
 ])("Agent 发布实际目标与总量，提交后清空目标 $request", async ({ request, targets }) => {
   using directory = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "linguagacha-agent-targets-"));
   const project_path = path.join(directory.path, "targets.lg");
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   await database.create_project(project_path, "targets");
   const original = ["PROCESSED", "EXCLUDED", "NONE"].map((status, index) =>
     create_item({
@@ -229,7 +229,6 @@ it.each([
   const cache = new CacheManager({
     database,
     logManager: null,
-    appSettingService: settings as never,
     workerClient: { run: vi.fn() } as never,
   });
   const writes = new ProjectWriteStore(database, vi.fn(), () => null);
@@ -354,7 +353,7 @@ it.each([
 it("历史工程批量翻译保留旧分析物理数据、正式术语与资产，并只投影当前能力", async () => {
   using directory = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "linguagacha-batch-history-"));
   const project_path = path.join(directory.path, "history.lg");
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   await database.create_project(project_path, "history");
   await database.transaction(project_path, (writer) =>
     writer.set_items(project_path, [
@@ -420,7 +419,6 @@ it("历史工程批量翻译保留旧分析物理数据、正式术语与资产�
   const cache = new CacheManager({
     database,
     logManager: { warning: vi.fn(), error: vi.fn() } as never,
-    appSettingService: { read_setting: () => ({}) } as never,
     workerClient: { run: async () => ({}) } as never,
   });
   const writes = new ProjectWriteStore(database, vi.fn(), () => null);

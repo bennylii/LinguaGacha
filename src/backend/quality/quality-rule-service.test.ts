@@ -279,7 +279,7 @@ describe("QualityRuleService", () => {
   });
 
   it("任务 busy 时拒绝全部质量项目写但不阻塞预设文件 IO", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service } = await create_workbench_service(database, "batch_translation");
     const project_writes = [
@@ -310,7 +310,7 @@ describe("QualityRuleService", () => {
   });
 
   it("规则条目与 meta 同一事务提交且只发布一次 project.data_changed", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service, lg_path, publisher } = await create_workbench_service(database);
 
@@ -357,7 +357,7 @@ describe("QualityRuleService", () => {
   });
 
   it("保存质量规则时保留稳定 entry_id", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service, lg_path } = await create_workbench_service(database);
 
@@ -380,7 +380,7 @@ describe("QualityRuleService", () => {
   });
 
   it("保存质量规则时拒绝缺失 entry_id", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service } = await create_workbench_service(database);
 
@@ -394,7 +394,7 @@ describe("QualityRuleService", () => {
   });
 
   it("保存质量规则时拒绝旧 expected_revision 字段", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service, publisher } = await create_workbench_service(database);
 
@@ -410,7 +410,7 @@ describe("QualityRuleService", () => {
   });
 
   it("读取当前质量规则切片与 revision", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service } = await create_workbench_service(database);
 

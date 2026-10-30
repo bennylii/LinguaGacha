@@ -1,10 +1,23 @@
+import { GameDirectoryOperations } from "../file/shared/game/game-directory-operations";
 import { create_godot_fixture, godot_pack_fixture } from "../../test/godot-fixture";
+import {
+  create_renpy_fixture,
+  extract_fixture,
+  compiled_slots,
+  object,
+  dictionary,
+  tuple,
+  opcode,
+} from "../../test/renpy-fixture";
+import { pickle_string } from "../file/renpy/pickle";
+import { create_renpy_adapter } from "../file/renpy/renpy-format";
+import { GameFormat } from "../file/shared/game/format";
+import { NativeFs } from "../../native/native-fs";
 import { wolf_files } from "../../test/wolf-fixture";
 import { wolf_archive_fixture } from "../../test/wolf-archive-fixture";
 import { evb_fixture } from "../../test/evb-fixture";
 import { rgss_archive_fixture } from "../../test/rgss-archive-fixture";
 import { CacheManager } from "../cache/cache-manager";
-import type { AppSettingService } from "../app/app-setting-service";
 import type { ComputeWorkerClient } from "../worker/compute-worker-client";
 import { ProjectSummaryService } from "./project-summary-service";
 import { read_zip_fixture, write_zip, zip_text } from "../../test/zip-fixture";
@@ -75,7 +88,7 @@ async function create_service(
   session_state: ProjectSessionState;
   lg_path: string;
 }> {
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   const session_state = new ProjectSessionState();
   const lg_path = project_path("demo.lg");
   await database.create_project(lg_path, "demo");
@@ -90,12 +103,12 @@ async function create_service(
   return {
     database,
     service: new ProjectContentService(
+      new GameDirectoryOperations(),
       database,
       runtime_gate,
       session_state,
       write_store,
       create_pdf_execution(),
-      null,
       undefined,
       log_manager,
     ),
@@ -277,9 +290,7 @@ describe("ProjectContentService", () => {
         conflict_action: "replace",
         expected_section_revisions: { files: 0, items: 0 },
       });
-      expect(result.failed_files).toMatchObject([
-        { source_path: root, message: "Invalid cp932 text" },
-      ]);
+      expect(result.source_operation).toEqual({ saved_assets: 1, directory_changes: [] });
       expect((await database.get_all_asset_records(lg_path)).map((file) => file.path)).toEqual([
         "normal.txt",
       ]);
@@ -326,7 +337,7 @@ describe("ProjectContentService", () => {
       fs.renameSync(root, root + "-moved");
       await service.reset_files({
         rel_paths: ["wolf.wolfrpg"],
-        expected_section_revisions: { items: 2 },
+        expected_section_revisions: { files: 2, items: 2 },
       });
       expect(
         (await database.get_all_items(lg_path)).map(({ src, status }) => ({ src, status })),
@@ -335,7 +346,77 @@ describe("ProjectContentService", () => {
       await database.close();
     }
   });
-  it("RGSS 预览与跳过保持源目录，陈旧确认不备份，正式提交准备后可离线重建", async () => {
+  it("重置解析结束后关闭工程，保留已有条目与修订", async () => {
+    const { database, service, runtime_gate, lg_path } = await create_service();
+    const root = project_path("renpy");
+    create_renpy_fixture(root);
+    let stopping: Promise<void> | undefined;
+    try {
+      const preview = await service.preview_import_files({ source_paths: [root] });
+      await service.import_files({
+        files: preview.files!,
+        conflict_action: "replace",
+        expected_section_revisions: { files: 0, items: 0 },
+      });
+      const original = await database.get_all_items(lg_path);
+      const meta = await database.get_all_meta(lg_path);
+      const parse = FileFormatService.prototype.parse_asset;
+      vi.spyOn(FileFormatService.prototype, "parse_asset").mockImplementationOnce(async function (
+        this: FileFormatService,
+        ...args: Parameters<typeof parse>
+      ) {
+        const result = await parse.apply(this, args);
+        stopping = runtime_gate.stop_project_writes();
+        return result;
+      });
+      await expect(
+        service.reset_files({
+          rel_paths: ["renpy.renpy"],
+          expected_section_revisions: { files: 1, items: 1 },
+        }),
+      ).rejects.toMatchObject({ code: "runtime.disposed" });
+      await stopping;
+      expect(await database.get_all_items(lg_path)).toEqual(original);
+      expect(await database.get_all_meta(lg_path)).toEqual(meta);
+    } finally {
+      await stopping;
+      await database.close();
+    }
+  });
+  it("RenPy 工程关闭重开后可离线重置原稿与默认用途", async () => {
+    const { database, service, lg_path } = await create_service();
+    const root = project_path("renpy");
+    create_renpy_fixture(root);
+    try {
+      const preview = await service.preview_import_files({
+        source_paths: [root, path.join(root, "Game.exe"), path.join(root, "game")],
+      });
+      expect(preview.files).toHaveLength(1);
+      await service.import_files({
+        files: preview.files!,
+        conflict_action: "replace",
+        expected_section_revisions: { files: 0, items: 0 },
+      });
+      expect(await database.get_all_asset_records(lg_path)).toMatchObject([
+        { path: "renpy.renpy", file_type: "RENPY" },
+      ]);
+      const original = await database.get_all_items(lg_path);
+      expect(original.some((item) => item.status === "RULE_SKIPPED")).toBe(true);
+      expect(original.some((item) => item.src === "Common question?")).toBe(true);
+      await database.close();
+      fs.renameSync(root, root + "-unavailable");
+      await service.reset_files({
+        rel_paths: ["renpy.renpy"],
+        expected_section_revisions: { files: 1, items: 1 },
+      });
+      expect(
+        (await database.get_all_items(lg_path)).map(({ src, status }) => ({ src, status })),
+      ).toEqual(original.map(({ src, status }) => ({ src, status })));
+    } finally {
+      await database.close();
+    }
+  });
+  it("RGSS 预览与跳过保持源目录，陈旧确认不改动游戏，正式提交准备后可离线重建", async () => {
     const { database, service, lg_path } = await create_service();
     const root = project_path("packed");
     fs.mkdirSync(root);
@@ -343,8 +424,8 @@ describe("ProjectContentService", () => {
     const archive = path.join(root, "Game.rgss3a");
     const exe = path.join(root, "Game.exe");
     fs.writeFileSync(exe, "");
-    // Marshal nil 是有效的零条目原稿，用于证明归档准备与工程写入的完整调用链。
-    const content = Buffer.from([4, 8, 48]);
+    // 空数组是有效的零条目数据和脚本列表。
+    const content = Buffer.from([4, 8, 91, 0]);
     fs.writeFileSync(
       archive,
       rgss_archive_fixture(
@@ -365,6 +446,7 @@ describe("ProjectContentService", () => {
       });
       expect(preview).toEqual({
         files_revision: 0,
+        contains_game: true,
         files: [{ source_path: root, target_rel_path: "packed.rpgmaker", conflict: false }],
       });
       expect(fs.readdirSync(root).sort()).toEqual(["Game.exe", "Game.ini", "Game.rgss3a"]);
@@ -377,7 +459,10 @@ describe("ProjectContentService", () => {
           conflict_action: "skip",
           expected_section_revisions: { files: 0, items: 0 },
         }),
-      ).rejects.toMatchObject({ code: "request.validation_failed" });
+      ).rejects.toMatchObject({
+        code: "request.validation_failed",
+        diagnostic_context: { reason: "no_processed_targets" },
+      });
       expect(fs.readdirSync(root).sort()).toEqual(["Game.exe", "Game.ini", "Game.rgss3a"]);
       await expect(
         service.import_files({
@@ -394,16 +479,14 @@ describe("ProjectContentService", () => {
       });
       expect(fs.existsSync(archive)).toBe(false);
       expect(fs.existsSync(path.join(root, ".lg-original"))).toBe(false);
-      expect(
-        fs.readFileSync(path.join(root, "backup_lg/Data/System.rvdata2")).equals(content),
-      ).toBe(true);
+      expect(fs.readFileSync(path.join(root, "Data/System.rvdata2")).equals(content)).toBe(true);
       expect((await service.preview_import_files({ source_paths: [root] })).files).toEqual(
         preview.files.map((file) => ({ ...file, conflict: true })),
       );
       fs.renameSync(root, root + "-moved");
       await service.reset_files({
         rel_paths: ["packed.rpgmaker"],
-        expected_section_revisions: { items: 1 },
+        expected_section_revisions: { files: 1, items: 1 },
       });
       expect(
         (await database.read_asset_content(lg_path, "packed.rpgmaker"))!.equals(Buffer.from("old")),
@@ -412,15 +495,14 @@ describe("ProjectContentService", () => {
       await database.close();
     }
   });
-  it("TRANS 替换按引擎身份继承译文，变更或移除引擎后重新匹配", async () => {
+  it("TRANS 替换在引擎变更或移除后仍继承译文", async () => {
     const { database, service, lg_path } = await create_service();
     const source = project_path("game.trans");
     try {
       for (const [engine, expected_translation] of [
         ["kag", ""],
-        ["kag", "译文"],
-        ["wolf", ""],
-        [undefined, ""],
+        ["wolf", "译文"],
+        [undefined, "译文"],
       ] as const) {
         fs.writeFileSync(
           source,
@@ -453,7 +535,7 @@ describe("ProjectContentService", () => {
         expect(items).toMatchObject([
           { dst: expected_translation, status: expected_translation === "" ? "NONE" : "PROCESSED" },
         ]);
-        // 下一次替换仍有已完成候选，确保引擎变化真正参与继承匹配。
+        // 下一次替换以已完成条目为候选，引擎变化不影响继承。
         await database.transaction(lg_path, (writer) =>
           writer.set_items(
             lg_path,
@@ -680,6 +762,7 @@ describe("ProjectContentService", () => {
       });
       expect(preview).toEqual({
         files_revision: 0,
+        contains_game: false,
         files: [
           { source_path: source, target_rel_path: "script.txt", conflict: false },
           { source_path: broken, target_rel_path: "broken.json", conflict: false },
@@ -690,15 +773,13 @@ describe("ProjectContentService", () => {
         conflict_action: "replace",
         expected_section_revisions: { files: 0, items: 0 },
       });
-      expect(result.failed_files).toMatchObject([
-        { source_path: broken, code: "file.parse_failed" },
-      ]);
+      expect(result.source_operation).toEqual({ saved_assets: 2, directory_changes: [] });
     } finally {
       await database.close();
     }
   });
 
-  it("同一游戏目录新增原稿后整体替换，提交失败保留备份并支持离线重建和独立删除", async () => {
+  it("同一游戏目录整体替换接纳部分解析结果，提交失败保留旧工程并支持离线重建和独立删除", async () => {
     const log_manager = create_log_manager();
     const { database, service, lg_path } = await create_service(undefined, log_manager);
     const source = project_path("game");
@@ -729,10 +810,17 @@ describe("ProjectContentService", () => {
       await database.transaction(lg_path, (writer) =>
         writer.add_asset(lg_path, "other.txt", Buffer.from("保留"), "TXT", null),
       );
+      write("custom/old.json", "{");
       await service.import_files(await request());
       const old = await database.read_asset_content(lg_path, "game.zip");
+      expect(await read_meta(database, lg_path, "additional_files", {})).toEqual({
+        "game.zip": ["custom/old.json"],
+      });
+      const old_meta = await database.get_all_meta(lg_path);
       const old_items = await database.get_all_items(lg_path);
       fs.unlinkSync(path.join(source, "data/Old.json"));
+      fs.unlinkSync(path.join(source, "custom/old.json"));
+      write("custom/new.json", "{");
       write("data/System.json", "{}");
       write("js/rmmz_core.js", "");
       write("data/New.json", '{"text":"新文"}');
@@ -748,36 +836,33 @@ describe("ProjectContentService", () => {
       fail.mockRestore();
       expect((await database.read_asset_content(lg_path, "game.zip"))!.equals(old!)).toBe(true);
       expect(await database.get_all_items(lg_path)).toEqual(old_items);
-      expect(fs.readFileSync(path.join(source, "backup_lg/data/New.json"), "utf8")).toBe(
-        '{"text":"新文"}',
-      ); // 备份不随工程提交失败回滚。
+      expect(await database.get_all_meta(lg_path)).toEqual(old_meta);
       await service.import_files(await request());
+      expect(await read_meta(database, lg_path, "additional_files", {})).toEqual({
+        "game.zip": ["custom/new.json"],
+      });
       const saved = (await database.read_asset_content(lg_path, "game.zip"))!;
       expect([...(await read_zip_fixture(saved)).keys()]).not.toContain("data/Old.json");
       expect(await database.get_all_items(lg_path)).toMatchObject([
         { src: "新文", file_path: "game.zip" },
       ]);
-      expect(log_manager.warning).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          context: {
-            warnings: expect.arrayContaining([
-              expect.objectContaining({
-                rel_path: "game.zip",
-                internal_file_path: "data/Broken.json",
-                code: "internal_file_parse_failed",
-              }),
-              expect.objectContaining({
-                rel_path: "game.zip",
-                internal_file_path: "js/plugins.js",
-                code: "script_syntax_error",
-              }),
-            ]),
-          },
-        }),
-      );
       fs.renameSync(source, source + "-moved");
+      await database.close_project(lg_path);
+      vi.mocked(log_manager.warning).mockClear();
       await service.reset_translation({ mode: "all" });
+      expect(log_manager.warning).toHaveBeenCalledTimes(2); // 两个失败成员各记录一次诊断。
+      for (const [internal_file_path, code] of [
+        ["data/Broken.json", "internal_file_parse_failed"],
+        ["js/plugins.js", "script_syntax_error"],
+      ] as const)
+        expect(log_manager.warning).toHaveBeenCalledWith(
+          expect.stringContaining(internal_file_path),
+          expect.objectContaining({
+            context: {
+              warning: expect.objectContaining({ rel_path: "game.zip", internal_file_path, code }),
+            },
+          }),
+        );
       expect((await database.get_all_items(lg_path)).some((item) => item.src === "新文")).toBe(
         true,
       );
@@ -798,6 +883,7 @@ describe("ProjectContentService", () => {
         rel_paths: ["game.zip"],
         expected_section_revisions: await revisions(),
       });
+      expect(await read_meta(database, lg_path, "additional_files", {})).toEqual({});
       expect((await database.get_all_asset_records(lg_path)).map((file) => file.path)).toEqual([
         "other.txt",
       ]);
@@ -861,14 +947,18 @@ describe("ProjectContentService", () => {
               ])
             : script,
         );
-        const expected = [
-          ...(json ? [["插件事件", "RULE_SKIPPED", ""]] : []),
-          ["管理キー", "RULE_SKIPPED", ""],
-          ["こんにちは", "RULE_SKIPPED", ""],
-          ["EV001", "RULE_SKIPPED", ""],
-          ["Hello", "RULE_SKIPPED", ""],
-          ["こんにちは", "RULE_SKIPPED", ""],
-        ];
+        const expected = json
+          ? [
+              ["插件事件", "RULE_SKIPPED", ""],
+              [script, "RULE_SKIPPED", ""],
+            ]
+          : [
+              ["管理キー", "RULE_SKIPPED", ""],
+              ["こんにちは", "RULE_SKIPPED", ""],
+              ["EV001", "RULE_SKIPPED", ""],
+              ["Hello", "RULE_SKIPPED", ""],
+              ["こんにちは", "RULE_SKIPPED", ""],
+            ];
         const source = project_path("game");
         const prefix = file.startsWith("www/") ? "www/" : "";
         for (const [internal, content] of [
@@ -1158,6 +1248,107 @@ describe("ProjectContentService", () => {
     await database.close();
   });
 
+  it("文件重置从资产重建目标，保留其他文件和累计统计，并拒绝陈旧修订", async () => {
+    const { database, service, lg_path } = await create_service();
+    try {
+      await database.transaction(lg_path, (writer) => {
+        writer.add_asset(lg_path, "a.txt", Buffer.from("新正文"), "TXT", null, 0);
+        writer.add_asset(lg_path, "b.txt", Buffer.from("另一文件"), "TXT", null, 1);
+        writer.set_items(lg_path, [
+          create_persistent_item({
+            item_id: 10,
+            src: "编辑过的原文",
+            dst: "旧译文",
+            name_src: "旧姓名",
+            status: "PROCESSED",
+          }),
+          create_persistent_item({
+            item_id: 11,
+            file_path: "b.txt",
+            src: "保留正文",
+            dst: "保留译文",
+            status: "PROCESSED",
+          }),
+        ]);
+        writer.set_meta(lg_path, "translation_extras", { total_tokens: 100, time: 12 });
+      });
+      const before = await database.get_all_items(lg_path);
+      await expect(
+        service.reset_files({
+          rel_paths: ["a.txt"],
+          expected_section_revisions: { files: 1, items: 0 },
+        }),
+      ).rejects.toMatchObject({ code: "data.revision_conflict" });
+      expect(await database.get_all_items(lg_path)).toEqual(before);
+      const ack = await service.reset_files({
+        rel_paths: ["a.txt"],
+        expected_section_revisions: { files: 0, items: 0 },
+      });
+      const items = await database.get_all_items(lg_path);
+      expect(items.find((item) => item.file_path === "b.txt")).toEqual(
+        before.find((item) => item.file_path === "b.txt"),
+      );
+      expect(items.find((item) => item.file_path === "a.txt")).toMatchObject({
+        id: 12,
+        src: "新正文",
+        dst: "",
+        name_src: null,
+        status: "NONE",
+      });
+      expect(await read_meta(database, lg_path, "translation_extras", {})).toMatchObject({
+        total_tokens: 100,
+        time: 12,
+        total_line: 2,
+        processed_line: 1,
+        line: 1,
+      });
+      expect(ack.changes[0]).toMatchObject({
+        updatedSections: ["items"],
+        sectionRevisions: { items: 1 },
+      });
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("文件重置按资产完整重建，零条目与解析失败都清除旧条目", async () => {
+    const { database, service, lg_path } = await create_service();
+    try {
+      await database.transaction(lg_path, (writer) => {
+        writer.add_asset(lg_path, "a.txt", Buffer.from(""), "TXT", null, 0);
+        writer.add_asset(lg_path, "b.txt", Buffer.from("正文"), "TXT", null, 1);
+        writer.set_items(lg_path, [
+          create_persistent_item({ item_id: 1, dst: "旧译文", status: "PROCESSED" }),
+          create_persistent_item({
+            item_id: 2,
+            file_path: "b.txt",
+            dst: "旧译文",
+            status: "PROCESSED",
+          }),
+        ]);
+      });
+      const parse = FileFormatService.prototype.parse_asset;
+      vi.spyOn(FileFormatService.prototype, "parse_asset").mockImplementation(function (
+        this: FileFormatService,
+        ...args
+      ) {
+        if (args[0] === "b.txt") return Promise.reject(new Error("parse probe"));
+        return parse.apply(this, args);
+      });
+      await service.reset_files({
+        rel_paths: ["a.txt", "b.txt"],
+        expected_section_revisions: { files: 0, items: 0 },
+      });
+      expect(await database.get_all_items(lg_path)).toEqual([]);
+      expect((await database.get_all_asset_records(lg_path)).map((file) => file.path)).toEqual([
+        "a.txt",
+        "b.txt",
+      ]);
+    } finally {
+      await database.close();
+    }
+  });
+
   it("全部重置重建条目并发布全量失效", async () => {
     const { publish_project_change } = create_test_project_change_publisher();
     const { database, service, lg_path } = await create_service(publish_project_change);
@@ -1296,6 +1487,133 @@ describe("ProjectContentService", () => {
     }
   });
 
+  it("Ren’Py 旧项目重开后可导出，全部重置补齐跨槽位对白并清除译文", async () => {
+    const { database, service, lg_path } = await create_service();
+    const file = "dialogue.renpy",
+      member = "game/dialogue.rpyc";
+    /** 两类节点共用位置和正文，复现编译槽位转换。 */
+    const say = (cls: string, line: number, text: string) =>
+      object(
+        cls,
+        dictionary({
+          filename: pickle_string("game/dialogue.rpy"),
+          linenumber: opcode(0x4b, line),
+          what: pickle_string(text),
+          who: pickle_string("'Alice'"),
+        }),
+      );
+    // 程序标识拼接必须允许整个资产参与重置。
+    const code = object(
+      "Python",
+      dictionary({
+        name: pickle_string("program"),
+        code: object(
+          "PyCode",
+          tuple(
+            opcode(0x4b, 1),
+            pickle_string('asset = prefix + " suffix"'),
+            tuple(),
+            pickle_string("exec"),
+          ),
+        ),
+      }),
+    );
+    const bytes = compiled_slots(
+      ["Say", "TranslateSay"].map((cls) => [
+        say("TranslateSay", 10, "Existing dialogue"),
+        say(cls, 20, "Recovered dialogue"),
+        code,
+      ]),
+    );
+    const format = new GameFormat(
+      new GameDirectoryOperations(),
+      create_renpy_adapter(),
+      new NativeFs(),
+    );
+    const content = await format.create_container(
+      new Map([[member, bytes]]),
+      file,
+      member,
+      undefined,
+      Buffer.from(
+        JSON.stringify({
+          schema: "linguagacha-renpy-1",
+          engine_version: "test",
+          python_major: 3,
+          old_substitutions: false,
+          common: [],
+        }),
+      ),
+    );
+    const parsed = await format.read_from_stream(content, file);
+    const existing = parsed.items.find((item) => item.src === "Existing dialogue")!;
+    const old_key = JSON.stringify([
+      JSON.stringify(["renpy.ast.TranslateSay", "game/dialogue.rpy", "10"]),
+      "what",
+      null,
+      "Existing dialogue",
+    ]);
+    expect(read_json_record(read_json_record(existing.extra_field)["renpy"])["key"]).toBe(old_key);
+    const old_items = [
+      {
+        ...existing,
+        id: 1,
+        dst: "已有译文",
+        name_src: null,
+        name_dst: null,
+        status: "PROCESSED" as const,
+      },
+    ];
+    try {
+      await database.transaction(lg_path, (writer) => {
+        writer.add_asset(lg_path, file, Buffer.from(content), "RENPY", null);
+        writer.set_items(lg_path, old_items);
+        writer.set_meta(lg_path, "source_language", "EN");
+      });
+      await database.close();
+      expect(await database.get_all_items(lg_path)).toEqual(old_items);
+      const output = project_path("export");
+      await format.write_to_path(old_items, {
+        paths: { translated_path: output, bilingual_path: output },
+        source_files: [{ path: file, file_type: "RENPY" }],
+        asset_reader: (path) => database.read_asset_content(lg_path, path),
+      });
+      const exported = await extract_fixture(
+        fs.readFileSync(path.join(output, "dialogue", member)),
+      );
+      expect(
+        exported.candidates.find((item) => item.text === "已有译文")?.coordinates,
+      ).toMatchObject([{ slot: 1 }, { slot: 2 }]);
+      await service.reset_files({
+        rel_paths: [file],
+        expected_section_revisions: { files: 0, items: 0 },
+      });
+      const file_reset = await database.get_all_items(lg_path);
+      await service.reset_translation({ mode: "all" });
+      const reset = await database.get_all_items(lg_path);
+      expect(file_reset.map(({ id: _id, ...item }) => item)).toEqual(
+        reset.map(({ id: _id, ...item }) => item),
+      );
+      expect(reset.map(({ src, dst, status }) => ({ src, dst, status }))).toEqual(
+        expect.arrayContaining([
+          { src: "Existing dialogue", dst: "", status: "NONE" },
+          { src: "Recovered dialogue", dst: "", status: "NONE" },
+          { src: " suffix", dst: "", status: "RULE_SKIPPED" },
+        ]),
+      );
+      expect(reset).toHaveLength(3);
+      expect(
+        reset
+          .filter((item) => item.src === "Existing dialogue" || item.src === "Recovered dialogue")
+          .map((item) => item.name_src),
+      ).toEqual(["Alice", "Alice"]);
+      await database.close();
+      expect(await database.get_all_items(lg_path)).toEqual(reset);
+    } finally {
+      await database.close();
+    }
+  });
+
   it.each(["第一行\n第二行\n第三行", "一行", ""])("全部重置允许条目数变化：%s", async (content) => {
     const { database, service, lg_path } = await create_service();
     await database.transaction(lg_path, (writer) =>
@@ -1313,51 +1631,81 @@ describe("ProjectContentService", () => {
     expect(items.map((item) => item["src"])).toEqual(expected);
     expect(items.every((item) => Number(item["id"]) > 21 && item["dst"] === "")).toBe(true);
     await database.close();
-    const reopened = new ProjectDatabase();
+    const reopened = new ProjectDatabase("1.0.0");
     expect(await reopened.get_all_items(lg_path)).toEqual(items);
     await reopened.close();
   });
 
-  it.each(["missing", "parse", "commit"])(
-    "全部重置在 %s 失败时保留条目和项目元数据",
-    async (failure) => {
-      const { database, service, lg_path } = await create_service();
-      const file = failure === "parse" ? "a.json" : "a.txt";
-      await database.transaction(lg_path, (writer) =>
-        writer.add_asset(
-          lg_path,
-          file,
-          Buffer.from("新正文"),
-          failure === "parse" ? "KVJSON" : "TXT",
-          null,
-          0,
-        ),
-      );
-      await database.transaction(lg_path, (writer) =>
+  it.each(["missing", "commit"])("全部重置在 %s 失败时保留条目和项目元数据", async (failure) => {
+    const { database, service, lg_path } = await create_service();
+    await database.transaction(lg_path, (writer) =>
+      writer.add_asset(lg_path, "a.txt", Buffer.from("新正文"), "TXT", null, 0),
+    );
+    await database.transaction(lg_path, (writer) =>
+      writer.set_items(lg_path, [create_persistent_item({ dst: "已有译文", status: "PROCESSED" })]),
+    );
+    const before_items = await database.get_all_items(lg_path);
+    const before_meta = await database.get_all_meta(lg_path);
+    if (failure === "missing") vi.spyOn(database, "read_asset_content").mockResolvedValueOnce(null);
+    if (failure === "commit") {
+      const set_items = ProjectDatabaseAccess.prototype.set_items;
+      vi.spyOn(ProjectDatabaseAccess.prototype, "set_items").mockImplementationOnce(function (
+        this: ProjectDatabaseAccess,
+        ...args
+      ) {
+        set_items.call(this, ...args);
+        throw new Error("commit probe");
+      });
+    }
+    await expect(service.reset_translation({ mode: "all" })).rejects.toThrow();
+    expect(await database.get_all_items(lg_path)).toEqual(before_items);
+    expect(await database.get_all_meta(lg_path)).toEqual(before_meta);
+    await database.close();
+  });
+
+  it("全部重置只重建取得原稿的资产，未取得原稿的资产避开预过滤并保留条目身份及译文", async () => {
+    const { database, service, lg_path } = await create_service();
+    try {
+      await database.transaction(lg_path, (writer) => {
+        writer.add_asset(lg_path, "a.json", Buffer.from("{}"), "KVJSON", null, 0);
+        writer.add_asset(lg_path, "b.txt", Buffer.from("新正文"), "TXT", null, 1);
         writer.set_items(lg_path, [
-          create_persistent_item({ file_path: file, dst: "已有译文", status: "PROCESSED" }),
-        ]),
+          create_persistent_item({
+            item_id: 50,
+            file_path: "a.json",
+            src: "保留原文",
+            dst: "保留译文",
+            status: "PROCESSED",
+            file_type: "KVJSON",
+          }),
+          create_persistent_item({
+            item_id: 51,
+            file_path: "b.txt",
+            src: "旧正文",
+            dst: "旧译文",
+            status: "PROCESSED",
+          }),
+        ]);
+      });
+      const retained = (await database.get_all_items(lg_path)).find(
+        (item) => item.file_path === "a.json",
       );
-      const before_items = await database.get_all_items(lg_path);
-      const before_meta = await database.get_all_meta(lg_path);
-      if (failure === "missing")
-        vi.spyOn(database, "read_asset_content").mockResolvedValueOnce(null);
-      if (failure === "commit") {
-        const set_items = ProjectDatabaseAccess.prototype.set_items;
-        vi.spyOn(ProjectDatabaseAccess.prototype, "set_items").mockImplementationOnce(function (
-          this: ProjectDatabaseAccess,
-          ...args
-        ) {
-          set_items.call(this, ...args);
-          throw new Error("commit probe");
-        });
-      }
-      await expect(service.reset_translation({ mode: "all" })).rejects.toThrow();
-      expect(await database.get_all_items(lg_path)).toEqual(before_items);
-      expect(await database.get_all_meta(lg_path)).toEqual(before_meta);
+      const read = database.read_asset_content.bind(database);
+      vi.spyOn(database, "read_asset_content").mockImplementation((project, file) =>
+        file === "a.json" ? Promise.resolve(null) : read(project, file),
+      );
+      await service.reset_translation({ mode: "all" });
+      const items = await database.get_all_items(lg_path);
+      expect(items.find((item) => item.file_path === "a.json")).toEqual(retained);
+      expect(items.find((item) => item.file_path === "b.txt")).toMatchObject({
+        src: "新正文",
+        dst: "",
+      });
+      expect(Number(items.find((item) => item.file_path === "b.txt")!.id)).toBeGreaterThan(51);
+    } finally {
       await database.close();
-    },
-  );
+    }
+  });
 
   it("translation reset 拒绝旧最终事实载荷且不清空既有 items", async () => {
     const { database, service, lg_path } = await create_service();
@@ -1539,7 +1887,7 @@ describe("ProjectContentService", () => {
     await database.close();
   });
 
-  it.each(["json", "evb"])("导入工作台文件时跳过 %s 失败来源并继续写入成功文件", async (kind) => {
+  it.each(["json", "evb"])("导入 %s 失败时按原稿是否可靠决定保存", async (kind) => {
     const log_manager = create_log_manager();
     const { database, service, lg_path } = await create_service(undefined, log_manager);
     const valid_source = project_path("valid.txt");
@@ -1557,18 +1905,11 @@ describe("ProjectContentService", () => {
 
     expect(ack).toMatchObject({
       accepted: true,
-      failed_files: [
-        {
-          source_path: broken_json,
-          rel_path: "broken.json",
-          filename: path.basename(broken_json),
-          code: kind === "json" ? "file.parse_failed" : "file.io_failed",
-          message: expect.any(String),
-        },
-      ],
+      source_operation: { saved_assets: kind === "json" ? 2 : 1 },
     });
     expect(await database.get_all_asset_records(lg_path)).toEqual([
       { path: "valid.txt", sort_order: 0, file_type: "TXT" },
+      ...(kind === "json" ? [{ path: "broken.json", sort_order: 1, file_type: "NONE" }] : []),
     ]);
     expect(await database.get_all_items(lg_path)).toEqual([
       create_persistent_item({ src: "新", file_path: "valid.txt", row_number: 0 }),
@@ -1580,7 +1921,7 @@ describe("ProjectContentService", () => {
     await database.close();
   });
 
-  it("导入工作台文件全部解析失败时不写入工程并返回失败明细", async () => {
+  it("导入工作台文件全部解析失败时仍保存可靠原稿并记录日志", async () => {
     const log_manager = create_log_manager();
     const { database, service, lg_path } = await create_service(undefined, log_manager);
     const broken_json = project_path("broken.json");
@@ -1592,22 +1933,15 @@ describe("ProjectContentService", () => {
         conflict_action: "replace",
         expected_section_revisions: { files: 0, items: 0 },
       }),
-    ).rejects.toMatchObject({
-      code: "file.parse_failed",
-      public_details: {
-        failed_files: [
-          {
-            source_path: broken_json,
-            rel_path: "broken.json",
-            filename: "broken.json",
-            code: "file.parse_failed",
-            message: expect.any(String),
-          },
-        ],
-      },
+    ).resolves.toMatchObject({
+      accepted: true,
+      source_operation: { saved_assets: 1, directory_changes: [] },
     });
 
-    expect(await database.get_all_asset_records(lg_path)).toEqual([]);
+    expect(await database.get_all_asset_records(lg_path)).toEqual([
+      { path: "broken.json", file_type: "NONE", sort_order: 0 },
+    ]);
+    expect((await database.read_asset_content(lg_path, "broken.json"))?.toString()).toBe("{");
     expect(log_manager.warning).toHaveBeenCalledWith(
       expect.stringContaining("broken.json"),
       expect.objectContaining({ source: "project-import" }),
@@ -1696,71 +2030,38 @@ describe("ProjectContentService", () => {
     await database.close();
   });
 
-  it("整条继承匹配源身份，按完整结果投票并支持空正文", async () => {
+  it("替换导入时被规则过滤的条目按上下文继承旧译文", async () => {
     const { database, service, lg_path } = await create_service();
     try {
-      const source_path = project_path("names.json");
-      fs.writeFileSync(
-        source_path,
-        JSON.stringify([
-          { name: "太郎", message: "こんにちは" },
-          { name: "花子", message: "こんにちは" },
-          { name: "俊輔", message: "" },
-        ]),
-      );
+      const source_path = project_path("a-new.txt");
+      fs.writeFileSync(source_path, "前文\nEV1\n后文", "utf-8");
       await database.transaction(lg_path, (writer) =>
-        writer.add_asset(lg_path, "old.json", Buffer.from("[]"), "MESSAGEJSON", null),
-      );
-      await database.transaction(lg_path, (writer) =>
-        writer.add_asset(lg_path, "old.rpy", Buffer.from(""), "RENPY", null),
+        writer.add_asset(lg_path, "a.txt", Buffer.from(""), "TXT", null),
       );
       await database.transaction(lg_path, (writer) =>
         writer.set_items(
           lg_path,
-          (
-            [
-              // 相同正文的译名分开投票，同票时保留最早的完整结果。
-              ["こんにちは", "你好", "太郎", "少数译名", "KAG"],
-              ["こんにちは", "你好", "太郎", "太郎译名", "KAG"],
-              ["こんにちは", "你好", "太郎", "太郎译名", "KAG"],
-              ["こんにちは", "错误类型译文", "花子", "错误类型译名", "RENPY"],
-              ["", "", "俊輔", "俊辅", "KAG"],
-              ["", "", "俊輔", "另一个译名", "KAG"],
-            ] as const
-          ).map(([src, dst, name_src, name_dst, text_type], index) =>
+          ["前文", "EV1", "后文"].map((src, index) =>
             create_persistent_item({
               item_id: index + 1,
               src,
-              dst,
-              name_src,
-              name_dst,
-              file_type: text_type === "KAG" ? "MESSAGEJSON" : "RENPY",
-              file_path: text_type === "KAG" ? "old.json" : "old.rpy",
-              status: "PROCESSED",
+              row_number: index,
+              ...(src === "EV1" ? { dst: "事件一", status: "PROCESSED" } : {}),
             }),
           ),
         ),
       );
       await service.import_files({
-        files: [{ source_path, target_rel_path: "names.json" }],
+        files: [{ source_path, target_rel_path: "a.txt" }],
         inheritance_mode: "inherit",
         conflict_action: "replace",
         expected_section_revisions: { files: 0, items: 0 },
       });
-      expect(
-        ((await database.get_all_items(lg_path)) as JsonRecord[]).filter(
-          (item) => item.file_path === "names.json",
-        ),
-      ).toMatchObject([
-        {
-          src: "こんにちは",
-          name_src: "太郎",
-          dst: "你好",
-          name_dst: "太郎译名",
-          status: "PROCESSED",
-        },
-        { src: "こんにちは", name_src: "花子", dst: "", name_dst: null, status: "NONE" },
-        { src: "", name_src: "俊輔", dst: "", name_dst: "俊辅", status: "PROCESSED" },
+      // 新版 `EV1` 先被规则过滤，上下文一致仍接收旧译文。
+      expect(await database.get_all_items(lg_path)).toMatchObject([
+        { id: 4, src: "前文", dst: "", status: "NONE" },
+        { id: 5, src: "EV1", dst: "事件一", status: "PROCESSED" },
+        { id: 6, src: "后文", dst: "", status: "NONE" },
       ]);
     } finally {
       await database.close();
@@ -1774,14 +2075,10 @@ describe("ProjectContentService", () => {
       mtool_optimizer_enable: true,
       skip_duplicate_source_text_enable: false,
     };
-    const app_settings = {
-      read_setting: () => ({ ...settings }),
-    } as unknown as AppSettingService;
     await database.transaction(lg_path, (writer) => writer.upsert_meta_entries(lg_path, settings));
     const cache = new CacheManager({
       database,
       logManager: null,
-      appSettingService: app_settings,
       workerClient: { run: vi.fn(), dispose: vi.fn() } as unknown as ComputeWorkerClient,
     });
     const summary = new ProjectSummaryService(session_state, cache);
@@ -1912,7 +2209,7 @@ describe("ProjectContentService", () => {
     const { publish_project_change } = create_test_project_change_publisher();
     const { database, service, lg_path } = await create_service(publish_project_change);
     await database.transaction(lg_path, (writer) =>
-      writer.add_asset(lg_path, "a.txt", Buffer.from("a"), "TXT", null, 0),
+      writer.add_asset(lg_path, "a.txt", Buffer.from("新"), "TXT", null, 0),
     );
     await database.transaction(lg_path, (writer) =>
       writer.set_items(lg_path, [
@@ -1927,7 +2224,7 @@ describe("ProjectContentService", () => {
     );
     await service.reset_files({
       rel_paths: ["a.txt"],
-      expected_section_revisions: { items: 0 },
+      expected_section_revisions: { files: 0, items: 0 },
     });
 
     expect(await read_meta(database, lg_path, "translation_extras", {})).toMatchObject({

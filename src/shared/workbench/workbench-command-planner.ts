@@ -1,5 +1,3 @@
-import type { SourceFileParseFailureRecord } from "../source-file-parse-failure";
-
 type WorkbenchCommandSection = "files" | "items" | "pdf";
 type WorkbenchSectionRevisions = Record<string, number | undefined>;
 
@@ -101,7 +99,7 @@ export function create_workbench_reset_file_plan(args: {
     updatedSections: sections,
     requestBody: {
       rel_paths: [target_rel_path],
-      expected_section_revisions: build_expected_revisions(args.state, sections),
+      expected_section_revisions: build_expected_revisions(args.state, ["files", ...sections]),
     },
   };
 }
@@ -136,7 +134,7 @@ export type WorkbenchImportFilesPreview = {
   godot_packs?: readonly import("../godot").GodotPackPreview[];
   files_revision: number; // 与命名和冲突分类来自同一次数据库读取。
   files: WorkbenchImportFileCandidate[];
-  failed_files?: SourceFileParseFailureRecord[];
+  contains_game: boolean; // 原生游戏会改写游戏目录，界面据此提示完整备份。
 };
 
 // 前端只提交预览候选和用户选择，名称与冲突分类由后端拥有。

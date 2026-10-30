@@ -12,7 +12,7 @@ import { AgentWorkspaceRunner } from "../agent/workspace/runtime/runner";
 import { ApiGatewayServer } from "../api/api-gateway-server";
 import { ApiStreamHub } from "../api/api-stream-hub";
 import { t_main_log } from "../log/log-text";
-import type { SystemProxyResolver } from "../network/system-proxy-http-client";
+import type { ProxyResolver } from "../network/proxy-http-client";
 import type { NetworkProxyPolicy } from "../../domain/setting";
 import type { BackendWorkerExecution } from "../worker/worker-execution";
 import { AppError } from "../../shared/error";
@@ -29,7 +29,7 @@ export interface GuiBackendBootstrapOptions {
   appRoot: string; // 安装根与便携数据位置
   builtinRoot: string; // 当前版本只读内置资产根
   logTargets?: Partial<LogTargets>; // GUI Backend 日志出口
-  systemProxyResolver: SystemProxyResolver; // Electron main 提供的代理解析端口
+  proxyResolver: ProxyResolver; // Electron main 提供的代理解析端口
   workspaceRuntimeDirectory: string; // 与 runner 同版本的标准 npm 环境
   openDirectory: (path: string) => Promise<void>; // Electron main 副作用端口
   pickSavePath: (defaultName: string) => Promise<string | null>; // 原生保存选择，取消返回 null
@@ -138,7 +138,7 @@ export class GuiBackendBootstrap {
       const runner = new AgentWorkspaceRunner({
         paths: resources.paths,
         runtimeDirectory: this.options.workspaceRuntimeDirectory,
-        systemProxyResolver: resources.proxyResolver, // 子进程代理路由与后端同源
+        proxyResolver: resources.proxyResolver, // 子进程代理路由与后端同源
       });
       const workspace = new AgentWorkspaceService({
         images,
@@ -277,11 +277,11 @@ export class GuiBackendBootstrap {
     this.images = null;
     const gateway = this.gateway;
     this.gateway = null;
-    // Gateway 停止受理时同步取消在途接口测试与工程写入，排空须等到目录恢复结束。
+    // Gateway 停止受理时同步取消在途接口测试与文件操作，排空须等到目录恢复结束。
     await Promise.all([
       collect_failure(failures, async () => await gateway?.stop()),
       collect_failure(failures, async () => await this.services?.model.dispose()),
-      collect_failure(failures, async () => await this.services?.stop_project_writes()),
+      collect_failure(failures, async () => await this.services?.stop_file_operations()),
     ]);
 
     this.resources?.settings.set_stream_publisher(null);

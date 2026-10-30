@@ -1,3 +1,4 @@
+import { GameDirectoryOperations } from "../shared/game/game-directory-operations";
 import { GameFormat } from "../shared/game/format";
 import { NativeFs } from "../../../native/native-fs";
 import JSZip from "jszip";
@@ -12,6 +13,7 @@ import {
   ruby_object as o,
   ruby_string as s,
   ruby_integer as n,
+  ruby_command as c,
 } from "../../../test/rgss-fixture";
 import { create_pdf_execution } from "../pdf/test-support";
 import { FileFormatService } from "../file-format-service";
@@ -50,8 +52,24 @@ it.each([
     encode(o("RPG::System", { "@game_title": s(title), "@currency_unit": s("ゴールド") })),
   );
   fs.writeFileSync(path.join(data, "Actors" + extension), actors);
+  const script = 'profile = "unfinished\nshow_profile actor';
+  fs.writeFileSync(
+    path.join(data, "Map001" + extension),
+    encode(
+      a([
+        c(355, [s('profile = "unfinished')]),
+        c(655, [s("show_profile actor")]),
+        c(355, [s('puts "keep event"')]),
+        c(0, []),
+      ]),
+    ),
+  );
   fs.writeFileSync(path.join(data, "Broken" + extension), "broken");
-  const service = new FileFormatService({ target_language: "ZH" }, create_pdf_execution());
+  const service = new FileFormatService(
+    new GameDirectoryOperations(),
+    { target_language: "ZH" },
+    create_pdf_execution(),
+  );
   const entries = await service.collect_source_file_entries([
     source,
     path.join(source, "Game.exe"),
@@ -63,7 +81,6 @@ it.each([
   const prepared = await service.prepare_source(
     (await service.discover_import_sources([{ source_path: source, rel_path: "game.zip" }]))[0]!,
   );
-  expect(prepared.warnings).toEqual([]);
   fs.rmSync(source, { recursive: true });
   const result = await service.parse_asset("game.zip", prepared.content, "RPGMAKER_RGSS");
   if (result.kind !== "items") throw Error("Expected items");
@@ -76,6 +93,8 @@ it.each([
   expect(result.items.map((item) => [item.src, FileFormatService.default_status(item)])).toEqual([
     ["hero", "NONE"],
     ["resource", "RULE_SKIPPED"],
+    [script, "RULE_SKIPPED"],
+    ['puts "keep event"', "RULE_SKIPPED"],
     [title, "RULE_SKIPPED"],
     ["ゴールド", "NONE"],
     ["menu", "RULE_SKIPPED"],
@@ -92,6 +111,10 @@ it.each([
   menu.status = "PROCESSED";
   const keep = result.items.find((item) => item.src === "keep")!;
   keep.dst = "不应写入";
+  const event = result.items.find((item) => item.src === script)!;
+  event.dst = 'profile = "角色介绍"\nshow_profile actor\n# 译文';
+  event.status = "PROCESSED";
+  result.items.find((item) => item.src === 'puts "keep event"')!.dst = "不应写入";
   const item = result.items.find((item) => item.src === "hero")!;
   item.dst = "英雄";
   item.status = "PROCESSED";
@@ -110,8 +133,18 @@ it.each([
   expect(fs.readFileSync(path.join(output, "game/Data/Broken" + extension), "utf8")).toBe("broken");
   const archive = decode(fs.readFileSync(path.join(output, "game/Custom/Main" + extension)));
   expect(inflateSync(bytes(array(array(archive)[0]!)[2]!)).toString()).toBe('puts "菜单", "keep"');
+  const map = decode(fs.readFileSync(path.join(output, "game/Data/Map001" + extension)));
+  expect(
+    array(map)
+      .slice(0, -1)
+      .map((node) => text(array(field(node, "@parameters")!)[0]!)),
+  ).toEqual([...event.dst.split("\n"), 'puts "keep event"']);
   const unchanged = path.join(temp.path, "unchanged");
-  await new GameFormat(create_rpgmaker_rgss_adapter(), new NativeFs()).write_to_path([], {
+  await new GameFormat(
+    new GameDirectoryOperations(),
+    create_rpgmaker_rgss_adapter(),
+    new NativeFs(),
+  ).write_to_path([], {
     source_files: [{ path: "game.zip", file_type: "RPGMAKER_RGSS" }],
     asset_reader: () => Buffer.from(prepared.content),
     paths: { translated_path: unchanged, bilingual_path: unchanged },
@@ -135,7 +168,11 @@ it.each([false, true])(
     const content = await zip.generateAsync({ type: "uint8array" });
     const read = vi.spyOn(source, "read_rgss_game");
     try {
-      const format = new GameFormat(create_rpgmaker_rgss_adapter(), new NativeFs());
+      const format = new GameFormat(
+        new GameDirectoryOperations(),
+        create_rpgmaker_rgss_adapter(),
+        new NativeFs(),
+      );
       const parsed = await format.read_from_stream(content, "game.zip");
       expect(read).toHaveBeenCalledTimes(1);
       if (invalid) {

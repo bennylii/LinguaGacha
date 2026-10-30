@@ -1,4 +1,6 @@
+import { resolve_app_resources } from "../native/app-resources";
 import { resolve_workspace_runtime_directory } from "../native/workspace-runtime";
+import { configure_app_proxy } from "../native/app-proxy";
 import { app, BrowserWindow, session, shell } from "electron";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -36,7 +38,7 @@ export interface GuiEntryOptions {
 const PROXY_BYPASS_RULES = "localhost,127.0.0.1,[::1]"; // 本机回环固定直连，与后端路由保持一致
 
 /**
- * 启动 Electron GUI 入口；模块导入本身不注册 Electron 事件，便于顶层 index 分发 CLI。
+ * 启动 Electron GUI 入口。模块导入本身不注册 Electron 事件，便于顶层 index 分发 CLI。
  */
 export function run_gui_entry(options: GuiEntryOptions): void {
   const desktop_bundle_dir = options.desktopBundleDir;
@@ -66,27 +68,22 @@ export function run_gui_entry(options: GuiEntryOptions): void {
   }
 
   const app_root = app.isPackaged ? path.dirname(process.execPath) : process.cwd();
-  const builtin_root = path.join(app.getAppPath(), "builtin"); // app.asar 内当前版本只读资产根
+  const app_resources = resolve_app_resources({
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    projectRoot: app.getAppPath(),
+  });
   const workspace_runtime_directory = resolve_workspace_runtime_directory({
     packaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     projectRoot: process.cwd(),
   });
-  const pdf_host = create_pdf_host({
-    stylesPath: path.join(
-      app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), "build/resources"),
-      "pdf-print.css",
-    ),
-    fontsDirectory: path.join(
-      app.getAppPath(),
-      app.isPackaged ? "build/dist/fonts" : "public/fonts",
-    ),
-  });
+  const pdf_host = create_pdf_host(app_resources);
   const remote_login_window_host = create_remote_login_window_host();
   const backend_runtime = new BackendRuntimeClient({
     workerEntryUrl: options.backendRuntimeWorkerEntryUrl,
     appRoot: app_root,
-    builtinRoot: builtin_root,
+    builtinRoot: app_resources.builtinRoot,
     workspaceRuntimeDirectory: workspace_runtime_directory,
     pdfHost: pdf_host,
     imageHost: prepare_agent_image,
@@ -120,7 +117,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
       void quit_app_after_backend_shutdown(1);
     },
   });
-  // 窗口诊断失败不能形成新的 unhandled rejection；fatal 路径另行等待并兜底 stderr。
+  // 窗口诊断失败不能形成新的 unhandled rejection。fatal 路径另行等待并兜底 stderr。
   const record_host_diagnostic: BackendRuntimeClient["recordHostDiagnostic"] = async (args) => {
     try {
       await backend_runtime.recordHostDiagnostic(args);
@@ -283,7 +280,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     getBackendRuntimeClient: () => backend_runtime,
   });
 
-  // 所有窗口关闭时进入应用退出；日志窗口也要一起收掉，避免诊断窗口单独存活。
+  // 所有窗口关闭时进入应用退出。日志窗口也要一起收掉，避免诊断窗口单独存活。
   app.on("window-all-closed", () => {
     win = null;
     log_window_host?.close();
@@ -299,6 +296,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
   // Electron ready 后才能启动 Backend 和创建窗口，保证 app API 与原生资源都已可用。
   app.whenReady().then(async () => {
     try {
+      await configure_app_proxy();
       const backend_start_result = await backend_runtime.start();
       backend_ready = backend_start_result;
       // 后端出站请求已按设置逐次解析；此处让 Chromium 自身（更新检查与下载）使用同一设置。

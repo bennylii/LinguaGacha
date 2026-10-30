@@ -33,12 +33,13 @@ it("按顺序建库和写回，失败原子回滚，重试及重复打开保留�
       },
     },
   ];
-  expect(() => run_project_database_migrations(db, migrations)).toThrow(failure);
+  expect(() => run_project_database_migrations(db, "1.0.0", migrations)).toThrow(failure);
   expect(db.prepare("SELECT name FROM records").all()).toEqual([{ name: "first" }]);
   expect(read_meta(db, PROJECT_DATABASE_APPLIED_WRITEBACK_MIGRATIONS_META_KEY)).toEqual(["first"]);
+  expect(read_meta(db, "target_app_version")).toBe("1.0.0");
   fail = false;
-  run_project_database_migrations(db, migrations);
-  run_project_database_migrations(db, migrations);
+  run_project_database_migrations(db, "1.0.0", migrations);
+  run_project_database_migrations(db, "1.0.0", migrations);
   expect(db.prepare("SELECT name FROM records").all()).toEqual([
     { name: "first" },
     { name: "second" },
@@ -47,6 +48,62 @@ it("按顺序建库和写回，失败原子回滚，重试及重复打开保留�
     "first",
     "second",
   ]);
+});
+
+it("版本维护失败回滚本项数据和迁移标记，保留前项已提交事实", () => {
+  using db = new DatabaseSync(":memory:");
+  db.exec("CREATE TABLE records (name TEXT)");
+  expect(() =>
+    run_project_database_migrations(db, "2.0.0", [
+      {
+        id: "first",
+        run: (db) => {
+          db.exec("INSERT INTO records VALUES ('first')");
+        },
+      },
+      {
+        id: "second",
+        run: (db) => {
+          db.exec(`
+        INSERT INTO records VALUES ('second');
+        UPDATE meta SET value = '"1.0.0"' WHERE key = 'target_app_version';
+        CREATE TRIGGER reject_version BEFORE INSERT ON meta WHEN NEW.key = 'target_app_version'
+          BEGIN SELECT RAISE(ABORT, 'version write failed'); END;
+      `);
+        },
+      },
+    ]),
+  ).toThrow("version write failed");
+  expect(db.prepare("SELECT name FROM records").all()).toEqual([{ name: "first" }]);
+  expect(read_meta(db, "target_app_version")).toBe("2.0.0");
+  expect(read_meta(db, PROJECT_DATABASE_APPLIED_WRITEBACK_MIGRATIONS_META_KEY)).toEqual(["first"]);
+});
+
+it("无数据迁移仍升级版本，结构事务失败时版本与结构一起回滚", () => {
+  using db = new DatabaseSync(":memory:");
+  run_project_database_migrations(db, "1.0.0", []);
+  db.exec(`
+    ALTER TABLE assets DROP COLUMN sort_order;
+    CREATE TRIGGER reject_version BEFORE INSERT ON meta WHEN NEW.key = 'target_app_version'
+      BEGIN SELECT RAISE(ABORT, 'version write failed'); END;
+  `);
+  expect(() => run_project_database_migrations(db, "2.0.0", [])).toThrow("version write failed");
+  expect(read_meta(db, "target_app_version")).toBe("1.0.0");
+  expect(
+    db
+      .prepare("PRAGMA table_info(assets)")
+      .all()
+      .some((row) => row.name === "sort_order"),
+  ).toBe(false);
+  db.exec("DROP TRIGGER reject_version");
+  run_project_database_migrations(db, "2.0.0", []);
+  expect(read_meta(db, "target_app_version")).toBe("2.0.0");
+  expect(
+    db
+      .prepare("PRAGMA table_info(assets)")
+      .all()
+      .some((row) => row.name === "sort_order"),
+  ).toBe(true);
 });
 
 it.each([false, true])("真实旧工程完整升级及早期步骤已完成：%s", (partial) => {
@@ -100,6 +157,20 @@ it.each([false, true])("真实旧工程完整升级及早期步骤已完成：%s
     JSON.stringify({ src: "# 旧正文", file_path: "old.md", file_type: "MD", row: 0 }),
   );
   db.prepare("INSERT INTO items VALUES (3, ?)").run("broken-json");
+  db.prepare("INSERT INTO assets VALUES (3, ?, ?, ?, ?)").run(
+    "script.rpy",
+    compressed,
+    original.length,
+    compressed.length,
+  );
+  db.prepare("INSERT INTO items VALUES (4, ?)").run(
+    JSON.stringify({
+      file_path: "script.rpy",
+      file_type: "RENPY",
+      dst: "译文",
+      extra_field: { renpy: { v: 1 } },
+    }),
+  );
   const early_ids = [
     "project-rule-storage",
     "quality-rule-entry-identity",
@@ -112,7 +183,7 @@ it.each([false, true])("真实旧工程完整升级及早期步骤已完成：%s
       JSON.stringify(early_ids),
     );
 
-  run_project_database_migrations(db);
+  run_project_database_migrations(db, "1.0.0");
 
   const rows = db.prepare("SELECT data FROM items ORDER BY id").all();
   expect(JSON.parse(String(rows[0]!["data"]))).toMatchObject({
@@ -133,14 +204,35 @@ it.each([false, true])("真实旧工程完整升级及早期步骤已完成：%s
     db.prepare("SELECT file_type FROM assets WHERE path = ?").get("old.md")?.["file_type"],
   ).toBe("MD");
   expect(rows[2]!["data"]).toBe("broken-json");
+  expect(
+    db.prepare("SELECT file_type FROM assets WHERE path = 'script.rpy'").get()?.["file_type"],
+  ).toBe("RENPY_RPY");
+  expect(JSON.parse(String(rows[3]!["data"]))).toMatchObject({
+    dst: "译文",
+    extra_field: { renpy_rpy: { v: 1 } },
+  });
   expect(read_meta(db, PROJECT_DATABASE_APPLIED_WRITEBACK_MIGRATIONS_META_KEY)).toEqual([
     ...early_ids,
     "project-item-public-contract",
     "asset-file-type",
+    "renpy-rpy-file-type",
   ]);
   expect(db.prepare("SELECT sort_order FROM assets").get()?.["sort_order"]).toBe(0);
   const meta = db.prepare("SELECT * FROM meta ORDER BY key").all();
-  run_project_database_migrations(db);
+  run_project_database_migrations(db, "1.0.0");
   expect(db.prepare("SELECT data FROM items ORDER BY id").all()).toEqual(rows);
   expect(db.prepare("SELECT * FROM meta ORDER BY key").all()).toEqual(meta);
+});
+
+it("空库完成迁移后新增的原生 Ren’Py 资产在重新打开时保留身份", () => {
+  using db = new DatabaseSync(":memory:");
+  run_project_database_migrations(db, "1.0.0");
+  db.exec(
+    "INSERT INTO assets (path, file_type, data, original_size, compressed_size) VALUES ('game.renpy', 'RENPY', X'', 0, 0)",
+  );
+  const item = { file_path: "game.renpy", extra_field: { renpy: { key: "say:1" } } };
+  db.prepare("INSERT INTO items(data) VALUES (?)").run(JSON.stringify(item));
+  run_project_database_migrations(db, "1.0.0");
+  expect(db.prepare("SELECT file_type FROM assets").get()?.["file_type"]).toBe("RENPY");
+  expect(JSON.parse(String(db.prepare("SELECT data FROM items").get()?.["data"]))).toEqual(item);
 });

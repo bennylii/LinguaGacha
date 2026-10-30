@@ -107,7 +107,7 @@ async function create_fixture(options: {
   translations?: ReadonlyMap<number, string>;
   target_language?: "ZH" | "EN";
 }): Promise<Fixture> {
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   const lg_path = path.join(temp_dir, `${options.name ?? "demo"}.lg`);
   await database.create_project(lg_path, "demo");
   const session_state = new ProjectSessionState();
@@ -264,7 +264,7 @@ async function create_wenku_service(options: {
   lg_path: string;
   snapshots: RemoteSnapshotStore;
 }> {
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   const lg_path = path.join(temp_dir, `wenku-${Date.now()}.lg`);
   await database.create_project(lg_path, "wenku");
   const session_state = new ProjectSessionState();
@@ -338,7 +338,7 @@ async function create_wenku_epub_fixture(options: {
   client: { download: ReturnType<typeof vi.fn> };
   lg_path: string;
 }> {
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   const lg_path = path.join(temp_dir, "wenku-epub.lg");
   await database.create_project(lg_path, "demo");
   const session_state = new ProjectSessionState();

@@ -69,42 +69,33 @@ export class PromptBuilder {
   }
 
   /**
-   * 生成普通翻译提示词；system 放稳定指令，user 放本次输入和术语
+   * system 放稳定指令。user 放本次输入、参考文本和术语。
    */
   public generate_prompt(
     items: TranslationRequestItem[],
     mode: TranslationPromptMode,
     samples: string[],
     precedings: TextTaskItemRecord[],
+    followings: TextTaskItemRecord[],
   ): PromptBuildResult {
-    const messages: LLMMessage[] = [];
-    const console_log: string[] = [];
     const instruction_text = this.build_main(mode);
-    const user_parts: string[] = [];
-
-    const preceding = this.build_preceding(precedings);
-    if (preceding !== "") {
-      user_parts.push(preceding);
-      console_log.push(preceding);
-    }
-
-    const glossary = this.build_glossary(" -> ");
-    if (glossary !== "") {
-      user_parts.push(glossary);
-      console_log.push(glossary);
-    }
-
-    const control_samples = this.build_control_characters_samples(instruction_text, samples);
-    if (control_samples !== "") {
-      user_parts.push(control_samples);
-      console_log.push(control_samples);
-    }
-
-    user_parts.push(this.build_inputs(items, mode));
-
-    messages.push({ role: "system", content: instruction_text });
-    messages.push({ role: "user", content: user_parts.join("\n\n") });
-    return { messages, console_log };
+    // 日志回显参考段。待翻译输入由日志 pairs 单独承载。
+    const console_log = [
+      this.build_context(precedings, "app.prompt.builder_preceding_context"),
+      this.build_context(followings, "app.prompt.builder_following_context"),
+      this.build_glossary(" -> "),
+      this.build_control_characters_samples(samples),
+    ].filter((section) => section !== "");
+    return {
+      messages: [
+        { role: "system", content: instruction_text },
+        {
+          role: "user",
+          content: [...console_log, this.build_inputs(items, mode)].join("\n\n"),
+        },
+      ],
+      console_log,
+    };
   }
 
   /** 构建 SakuraLLM 批量正文使用的纯文本提示词。 */
@@ -157,18 +148,18 @@ export class PromptBuilder {
   }
 
   /**
-   * 参考上文只放 user prompt，避免系统指令随上下文变化
+   * 参考上下文只放 user prompt，避免系统指令随上下文变化
    */
-  private build_preceding(precedings: TextTaskItemRecord[]): string {
-    if (precedings.length === 0) {
+  private build_context(items: TextTaskItemRecord[], title: LocaleKey): string {
+    if (items.length === 0) {
       return "";
     }
-    const lines = precedings.map((item) =>
+    const lines = items.map((item) =>
       String(item.src ?? "")
         .trim()
         .replaceAll("\n", "\\n"),
     );
-    return `${this.t("app.prompt.builder_preceding_context")}\n${lines.join("\n")}`;
+    return `${this.t(title)}\n${lines.join("\n")}`;
   }
 
   /**
@@ -187,22 +178,11 @@ export class PromptBuilder {
   }
 
   /**
-   * 控制字符示例只在系统提示词明确要求控制符时加入
+   * 示例表头自带保留要求，有示例就注入
    */
-  private build_control_characters_samples(main: string, samples: string[]): string {
+  private build_control_characters_samples(samples: string[]): string {
     const unique_samples = [...new Set(samples.map((sample) => sample.trim()).filter(Boolean))];
     if (unique_samples.length === 0) {
-      return "";
-    }
-    const main_lower = main.toLowerCase();
-    if (
-      !(
-        main.includes("控制符") ||
-        main.includes("控制字符") ||
-        main_lower.includes("control code") ||
-        main_lower.includes("control character")
-      )
-    ) {
       return "";
     }
     return `${this.t("app.prompt.builder_control_character_samples")}\n${unique_samples.join(", ")}`;
