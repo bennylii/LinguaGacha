@@ -207,7 +207,7 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
           on_continue={props.on_continue}
         />
       ) : null}
-      {auto_resume !== null && user.status === "error" ? (
+      {auto_resume !== null ? (
         <AgentAutoResumeEntry
           auto_resume={auto_resume}
           disabled={props.continue_disabled}
@@ -432,7 +432,10 @@ function AgentContinueEntry(props: {
   );
 }
 
-/** 自动重试等待展示剩余秒数并允许取消；重试开始后后端清除快照，本行随之消失。 */
+/**
+ * 自动重试状态行：等待阶段展示倒计时并允许取消，
+ * 续跑阶段只展示「当前未完成」的持续状态，倒计时与取消入口随之消失。
+ */
 function AgentAutoResumeEntry(props: {
   auto_resume: AgentAutoResumeSnapshot;
   disabled: boolean;
@@ -440,8 +443,11 @@ function AgentAutoResumeEntry(props: {
   t: Translate;
 }): JSX.Element {
   const retry_at = props.auto_resume.retryAt;
-  const [remaining, set_remaining] = useState(() => read_auto_resume_seconds(retry_at));
+  const [remaining, set_remaining] = useState(() =>
+    retry_at === null ? 0 : read_auto_resume_seconds(retry_at),
+  );
   useEffect(() => {
+    if (retry_at === null) return;
     set_remaining(read_auto_resume_seconds(retry_at));
     const timer = window.setInterval(() => {
       set_remaining(read_auto_resume_seconds(retry_at));
@@ -449,6 +455,15 @@ function AgentAutoResumeEntry(props: {
     return () => window.clearInterval(timer);
   }, [retry_at]);
   const attempt = props.auto_resume.attempt.toString();
+  if (props.auto_resume.phase === "continuing") {
+    return (
+      <div className="agent-auto-resume-entry" role="status">
+        <span className="agent-auto-resume-entry__label">
+          {props.t("agent_page.auto_resume.continuing", { attempt })}
+        </span>
+      </div>
+    );
+  }
   const label =
     props.auto_resume.maxAttempts === null
       ? props.t("agent_page.auto_resume.waiting", {

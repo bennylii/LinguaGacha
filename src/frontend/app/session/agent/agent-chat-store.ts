@@ -352,6 +352,7 @@ export class AgentChatStore {
       next.autoResume?.roundId === this.controls.autoResume?.roundId &&
       next.autoResume?.attempt === this.controls.autoResume?.attempt &&
       next.autoResume?.maxAttempts === this.controls.autoResume?.maxAttempts &&
+      next.autoResume?.phase === this.controls.autoResume?.phase &&
       next.autoResume?.retryAt === this.controls.autoResume?.retryAt &&
       next.autoContinue?.roundId === this.controls.autoContinue?.roundId &&
       next.autoContinue?.attempt === this.controls.autoContinue?.attempt &&
@@ -1023,13 +1024,17 @@ function normalize_token_speed(value: unknown): AgentTokenSpeedSnapshot | undefi
     : undefined;
 }
 
-/** 自动重试状态只存在于等待期，必须带倒计时；重试开始后后端发布空快照。 */
+/**
+ * 自动重试状态覆盖等待与续跑两个阶段：`waiting` 必须带倒计时，
+ * `continuing` 表示隐藏的「继续」输入已受理且 `retryAt` 为空；非法组合整帧拒绝。
+ */
 function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null | undefined {
   if (value === null) return null;
   if (!is_json_record(value)) return undefined;
   const round_id = value["roundId"];
   const attempt = value["attempt"];
   const max_attempts = value["maxAttempts"];
+  const phase = value["phase"];
   const retry_at = value["retryAt"];
   if (
     typeof round_id !== "string" ||
@@ -1041,12 +1046,21 @@ function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null |
       (typeof max_attempts !== "number" ||
         !Number.isSafeInteger(max_attempts) ||
         max_attempts < attempt)) ||
-    typeof retry_at !== "number" ||
-    !Number.isSafeInteger(retry_at) ||
-    retry_at < 0
+    (phase !== "waiting" && phase !== "continuing") ||
+    (phase === "waiting" &&
+      (typeof retry_at !== "number" || !Number.isSafeInteger(retry_at) || retry_at < 0)) ||
+    (phase === "continuing" && retry_at !== null)
   )
     return undefined;
-  return { roundId: round_id, attempt, maxAttempts: max_attempts, retryAt: retry_at };
+  // 相位校验已保证 waiting 必有合法数值、continuing 必为空，这里收窄 JsonValue 联合。
+  const narrowed_retry_at = typeof retry_at === "number" ? retry_at : null;
+  return {
+    roundId: round_id,
+    attempt,
+    maxAttempts: max_attempts,
+    phase,
+    retryAt: narrowed_retry_at,
+  };
 }
 
 /** 自动继续状态只接受轮次身份、正次与两个已知相位，非法事件由 `revision` 缺口恢复。 */

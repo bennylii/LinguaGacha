@@ -221,12 +221,17 @@ export type AgentTokenSpeedSnapshot =
   | (JsonRecord & { roundId: string; tokensPerSecond: number })
   | null;
 
-/** 可重试失败后的自动重试等待；重试开始后快照清除，轮次只按运行中展示。 */
+/**
+ * 可重试失败后的自动重试状态，覆盖等待与续跑两个阶段。
+ * `waiting` 表示尚未发出续跑请求，`retryAt` 为后端时钟绝对毫秒；
+ * `continuing` 表示隐藏的「继续」输入已受理，`retryAt` 必须为空。
+ */
 export type AgentAutoResumeSnapshot = JsonRecord & {
   roundId: string;
   attempt: number; // 从 1 开始
   maxAttempts: number | null; // 空表示不限次数
-  retryAt: number; // 后端时钟绝对毫秒
+  phase: "waiting" | "continuing";
+  retryAt: number | null; // 后端时钟绝对毫秒，仅 `waiting` 阶段有效
 };
 
 /** 轮次成功结束后的完成度判定状态；`judging` 表示正在判定，`continuing` 表示判定后已发出继续。 */

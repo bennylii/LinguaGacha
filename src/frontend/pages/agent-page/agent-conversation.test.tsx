@@ -897,6 +897,7 @@ describe("AgentConversation", () => {
         roundId: "user-error",
         attempt: 1,
         maxAttempts: 5,
+        phase: "waiting",
         retryAt: Date.now() + 5_000,
       },
     });

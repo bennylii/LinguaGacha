@@ -122,13 +122,15 @@ export const en_us_agent_page = {
     follow_latest: "Follow latest",
   },
   auto_resume: {
-    waiting: "Auto retry attempt {attempt} · starts in {seconds}s",
-    waiting_limited: "Auto retry {attempt}/{max_attempts} · starts in {seconds}s",
-    cancel: "Cancel auto retry",
+    waiting: "Not finished yet, continuing automatically in {seconds}s (attempt {attempt})",
+    waiting_limited:
+      "Not finished yet, continuing automatically in {seconds}s ({attempt}/{max_attempts})",
+    continuing: "Not finished yet, continuing automatically (attempt {attempt})",
+    cancel: "Cancel auto continue",
   },
   auto_continue: {
     judging: "Checking whether the task is finished…",
-    continuing: "Task not finished, continued automatically (attempt {attempt})",
+    continuing: "Not finished yet, continuing automatically (attempt {attempt})",
   },
   editing: {
     user: "Editing your message",

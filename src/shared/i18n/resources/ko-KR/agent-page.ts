@@ -124,13 +124,14 @@ export const ko_kr_agent_page = {
     follow_latest: "최신 내용 따라가기",
   },
   auto_resume: {
-    waiting: "자동 재시도 {attempt}회 · {seconds}초 후 시작",
-    waiting_limited: "자동 재시도 {attempt}/{max_attempts} · {seconds}초 후 시작",
-    cancel: "자동 재시도 취소",
+    waiting: "완료되지 않아 {seconds}초 후 자동으로 계속합니다({attempt}회째)",
+    waiting_limited: "완료되지 않아 {seconds}초 후 자동으로 계속합니다({attempt}/{max_attempts})",
+    continuing: "완료되지 않아 자동으로 계속 진행 중입니다({attempt}회째)",
+    cancel: "자동 계속 취소",
   },
   auto_continue: {
     judging: "작업 완료 여부를 확인하는 중…",
-    continuing: "작업이 완료되지 않아 자동으로 이어서 진행했습니다 ({attempt}회)",
+    continuing: "완료되지 않아 자동으로 계속 진행 중입니다({attempt}회째)",
   },
   editing: {
     user: "내 메시지 수정 중",

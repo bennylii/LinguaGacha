@@ -356,7 +356,13 @@ describe("AgentChatStore", () => {
   });
 
   it("自动续跑等待通过快照和增量事件同步，拒绝非法帧", async () => {
-    const resuming = { roundId: "round-1", attempt: 1, maxAttempts: 5, retryAt: 1_000 };
+    const resuming = {
+      roundId: "round-1",
+      attempt: 1,
+      maxAttempts: 5,
+      phase: "waiting",
+      retryAt: 1_000,
+    } as const;
     desktop_api_mocks.api_get.mockResolvedValueOnce(agent_snapshot({ autoResume: resuming }));
     let latest!: ReturnType<typeof useAgentChat>;
     await render_probe(() => {
@@ -373,7 +379,15 @@ describe("AgentChatStore", () => {
     });
     expect(latest.autoResume).toMatchObject({ attempt: 2, retryAt: 6_000 });
 
-    // 重试开始后只发布空快照。
+    // 重试开始后快照切换为续跑相位，不再用空快照表示运行中。
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { ...resuming, attempt: 2, phase: "continuing", retryAt: null },
+      });
+    });
+    expect(latest.autoResume).toMatchObject({ attempt: 2, phase: "continuing", retryAt: null });
+
     await act(async () => {
       event_source.change({ type: "auto_resume", autoResume: null });
     });
@@ -384,17 +398,47 @@ describe("AgentChatStore", () => {
     });
     expect(latest.autoResume).toEqual(resuming);
 
-    // 非法帧整批丢弃，保留最近一次合法值；重试执行期不再用空 retryAt 表示。
+    // 非法帧整批丢弃，保留最近一次合法值；相位与 retryAt 组合必须一致。
     await act(async () => {
       event_source.change({
         type: "auto_resume",
-        autoResume: { roundId: "", attempt: 0, maxAttempts: 0, retryAt: -1 },
+        autoResume: { roundId: "", attempt: 0, maxAttempts: 0, phase: "waiting", retryAt: -1 },
       });
     });
     await act(async () => {
       event_source.change({
         type: "auto_resume",
-        autoResume: { roundId: "round-1", attempt: 2, maxAttempts: null, retryAt: null },
+        autoResume: {
+          roundId: "round-1",
+          attempt: 2,
+          maxAttempts: null,
+          phase: "unknown",
+          retryAt: null,
+        },
+      });
+    });
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: {
+          roundId: "round-1",
+          attempt: 2,
+          maxAttempts: null,
+          phase: "continuing",
+          retryAt: 1_000,
+        },
+      });
+    });
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: {
+          roundId: "round-1",
+          attempt: 2,
+          maxAttempts: null,
+          phase: "waiting",
+          retryAt: null,
+        },
       });
     });
     expect(latest.autoResume).toEqual(resuming);
@@ -442,7 +486,13 @@ describe("AgentChatStore", () => {
     desktop_api_mocks.api_get.mockResolvedValueOnce(
       agent_snapshot({
         state: "idle",
-        autoResume: { roundId: "round-1", attempt: 1, maxAttempts: null, retryAt: 1_000 },
+        autoResume: {
+          roundId: "round-1",
+          attempt: 1,
+          maxAttempts: null,
+          phase: "waiting",
+          retryAt: 1_000,
+        },
       }),
     );
     desktop_api_mocks.api_fetch.mockResolvedValueOnce({ revision: 0, status: "accepted" });

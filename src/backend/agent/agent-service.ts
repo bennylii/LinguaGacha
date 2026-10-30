@@ -1092,6 +1092,7 @@ export class AgentService {
       roundId: round_id,
       attempt,
       maxAttempts: max_attempts > 0 ? max_attempts : null,
+      phase: "waiting",
       retryAt: Date.now() + delay,
     };
     this.auto_resume_timer = setTimeout(() => {
@@ -1161,7 +1162,17 @@ export class AgentService {
       throw error;
     }
     try {
-      // 重试一开始就退出等待状态：队列恢复与轮次回到运行合并为一次发布。
+      // 重试一开始就进入续跑状态：快照保留并切换相位，队列恢复与轮次回到运行合并为一次发布。
+      this.auto_resume_snapshot =
+        waiting === null
+          ? null
+          : {
+              roundId: waiting.roundId,
+              attempt: waiting.attempt,
+              maxAttempts: waiting.maxAttempts,
+              phase: "continuing",
+              retryAt: null,
+            };
       await this.accept(execution, () =>
         this.merge_publish(async () => {
           await chat.change_queue((queue) => queue.resume());
@@ -1169,7 +1180,7 @@ export class AgentService {
         }),
       );
     } catch (error) {
-      // 快照已由 begin_execution 静默清除；受理失败时只保留本次结算后的轮次状态。
+      // 受理失败时快照由 begin_execution 清除，只保留本次结算后的轮次状态。
       this.cancel_auto_resume();
       throw error;
     }

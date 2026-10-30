@@ -323,7 +323,7 @@ describe("AgentTimeline", () => {
       [user_entry("user-error", "最新任务", "error", 0, 2_000)],
       0,
       [],
-      { roundId: "user-error", attempt: 2, maxAttempts: 5, retryAt: 5_000 },
+      { roundId: "user-error", attempt: 2, maxAttempts: 5, phase: "waiting", retryAt: 5_000 },
     );
 
     const waiting = view.querySelector(".agent-auto-resume-entry");
@@ -344,7 +344,7 @@ describe("AgentTimeline", () => {
       [user_entry("user-error", "最新任务", "error", 0, 2_000)],
       0,
       [],
-      { roundId: "user-error", attempt: 7, maxAttempts: null, retryAt: 5_000 },
+      { roundId: "user-error", attempt: 7, maxAttempts: null, phase: "waiting", retryAt: 5_000 },
     );
 
     expect(view.querySelector(".agent-auto-resume-entry")?.textContent).toContain(
@@ -352,7 +352,7 @@ describe("AgentTimeline", () => {
     );
   });
 
-  it("自动重试运行中不显示失败行与重试行", async () => {
+  it("自动重试续跑中显示当前未完成，不显示失败行与取消入口", async () => {
     const view = await render_timeline(
       [
         user_entry("user-error", "最新任务", "running", 0, null, [], {
@@ -362,12 +362,15 @@ describe("AgentTimeline", () => {
       ],
       0,
       [],
-      { roundId: "user-error", attempt: 3, maxAttempts: null, retryAt: 5_000 },
+      { roundId: "user-error", attempt: 3, maxAttempts: null, phase: "continuing", retryAt: null },
     );
 
-    // 即使数据里残留失败与等待快照，运行中的轮次也只显示处理中。
+    // 续跑中轮次按运行中展示，保留「当前未完成」状态行，失败行与取消入口消失。
     expect(view.querySelector(".agent-continue-entry")).toBeNull();
-    expect(view.querySelector(".agent-auto-resume-entry")).toBeNull();
+    expect(view.querySelector(".agent-auto-resume-entry")?.textContent).toContain(
+      "agent_page.auto_resume.continuing:3",
+    );
+    expect(view.querySelector(".agent-auto-resume-entry button")).toBeNull();
     expect(view.querySelector(".agent-round-footer")?.textContent).toContain(
       "agent_page.round.running",
     );
@@ -381,7 +384,7 @@ describe("AgentTimeline", () => {
       ],
       0,
       [],
-      { roundId: "user-latest", attempt: 1, maxAttempts: 5, retryAt: 5_000 },
+      { roundId: "user-latest", attempt: 1, maxAttempts: 5, phase: "waiting", retryAt: 5_000 },
     );
     expect(view.querySelectorAll(".agent-auto-resume-entry")).toHaveLength(1);
   });

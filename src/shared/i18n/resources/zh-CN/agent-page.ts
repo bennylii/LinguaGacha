@@ -122,13 +122,14 @@ export const zh_cn_agent_page = {
     follow_latest: "跟随最新",
   },
   auto_resume: {
-    waiting: "自动重试第 {attempt} 次 · {seconds} 秒后开始",
-    waiting_limited: "自动重试 {attempt}/{max_attempts} · {seconds} 秒后开始",
-    cancel: "取消自动重试",
+    waiting: "当前未完成，将在 {seconds} 秒后自动继续（第 {attempt} 次）",
+    waiting_limited: "当前未完成，将在 {seconds} 秒后自动继续（{attempt}/{max_attempts}）",
+    continuing: "当前未完成，正在自动继续（第 {attempt} 次）",
+    cancel: "取消自动继续",
   },
   auto_continue: {
     judging: "正在检查任务是否完成…",
-    continuing: "任务未完成，已自动继续（第 {attempt} 次）",
+    continuing: "当前未完成，正在自动继续（第 {attempt} 次）",
   },
   editing: { user: "正在修改你的消息", assistant: "正在修改模型回复", queue: "正在修改排队消息" },
   queue: {

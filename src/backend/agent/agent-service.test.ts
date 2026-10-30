@@ -3327,6 +3327,7 @@ describe("AgentService", () => {
     expect(service.get_snapshot().autoResume).toMatchObject({
       attempt: 1,
       maxAttempts: null,
+      phase: "waiting",
     });
     expect(service.get_snapshot().entries[0]).toMatchObject({
       kind: "user_message",
@@ -3445,8 +3446,11 @@ describe("AgentService", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await vi.waitFor(() => expect(fake_agent_state.release_pending).not.toBeNull());
 
-    // 重试一开始就退出等待：快照清除，失败原因清空，轮次只按运行中展示。
-    expect(service.get_snapshot()).toMatchObject({ state: "running", autoResume: null });
+    // 重试开始后快照切换为续跑相位，轮次按运行中展示、失败原因清空。
+    expect(service.get_snapshot()).toMatchObject({
+      state: "running",
+      autoResume: { phase: "continuing" },
+    });
     expect(service.get_snapshot().entries[0]).toMatchObject({
       kind: "user_message",
       status: "running",
@@ -3492,7 +3496,10 @@ describe("AgentService", () => {
     fake_agent_state.mode = "pending";
     await vi.advanceTimersByTimeAsync(5_000);
     await vi.waitFor(() => expect(fake_agent_state.release_pending).not.toBeNull());
-    expect(service.get_snapshot()).toMatchObject({ state: "running", autoResume: null });
+    expect(service.get_snapshot()).toMatchObject({
+      state: "running",
+      autoResume: { phase: "continuing" },
+    });
 
     await service.stop();
     await wait_for_idle(service);
@@ -3517,11 +3524,15 @@ describe("AgentService", () => {
     await advance_to_auto_resume(service);
     expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1, maxAttempts: null });
 
-    // 第一次重试挂起：界面只应看到运行中。
+    // 第一次重试挂起：界面按续跑状态展示，轮次运行中且失败原因清空。
     fake_agent_state.mode = "pending_then_error";
     await vi.advanceTimersByTimeAsync(60_000);
     await vi.waitFor(() => expect(fake_agent_state.release_pending).not.toBeNull());
-    expect(service.get_snapshot()).toMatchObject({ state: "running", autoResume: null });
+    expect(service.get_snapshot()).toMatchObject({
+      state: "running",
+      autoResume: { attempt: 1, phase: "continuing" },
+    });
+    expect(service.get_snapshot().autoResume?.retryAt).toBeNull();
     expect(service.get_snapshot().entries[0]).toMatchObject({ status: "running", failure: null });
 
     // 释放后再次以 503 失败，重新进入第 2 次等待，间隔翻倍到 120 秒。

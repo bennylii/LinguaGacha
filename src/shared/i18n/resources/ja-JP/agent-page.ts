@@ -124,13 +124,14 @@ export const ja_jp_agent_page = {
     follow_latest: "最新を追従",
   },
   auto_resume: {
-    waiting: "自動再試行 {attempt} 回目 · {seconds} 秒後に開始",
-    waiting_limited: "自動再試行 {attempt}/{max_attempts} · {seconds} 秒後に開始",
-    cancel: "自動再試行をキャンセル",
+    waiting: "未完了のため {seconds} 秒後に自動続行します（{attempt} 回目）",
+    waiting_limited: "未完了のため {seconds} 秒後に自動続行します（{attempt}/{max_attempts}）",
+    continuing: "未完了のため自動続行中です（{attempt} 回目）",
+    cancel: "自動続行をキャンセル",
   },
   auto_continue: {
     judging: "タスクの完了を確認しています…",
-    continuing: "タスクが未完了のため自動続行しました（{attempt} 回目）",
+    continuing: "未完了のため自動続行中です（{attempt} 回目）",
   },
   editing: {
     user: "メッセージを編集中",

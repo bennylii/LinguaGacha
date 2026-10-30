@@ -122,13 +122,15 @@ export const de_de_agent_page = {
     follow_latest: "Neueste verfolgen",
   },
   auto_resume: {
-    waiting: "Automatischer Neuversuch {attempt} · startet in {seconds}s",
-    waiting_limited: "Automatischer Neuversuch {attempt}/{max_attempts} · startet in {seconds}s",
-    cancel: "Automatischen Neuversuch abbrechen",
+    waiting: "Noch nicht abgeschlossen, automatische Fortsetzung in {seconds}s (Versuch {attempt})",
+    waiting_limited:
+      "Noch nicht abgeschlossen, automatische Fortsetzung in {seconds}s ({attempt}/{max_attempts})",
+    continuing: "Noch nicht abgeschlossen, automatische Fortsetzung läuft (Versuch {attempt})",
+    cancel: "Automatische Fortsetzung abbrechen",
   },
   auto_continue: {
     judging: "Es wird geprüft, ob die Aufgabe abgeschlossen ist…",
-    continuing: "Aufgabe nicht abgeschlossen, automatisch fortgesetzt (Versuch {attempt})",
+    continuing: "Noch nicht abgeschlossen, automatische Fortsetzung läuft (Versuch {attempt})",
   },
   editing: {
     user: "Deine Nachricht wird bearbeitet",
