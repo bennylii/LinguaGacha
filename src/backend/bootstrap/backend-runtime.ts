@@ -11,6 +11,9 @@ import type {
   BackendRuntimeResult,
   BackendRuntimeWorkerMessage,
 } from "../../shared/backend-runtime";
+import { create_shutdown_trace, type ShutdownTrace } from "../../native/shutdown-trace";
+import { SHUTDOWN_STAGE_TIMEOUT_MS, SHUTDOWN_TOTAL_TIMEOUT_MS } from "../../shared/shutdown-timing";
+import { with_timeout } from "../../shared/utils/timeout";
 import { t_main_log } from "../log/log-text";
 import {
   build_worker_threads_backend_worker_execution_from_desktop_bundle_dir,
@@ -40,6 +43,8 @@ export async function run_backend_runtime(args: {
   workspaceRuntimeDirectory: string;
   port: BackendRuntimePort;
 }): Promise<void> {
+  // 日志目录在 start 完成后才确定；在此之前退出追踪只走 stderr。
+  let trace: ShutdownTrace = create_shutdown_trace({ directory: null, scope: "backend" });
   const pending_host_requests = new Map<string, PendingHostRequest>(); // requestId 隔离并发宿主回调
   // 窗口宿主取消须等资源释放回包。其它原生操作只结束 worker 的等待。
   const call_host = async (
@@ -130,6 +135,9 @@ export async function run_backend_runtime(args: {
       return result;
     },
     workspaceRuntimeDirectory: args.workspaceRuntimeDirectory,
+    shutdownTrace: (event, detail) => {
+      trace(event, detail);
+    },
     workerExecution:
       build_worker_threads_backend_worker_execution_from_desktop_bundle_dir(desktop_bundle_dir),
   });
@@ -154,6 +162,7 @@ export async function run_backend_runtime(args: {
 
   /** 控制请求按原始身份回传结构化结果。 */
   const respond = (request_id: string, result: BackendRuntimeResult): void => {
+    if (!result.ok) trace("control.request_failed", { request_id, message: result.error.message });
     args.port.postMessage({ type: "response", requestId: request_id, result });
   };
   // 控制请求各自结算为 response，业务异常在当前请求内回传。
@@ -162,8 +171,17 @@ export async function run_backend_runtime(args: {
   ): Promise<void> => {
     try {
       if (message.type === "stop") {
+        trace("stop_requested", { request_id: message.requestId });
         reject_pending_host_requests(new Error("Backend runtime is closed."));
-        await bootstrap.stop();
+        await with_timeout(
+          "bootstrap.stop",
+          bootstrap.stop(),
+          // 关闭本身已在各阶段内限时，这里只兜住 stop 管道本身不结算的极端情况。
+          SHUTDOWN_TOTAL_TIMEOUT_MS + SHUTDOWN_STAGE_TIMEOUT_MS,
+        ).catch((error: unknown) => {
+          trace("stop_failed", { message: error instanceof Error ? error.message : String(error) });
+        });
+        trace("stop_responded");
         respond(message.requestId, { ok: true, data: null });
         args.port.close?.();
         return;
@@ -195,10 +213,15 @@ export async function run_backend_runtime(args: {
       appVersion: start_result.backendServices.app.metadata.read_version(),
       berserkerUpdateRootDir:
         start_result.backendServices.app.paths.get_berserker_update_root_dir(),
+      logDir: start_result.backendServices.app.paths.get_log_dir(),
       networkProxy: start_result.networkProxy,
     };
+    // ready 之后业务日志目录才确定，退出追踪改为与业务日志同目录记录。
+    trace = create_shutdown_trace({ directory: ready.logDir, scope: "backend" });
+    trace("ready", { api_base_url: ready.apiBaseUrl });
     args.port.postMessage({ type: "ready", data: ready });
   } catch (error) {
+    trace("start_failed", { message: error instanceof Error ? error.message : String(error) });
     args.port.postMessage({ type: "start_failed", error: to_log_error(error) });
     reject_pending_host_requests(error);
     await bootstrap.stop().catch(() => undefined);

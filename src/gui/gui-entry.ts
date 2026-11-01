@@ -1,11 +1,19 @@
 import { resolve_app_resources } from "../native/app-resources";
 import { resolve_workspace_runtime_directory } from "../native/workspace-runtime";
 import { configure_app_proxy } from "../native/app-proxy";
+import { create_shutdown_trace } from "../native/shutdown-trace";
 import { app, BrowserWindow, session, shell } from "electron";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import process from "node:process";
 
 import * as AppErrors from "../shared/error";
+import {
+  APP_QUIT_WATCHDOG_MS,
+  SHUTDOWN_STAGE_TIMEOUT_MS,
+  WORKER_STOP_TIMEOUT_MS,
+} from "../shared/shutdown-timing";
+import { is_timeout_error, with_timeout } from "../shared/utils/timeout";
 import { create_pdf_host } from "../native/pdf-host";
 import { prepare_agent_image } from "../native/agent-image-host";
 import type { BackendRuntimeReady } from "../shared/backend-runtime";
@@ -245,6 +253,8 @@ export function run_gui_entry(options: GuiEntryOptions): void {
 
   /**
    * 退出前先关闭 Backend，确保 Gateway、ProjectDatabase 和日志系统按顺序收尾。
+   * 退出链路任何一段都可能因日志索引互锁或会话收尾永久不结算，因此整段都有总时限，
+   * 到点后强制结束进程，让卡死至少留下追踪并结束，而不是停在无限等待。
    */
   function quit_app_after_backend_shutdown(
     exit_code: number,
@@ -253,21 +263,50 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     if (shutdown_promise !== null) return shutdown_promise;
     // 先保存 Promise 再清理，关闭窗口触发的重入请求共用同一次退出。
     shutdown_promise = Promise.resolve().then(async () => {
+      const trace = create_shutdown_trace({ directory: backend_ready?.logDir ?? null, scope: "main" });
+      const started_at = Date.now();
+      trace("quit.begin", { exit_code });
+      const watchdog = setTimeout(() => {
+        trace("quit.watchdog_expired", { elapsed_ms: Date.now() - started_at });
+        process.stderr.write(
+          `[shutdown] quit watchdog expired after ${String(APP_QUIT_WATCHDOG_MS)} ms\n`,
+        );
+        app.exit(exit_code);
+      }, APP_QUIT_WATCHDOG_MS);
+      let timed_out = false;
       try {
         try {
-          await backend_runtime.stop();
+          const backend_shutdown = backend_runtime.stop();
+          backend_shutdown.catch(() => undefined); // 超时分支下面仍会终止 worker，先把拒绝就地消费
+          await with_timeout("backend_runtime.stop", backend_shutdown, WORKER_STOP_TIMEOUT_MS);
+          trace("backend_stopped", { elapsed_ms: Date.now() - started_at });
         } finally {
-          await pdf_host.dispose();
-          await remote_login_window_host.dispose();
+          await with_timeout("pdf_host.dispose", pdf_host.dispose(), SHUTDOWN_STAGE_TIMEOUT_MS);
+          await with_timeout(
+            "remote_login_window_host.dispose",
+            remote_login_window_host.dispose(),
+            SHUTDOWN_STAGE_TIMEOUT_MS,
+          );
         }
         await launch_update?.();
       } catch (error) {
         exit_code = 1;
-        try_show_native_error_dialog(
-          "LinguaGacha 退出失败 / Shutdown failed",
-          error instanceof Error ? error.message : String(error),
-        );
+        timed_out = is_timeout_error(error);
+        trace("quit.failed", {
+          elapsed_ms: Date.now() - started_at,
+          timed_out,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        // 退出卡死时再弹同步原生框会连带阻塞事件循环与看门狗，此时只留追踪后强制退出。
+        if (!timed_out) {
+          try_show_native_error_dialog(
+            "LinguaGacha 退出失败 / Shutdown failed",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       } finally {
+        clearTimeout(watchdog);
+        trace("quit.exit", { exit_code, elapsed_ms: Date.now() - started_at });
         app.exit(exit_code);
       }
     });

@@ -8,6 +8,8 @@ import type {
 import { BackendRuntimeClient } from "./backend-runtime-client";
 import type { PDFHost } from "../../shared/pdf";
 import type { AgentImageHost } from "../../shared/agent-image";
+import { WORKER_STOP_TIMEOUT_MS } from "../../shared/shutdown-timing";
+import { TimeoutError } from "../../shared/utils/timeout";
 
 const worker_threads_mock = await vi.hoisted(async () => {
   const { EventEmitter } = await import("node:events");
@@ -51,6 +53,7 @@ const READY: BackendRuntimeReady = {
   apiBaseUrl: "http://127.0.0.1:4567",
   berserkerUpdateRootDir: "E:/userdata/berserker",
   appVersion: "1.2.3",
+  logDir: "E:/app/log",
   networkProxy: { mode: "system", address: "127.0.0.1:6789" },
 };
 describe("BackendRuntimeClient", () => {
@@ -311,6 +314,27 @@ describe("BackendRuntimeClient", () => {
     worker.emit("exit", 0);
 
     await expect(stop).rejects.toThrow("Backend runtime worker exited: 0.");
+    expect(on_unexpected_exit).not.toHaveBeenCalled();
+  });
+
+  it("worker 不回停止应答时在时限内结束等待并终止线程", async () => {
+    const { client, on_unexpected_exit } = create_client();
+    const start = client.start();
+    const worker = get_worker();
+    worker.emit("message", { type: "ready", data: READY } satisfies BackendRuntimeWorkerMessage);
+    await start;
+    vi.useFakeTimers();
+    try {
+      const stop = client.stop();
+      const rejection = expect(stop).rejects.toBeInstanceOf(TimeoutError);
+      // worker 收到 stop 后一直不回应答，客户端必须在时限后自行收尾。
+      await vi.advanceTimersByTimeAsync(WORKER_STOP_TIMEOUT_MS);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(worker.terminate_count).toBe(1);
     expect(on_unexpected_exit).not.toHaveBeenCalled();
   });
 });

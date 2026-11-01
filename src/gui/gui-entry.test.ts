@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 
 import type { BackendRuntimeReady } from "../shared/backend-runtime";
+import { WORKER_STOP_TIMEOUT_MS } from "../shared/shutdown-timing";
 import type { DesktopUpdateServiceOptions } from "./shell/desktop-update-service";
 import type { DesktopIpcHandlerOptions } from "./shell/desktop-ipc-host";
 import { run_gui_entry } from "./gui-entry";
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => {
     apiBaseUrl: "http://127.0.0.1:4567",
     berserkerUpdateRootDir: "E:/userdata/berserker",
     appVersion: "1.2.3",
+    logDir: "E:/userdata/log",
     networkProxy: { mode: "proxy", address: "127.0.0.1:6789" },
   };
   const backend_start = vi.fn(async () => ready);
@@ -326,6 +328,29 @@ describe("run_gui_entry", () => {
     expect(mocks.backend_stop.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.app_exit.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
+  });
+
+  it("退出卡死时在时限后强制结束进程并留下追踪", async () => {
+    mocks.backend_stop.mockReturnValueOnce(new Promise<never>(() => undefined));
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    run_gui_entry({
+      desktopBundleDir: "E:/app/dist-electron",
+      backendRuntimeWorkerEntryUrl: new URL("file:///worker.js"),
+    });
+    await vi.waitFor(() => expect(mocks.create_main_window).toHaveBeenCalledOnce());
+    vi.useFakeTimers();
+    try {
+      mocks.app_listeners.get("before-quit")?.({ preventDefault: vi.fn() });
+      await vi.advanceTimersByTimeAsync(WORKER_STOP_TIMEOUT_MS);
+      expect(mocks.app_exit).toHaveBeenCalledWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // 退出超时不再弹同步原生框，否则会连带阻塞事件循环与看门狗。
+    expect(mocks.show_native_error).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('"timed_out":true'));
+    expect(mocks.app_exit).toHaveBeenCalledWith(1);
   });
 
   it("更新等待业务收尾，重复退出不能提前结束应用", async () => {

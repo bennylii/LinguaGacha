@@ -15,8 +15,11 @@ import { t_main_log } from "../log/log-text";
 import type { ProxyResolver } from "../network/proxy-http-client";
 import type { NetworkProxyPolicy } from "../../domain/setting";
 import type { BackendWorkerExecution } from "../worker/worker-execution";
+import type { ShutdownTrace } from "../../native/shutdown-trace";
 import { AppError } from "../../shared/error";
 import type { LogTargets } from "../../shared/log";
+import { SHUTDOWN_STAGE_TIMEOUT_MS, SHUTDOWN_TOTAL_TIMEOUT_MS } from "../../shared/shutdown-timing";
+import { is_timeout_error, with_timeout } from "../../shared/utils/timeout";
 import { write_bootstrap_error } from "./bootstrap-log";
 import { BackendResources } from "./backend-resources";
 import { BackendServices } from "./backend-services";
@@ -37,6 +40,7 @@ export interface GuiBackendBootstrapOptions {
   openProjectWindow?: ((projectPath: string) => Promise<void>) | undefined; // 以 --project 启动新窗口
   remoteAuthHost?: RemoteAuthHost | undefined; // 内嵌登录窗口与续期，Electron main 提供、CLI 缺席
   workerExecution: BackendWorkerExecution; // 正式 worker_threads 与测试执行策略
+  shutdownTrace?: ShutdownTrace; // 退出阶段追踪；日志系统不可用时仍能留下最后到达的阶段
 }
 
 export interface GuiBackendBootstrapStartResult {
@@ -272,6 +276,10 @@ export class GuiBackendBootstrap {
   private async dispose_runtime(failures: unknown[]): Promise<void> {
     if (this.state === "stopped" && this.resources === null) return;
     this.state = "stopping";
+    const trace = this.options.shutdownTrace ?? (() => undefined);
+    // 所有阶段共享同一截止时间：单段卡死不能把后面阶段的时间预算也吃掉。
+    const deadline = Date.now() + SHUTDOWN_TOTAL_TIMEOUT_MS;
+    trace("dispose_begin");
     this.agent?.cancel_uploads();
     this.images?.clear();
     this.images = null;
@@ -279,42 +287,100 @@ export class GuiBackendBootstrap {
     this.gateway = null;
     // Gateway 停止受理时同步取消在途接口测试与文件操作，排空须等到目录恢复结束。
     await Promise.all([
-      collect_failure(failures, async () => await gateway?.stop()),
-      collect_failure(failures, async () => await this.services?.model.dispose()),
-      collect_failure(failures, async () => await this.services?.stop_file_operations()),
+      this.run_stage(failures, trace, deadline, "gateway.stop", async () => await gateway?.stop()),
+      this.run_stage(
+        failures,
+        trace,
+        deadline,
+        "model.dispose",
+        async () => await this.services?.model.dispose(),
+      ),
+      this.run_stage(
+        failures,
+        trace,
+        deadline,
+        "file_operations.stop",
+        async () => await this.services?.stop_file_operations(),
+      ),
     ]);
 
     this.resources?.settings.set_stream_publisher(null);
     const agent = this.agent;
     this.agent = null;
-    await collect_failure(failures, async () => await agent?.dispose());
+    await this.run_stage(
+      failures,
+      trace,
+      deadline,
+      "agent.dispose",
+      async () => await agent?.dispose(),
+    );
 
     const web_search = this.web_search;
     this.web_search = null;
-    await collect_failure(failures, async () => await web_search?.dispose());
+    await this.run_stage(
+      failures,
+      trace,
+      deadline,
+      "web_search.dispose",
+      async () => await web_search?.dispose(),
+    );
 
     this.event_stream?.stop();
     this.event_stream = null;
 
     const services = this.services;
     this.services = null;
-    await collect_failure(failures, async () => await services?.dispose());
+    await this.run_stage(
+      failures,
+      trace,
+      deadline,
+      "services.dispose",
+      async () => await services?.dispose(),
+    );
 
     const resources = this.resources;
     this.resources = null;
-    await collect_failure(failures, async () => await resources?.dispose());
+    await this.run_stage(
+      failures,
+      trace,
+      deadline,
+      "resources.dispose",
+      async () => await resources?.dispose(),
+    );
     this.state = "stopped";
+    trace("dispose_end");
   }
-}
 
-/** 将一次清理失败追加到共享生命周期结果。 */
-async function collect_failure(
-  failures: unknown[],
-  operation: () => void | Promise<void>,
-): Promise<void> {
-  try {
-    await operation();
-  } catch (error) {
-    failures.push(error);
+  /**
+   * 关闭阶段单段等待有界：日志索引互锁或会话收尾不结算时记录超时并继续释放后续资源，
+   * 让 worker 能在总时限内应答 main，而不是把进程留在无界等待里。
+   */
+  private async run_stage(
+    failures: unknown[],
+    trace: ShutdownTrace,
+    deadline: number,
+    stage: string,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const started_at = Date.now();
+    const budget = Math.min(SHUTDOWN_STAGE_TIMEOUT_MS, deadline - started_at);
+    if (budget <= 0) {
+      // 总预算耗尽后不再启动新阶段，剩余资源随 worker 终止一并回收。
+      trace(`${stage}.skipped`, { reason: "shutdown_budget_exhausted" });
+      failures.push(new Error(`Shutdown budget exhausted before ${stage}.`));
+      return;
+    }
+    trace(`${stage}.begin`, { budget_ms: budget });
+    try {
+      await with_timeout(stage, operation(), budget);
+      trace(`${stage}.end`, { elapsed_ms: Date.now() - started_at });
+    } catch (error) {
+      trace(`${stage}.failed`, {
+        elapsed_ms: Date.now() - started_at,
+        timed_out: is_timeout_error(error),
+        error: error instanceof Error ? error.message : String(error),
+      });
+      failures.push(error);
+    }
   }
 }

@@ -12,6 +12,12 @@ import {
   type LogErrorContextInput,
 } from "../../shared/error";
 import type { LocaleKey } from "../../shared/i18n";
+import {
+  WORKER_STOP_TIMEOUT_MS,
+  WORKER_TERMINATE_TIMEOUT_MS,
+} from "../../shared/shutdown-timing";
+import { is_timeout_error, with_timeout } from "../../shared/utils/timeout";
+import { create_shutdown_trace, type ShutdownTrace } from "../../native/shutdown-trace";
 import type {
   BackendRuntimeDiagnosticLevel,
   BackendRuntimeHostOperation,
@@ -37,6 +43,8 @@ export class BackendRuntimeClient {
   private stop_promise: Promise<void> | null = null; // 重复停止等待同一次资源清理
   private stopped = false; // 主动停止或启动失败后，抑制意外退出回调
   private exit_handled = false; // error 与 exit 可能连续到达，只允许结算一次
+  // ready 前日志目录未知，追踪先走 stderr；ready 后改写为与业务日志同目录。
+  private trace: ShutdownTrace = create_shutdown_trace({ directory: null, scope: "main" });
 
   /** 构造时固定单个 worker 生命周期所需的 Electron main 宿主端口。 */
   public constructor(
@@ -78,6 +86,8 @@ export class BackendRuntimeClient {
           worker.off("message", on_start_message);
           this.ready = true;
           this.start_reject = null;
+          this.trace = create_shutdown_trace({ directory: message.data.logDir, scope: "main" });
+          this.trace("ready", { api_base_url: message.data.apiBaseUrl });
           resolve(message.data);
         } else if (message.type === "start_failed") {
           worker.off("message", on_start_message);
@@ -104,13 +114,30 @@ export class BackendRuntimeClient {
     if (worker === null || this.stopped) return Promise.resolve();
     this.stopped = true;
     this.stop_promise = (async () => {
+      this.trace("worker_stop.begin");
+      const started_at = Date.now();
       try {
-        await this.request({ type: "stop", requestId: randomUUID() });
+        // 后端可能正是卡在日志索引互锁或压缩收尾，退出等待必须有界，超时后直接终止线程。
+        await with_timeout(
+          "backend_runtime.stop",
+          this.request({ type: "stop", requestId: randomUUID() }),
+          WORKER_STOP_TIMEOUT_MS,
+        );
+        this.trace("worker_stop.end", { elapsed_ms: Date.now() - started_at });
+      } catch (error) {
+        this.trace("worker_stop.failed", {
+          elapsed_ms: Date.now() - started_at,
+          timed_out: is_timeout_error(error),
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
       } finally {
         for (const controller of this.host_controllers.values()) controller.abort();
         this.host_controllers.clear();
         try {
-          await worker.terminate();
+          this.trace("worker_terminate.begin");
+          await with_timeout("worker.terminate", worker.terminate(), WORKER_TERMINATE_TIMEOUT_MS);
+          this.trace("worker_terminate.end");
         } finally {
           this.worker = null;
         }

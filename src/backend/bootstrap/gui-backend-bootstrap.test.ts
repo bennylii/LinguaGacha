@@ -20,6 +20,7 @@ import { WebSearchService } from "../agent/web-search-service";
 import { ApiGatewayServer } from "../api/api-gateway-server";
 
 import { GuiBackendBootstrap } from "./gui-backend-bootstrap";
+import { SHUTDOWN_STAGE_TIMEOUT_MS } from "../../shared/shutdown-timing";
 import { AppPathService } from "../app/app-path-service";
 import { LLMClient } from "../llm/llm-client";
 import { PiModelCatalog } from "../llm/pi-model-catalog";
@@ -557,6 +558,37 @@ describe("GuiBackendBootstrap 集成", () => {
       release.resolve();
       await bootstrap.stop();
     }
+  });
+
+  it("关闭阶段卡死时按时限放弃该阶段并继续释放后续资源", async () => {
+    using directory = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-bootstrap-hang-"));
+    const events: string[] = [];
+    const bootstrap = new GuiBackendBootstrap({
+      ...create_options(directory.path),
+      shutdownTrace: (event) => {
+        events.push(event);
+      },
+    });
+    await bootstrap.start();
+    // Agent 收尾等待一个永不结算的执行，模拟压缩或会话关闭卡死。
+    vi.spyOn(AgentService.prototype, "dispose").mockImplementationOnce(
+      async () => await new Promise<never>(() => undefined),
+    );
+    vi.useFakeTimers();
+    try {
+      const stopping = bootstrap.stop();
+      const rejection = expect(stopping).rejects.toThrow("Failed to close GUI Backend resources");
+      await vi.advanceTimersByTimeAsync(SHUTDOWN_STAGE_TIMEOUT_MS);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(events).toContain("agent.dispose.begin");
+    expect(events).toContain("agent.dispose.failed");
+    expect(events).toContain("services.dispose.end");
+    expect(events).toContain("resources.dispose.end");
+    expect(events).toContain("dispose_end");
   });
 
   it("多个关闭阶段失败仍释放监听器和网络入口，并汇总全部异常", async () => {
