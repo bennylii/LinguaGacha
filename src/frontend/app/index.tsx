@@ -35,6 +35,8 @@ import {
   summarize_task_snapshot_for_diagnostics,
 } from "@frontend/app/state/desktop-diagnostics";
 import { update_renderer_diagnostics_context } from "@frontend/app/diagnostics/renderer-error-reporter";
+import { RENDERER_QUIT_TIMEOUT_MS } from "@shared/shutdown-timing";
+import { with_timeout } from "@shared/utils/timeout";
 import {
   useDesktopState,
   useBatchTranslationSnapshot,
@@ -504,16 +506,29 @@ function AppContent(): JSX.Element {
   /** 确认退出先收束当前编辑，再调用宿主关闭。 */
   async function handle_confirm_window_close(): Promise<void> {
     set_close_confirm_submitting(true);
+    let saved: boolean;
     try {
-      if (!(await prepare_page_leave())) {
-        set_close_confirm_submitting(false);
-        set_close_confirm_open(false);
-        return;
-      }
-      await window.desktopApp.quitApp();
+      // 页面保存动作由页面自己拥有，可能等待远端或文件写入不返回。
+      // 超时只结束这次确认：界面回到可重试状态，不会带着未保存的页面直接退出。
+      saved = await with_timeout("page_leave", prepare_page_leave(), RENDERER_QUIT_TIMEOUT_MS);
     } catch (error) {
       set_close_confirm_submitting(false);
-      push_error_toast(t("app.feedback.update_failed"), error);
+      set_close_confirm_open(false);
+      push_error_toast(t("app.feedback.save_failed"), error);
+      return;
+    }
+    if (!saved) {
+      set_close_confirm_submitting(false);
+      set_close_confirm_open(false);
+      return;
+    }
+    try {
+      await window.desktopApp.quitApp();
+    } catch (error) {
+      // 宿主受理退出后窗口会随收尾关闭；请求失败必须复位，避免停在转圈状态。
+      set_close_confirm_submitting(false);
+      set_close_confirm_open(false);
+      push_error_toast(t("app.feedback.operation_failed"), error);
     }
   }
 
