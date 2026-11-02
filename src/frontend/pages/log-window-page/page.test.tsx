@@ -15,11 +15,11 @@ const mocks = vi.hoisted(() => ({
   older: vi.fn(),
   refresh: vi.fn(),
   detail: vi.fn(),
-  date: "20260913",
+  file: { date: "20260913", instance: "1234", current: true },
   following: true,
   set_following: vi.fn(),
-  select_date: vi.fn(),
-  refresh_dates: vi.fn(),
+  select_file: vi.fn(),
+  refresh_files: vi.fn(),
   failed: false,
   loading: false,
   has_older: true,
@@ -27,12 +27,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./use-log-pages", () => ({
   useLogPages: () => ({
     entries: mocks.entries,
-    date: mocks.date,
+    file: mocks.file,
     following: mocks.following,
     set_following: mocks.set_following,
-    select_date: mocks.select_date,
-    refresh_dates: mocks.refresh_dates,
-    dates: ["20260913"],
+    select_file: mocks.select_file,
+    refresh_files: mocks.refresh_files,
+    files: [mocks.file],
     loading: mocks.loading,
     failed: mocks.failed,
     reset_revision: 0,
@@ -140,15 +140,15 @@ vi.mock("@frontend/widgets/app-table/app-table", () => {
 });
 
 describe("日志窗口", () => {
-  it("打开日期菜单刷新可选文件", async () => {
+  it("打开文件菜单刷新可选文件", async () => {
     await mount();
-    const date_button = [...container!.querySelectorAll("button")].find((button) =>
+    const file_button = [...container!.querySelectorAll("button")].find((button) =>
       button.textContent?.includes("2026-09-13"),
     );
     await act(async () => {
-      date_button?.click();
+      file_button?.click();
     });
-    expect(mocks.refresh_dates).toHaveBeenCalledOnce();
+    expect(mocks.refresh_files).toHaveBeenCalledOnce();
   });
   let root: Root | undefined;
   let container: HTMLDivElement | undefined;
@@ -175,8 +175,9 @@ describe("日志窗口", () => {
     document.body.append(container);
     root = createRoot(container);
     mocks.entries = [1, 2].map((line) => ({
-      id: `20260913:${String(line)}`,
+      id: `20260913:1234:${String(line)}`,
       date: "20260913",
+      instance: "1234",
       line,
       revision: "rev",
       created_at: "2026-09-13T00:00:00Z",
@@ -204,21 +205,29 @@ describe("日志窗口", () => {
     await act(async () => {
       rows[0]?.click();
     });
-    expect(mocks.detail).toHaveBeenLastCalledWith("20260913:2", "rev", expect.any(AbortSignal));
-    expect(container!.textContent).toContain("详情20260913:2");
+    expect(mocks.detail).toHaveBeenLastCalledWith(
+      "20260913:1234:2",
+      "rev",
+      expect.any(AbortSignal),
+    );
+    expect(container!.textContent).toContain("详情20260913:1234:2");
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
     });
-    expect(mocks.detail).toHaveBeenLastCalledWith("20260913:1", "rev", expect.any(AbortSignal));
+    expect(mocks.detail).toHaveBeenLastCalledWith(
+      "20260913:1234:1",
+      "rev",
+      expect.any(AbortSignal),
+    );
   });
   it("详情读取失败后重新打开同一条日志即可恢复", async () => {
     await mount();
     mocks.detail.mockRejectedValueOnce(new Error("read interrupted"));
-    const row = container!.querySelector<HTMLElement>('[data-log-row-id="20260913:1"]')!;
+    const row = container!.querySelector<HTMLElement>('[data-log-row-id="20260913:1234:1"]')!;
     await act(async () => row.click());
     expect(container!.textContent).toContain("app.feedback.content_unavailable");
     await act(async () => row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
-    expect(container!.textContent).toContain("详情20260913:1");
+    expect(container!.textContent).toContain("详情20260913:1234:1");
   });
   it("接近底部自动翻页，保持选择，回到顶部和整体读取错误仍可重试", async () => {
     await mount();
@@ -229,7 +238,7 @@ describe("日志窗口", () => {
       scrollHeight: { value: 2000, configurable: true },
     });
     await act(async () => {
-      container!.querySelector<HTMLElement>('[data-log-row-id="20260913:2"]')!.click();
+      container!.querySelector<HTMLElement>('[data-log-row-id="20260913:1234:2"]')!.click();
       viewport.scrollTop = 500;
       viewport.dispatchEvent(new Event("scroll"));
     });
@@ -239,7 +248,7 @@ describe("日志窗口", () => {
       viewport.dispatchEvent(new Event("scroll"));
     });
     expect(
-      container!.querySelector('[data-log-row-id="20260913:2"]')?.getAttribute("data-selected"),
+      container!.querySelector('[data-log-row-id="20260913:1234:2"]')?.getAttribute("data-selected"),
     ).toBe("true");
     expect(mocks.older).toHaveBeenCalledOnce();
     await act(async () => {

@@ -15,8 +15,9 @@ export interface LogTargets {
 }
 
 export interface LogEntry {
-  id: string; // 日期与物理行号组成的 ID
-  date: string; // 所属日期文件
+  id: string; // 日期、实例与物理行号组成的 ID
+  date: string; // 所属日期
+  instance: string; // 所属写入实例
   line: number; // 从 1 开始的物理行号，隐藏及损坏行同样计数
   revision: string; // 所属文件内容代次，用于拒绝外部编辑前的详情请求
   created_at: string; // ISO 时间戳
@@ -70,7 +71,8 @@ export interface LogFileRecord extends LogRecord {
 
 export interface LogDetail extends LogRecord {
   id: string; // 与 LogEntry.id 一一对应
-  date: string; // 所属日期文件
+  date: string; // 所属日期
+  instance: string; // 所属写入实例
   line: number; // 正文物理行号
   revision: string; // 所属文件内容代次
 }
@@ -86,15 +88,24 @@ export interface LogAppendPayload {
 
 export interface LogCursor {
   date: string;
+  instance: string;
   line: number; // 此边界已处理的正文物理行数，0 表示文件起点
   revision: string; // 文件内容代次，正文外部修改或索引重建后失效
 }
 
 export interface LogPageRequest {
-  date: string; // 所有读取都限定于这个日期文件
+  date: string; // 所有读取都限定于这个日期
+  instance: string; // 所有读取都限定于这个写入实例的文件
   direction: "latest" | "before" | "after" | "check";
   cursor?: LogCursor;
   limit?: number;
+}
+
+/** 日志窗口可选的文件；同一日期会有多个实例各自写入。 */
+export interface LogFileRef {
+  date: string;
+  instance: string;
+  current: boolean; // 是否由当前进程写入
 }
 
 export interface LogPage {

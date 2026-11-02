@@ -20,6 +20,8 @@ import {
 } from "react";
 
 import { read_log_detail, type LogDetail, type LogEntry } from "@frontend/app/desktop/desktop-api";
+import type { LogFileRef } from "@shared/log";
+import { log_file_key } from "@frontend/pages/log-window-page/logic";
 import { useI18n, type LocaleKey } from "@frontend/app/locale/locale-context";
 import { useDebouncedValue } from "@frontend/widgets/interactions/use-debounce";
 import { cn } from "@frontend/shadcn/classnames";
@@ -125,7 +127,7 @@ export function LogWindowPage(): JSX.Element {
       anchor_row_id: null,
     });
     set_detail_state({ status: "idle", event_id: null, detail: null });
-  }, [logs.reset_revision, logs.date]);
+  }, [logs.reset_revision, logs.file]);
 
   const filtered_events = useMemo(() => {
     return filter_log_entries({
@@ -484,17 +486,25 @@ export function LogWindowPage(): JSX.Element {
                 {t("log_window_page.action.return_to_top")}
               </AppButton>
               <SearchBarMenuAction
-                value={logs.date}
-                active={logs.date !== null}
+                value={logs.file === null ? null : log_file_key(logs.file)}
+                active={logs.file !== null}
                 button_label={
-                  logs.date === null ? t("log_window_page.history.date") : format_date(logs.date)
+                  logs.file === null
+                    ? t("log_window_page.history.file")
+                    : format_file(logs.file, t("log_window_page.history.current"))
                 }
-                tooltip={t("log_window_page.history.date")}
+                tooltip={t("log_window_page.history.file")}
                 icon={<CalendarDays data-icon="inline-start" />}
-                options={logs.dates.map((date) => ({ value: date, label: format_date(date) }))}
-                on_change={logs.select_date}
+                options={logs.files.map((file) => ({
+                  value: log_file_key(file),
+                  label: format_file(file, t("log_window_page.history.current")),
+                }))}
+                on_change={(value) => {
+                  const next = logs.files.find((file) => log_file_key(file) === value);
+                  if (next !== undefined) logs.select_file(next);
+                }}
                 on_open={() => {
-                  void logs.refresh_dates();
+                  void logs.refresh_files();
                 }}
               />
             </div>
@@ -661,7 +671,9 @@ export function LogWindowPage(): JSX.Element {
   );
 }
 
-/** 菜单展示年月日，文件标识本身保持原值。 */
-function format_date(date: string): string {
-  return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
+/** 菜单只展示日期与实例标识，不显示工程名。 */
+function format_file(file: LogFileRef, current_label: string): string {
+  const date = `${file.date.slice(0, 4)}-${file.date.slice(4, 6)}-${file.date.slice(6, 8)}`;
+  // 同一天可能有多个实例文件，非当前实例直接显示实例标识以便区分。
+  return `${date} · ${file.current ? current_label : file.instance}`;
 }

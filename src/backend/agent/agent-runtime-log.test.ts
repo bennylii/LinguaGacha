@@ -111,9 +111,9 @@ describe("AgentRuntimeLog", () => {
       log.finish_run("success");
 
       log.flush();
-      const date = manager.files.list_dates()[0]!;
+      const { date, instance } = manager.files.list_files()[0]!;
       const records = fs
-        .readFileSync(path.join(directory.path, `app.${date}.jsonl`), "utf8")
+        .readFileSync(path.join(directory.path, `app.${date}.${instance}.jsonl`), "utf8")
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line));
@@ -126,7 +126,7 @@ describe("AgentRuntimeLog", () => {
         duration_ms: 125,
       });
       expect(records[2].content.output).toEqual({ kind: "json", value: expected });
-      const page = await manager.files.read_page({ date, direction: "latest" });
+      const page = await manager.files.read_page({ date, instance, direction: "latest" });
       expect(page.entries).toHaveLength(4);
       const entry = page.entries[2]!;
       expect((await manager.files.read_detail(entry.id, entry.revision))?.content).toEqual(

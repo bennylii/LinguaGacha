@@ -1,18 +1,20 @@
-import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
+﻿import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
 import { useI18n } from "@frontend/app/locale/locale-context";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { read_log_dates, read_log_page } from "@frontend/app/desktop/desktop-api";
+import { read_log_files, read_log_page } from "@frontend/app/desktop/desktop-api";
 import {
   LOG_POLL_INTERVAL_MS,
   LOG_PAGE_SIZE,
   LOG_WINDOW_ENTRY_CAPACITY,
   type LogEntry,
+  type LogFileRef,
   type LogPage,
   type LogPageRequest,
 } from "@shared/log";
+import { log_file_key } from "@frontend/pages/log-window-page/logic";
 
 type PageState = {
-  date: string | null; // 缓存所属文件，切换日期的首帧不会显示旧页
+  file: LogFileRef | null; // 缓存所属文件，切换文件的首帧不会显示旧页
   entries: LogEntry[];
   loading: boolean;
   failed: boolean;
@@ -24,48 +26,50 @@ type PageState = {
 /** 页面是唯一轮询拥有者；按整页释放缓存，游标始终对应实际保留的页边界。 */
 export function useLogPages(selectedId: string | null) {
   const { t } = useI18n();
-  const [date, set_date] = useState<string | null>(null);
-  const [dates, set_dates] = useState<string[]>([]);
-  const [dates_loading, set_dates_loading] = useState(true);
-  const [dates_failed, set_dates_failed] = useState(false);
+  const [file, set_file] = useState<LogFileRef | null>(null);
+  const [files, set_files] = useState<LogFileRef[]>([]);
+  const [files_loading, set_files_loading] = useState(true);
+  const [files_failed, set_files_failed] = useState(false);
   const [following, set_following] = useState(true);
-  const date_request = useRef<AbortController | null>(null); // 目录刷新独立取消，不打断当前文件查询
-  /** 取消旧目录请求，仅首次取得日期时设置默认选择。 */
-  const refresh_dates = useCallback(async (): Promise<void> => {
-    date_request.current?.abort();
+  const file_request = useRef<AbortController | null>(null); // 目录刷新独立取消，不打断当前文件查询
+  /** 取消旧目录请求，仅首次取得文件列表时设置默认选择。 */
+  const refresh_files = useCallback(async (): Promise<void> => {
+    file_request.current?.abort();
     const controller = new AbortController();
-    date_request.current = controller;
-    set_dates_loading(true);
+    file_request.current = controller;
+    set_files_loading(true);
     try {
-      const available = await read_log_dates(controller.signal);
+      const available = await read_log_files(controller.signal);
       if (controller.signal.aborted) return;
-      set_dates(available);
-      // 只为尚未选择过日期的窗口设置默认值，新日期出现时保留原选择。
-      set_date((previous) => previous ?? available[0] ?? null);
-      set_dates_failed(false);
+      set_files(available);
+      // 只为尚未选择过文件的窗口设置默认值；优先当前实例，新文件出现时保留原选择。
+      set_file(
+        (previous) => previous ?? available.find((item) => item.current) ?? available[0] ?? null,
+      );
+      set_files_failed(false);
     } catch {
-      if (!controller.signal.aborted) set_dates_failed(true);
+      if (!controller.signal.aborted) set_files_failed(true);
     } finally {
-      if (!controller.signal.aborted) set_dates_loading(false);
+      if (!controller.signal.aborted) set_files_loading(false);
     }
   }, []);
 
   useEffect(() => {
-    void refresh_dates();
-    /** 窗口恢复可见时刷新目录，不改变用户已选日期。 */
+    void refresh_files();
+    /** 窗口恢复可见时刷新目录，不改变用户已选文件。 */
     const on_visible = (): void => {
-      if (document.visibilityState !== "hidden") void refresh_dates();
+      if (document.visibilityState !== "hidden") void refresh_files();
     };
     document.addEventListener("visibilitychange", on_visible);
     return () => {
-      date_request.current?.abort();
+      file_request.current?.abort();
       document.removeEventListener("visibilitychange", on_visible);
     };
-  }, [refresh_dates]);
+  }, [refresh_files]);
 
   const [revision, set_revision] = useState(0);
   const [state, set_state] = useState<PageState>({
-    date: null,
+    file: null,
     entries: [],
     loading: true,
     failed: false,
@@ -73,36 +77,42 @@ export function useLogPages(selectedId: string | null) {
     can_load_older: false,
     reset_revision: 0,
   });
-  const current_state = useRef(state); // 同日期重读保留旧摘要，成功响应才替换列表。
+  const current_state = useRef(state); // 同文件重读保留旧摘要，成功响应才替换列表。
   current_state.current = state;
   const selection = useRef({ following, selectedId }); // 轮询读取最新 UI 意图，避免重建请求任务
-  const load_older_ref = useRef<(() => void) | null>(null); // 稳定 UI 回调接入当前日期队列
+  const load_older_ref = useRef<(() => void) | null>(null); // 稳定 UI 回调接入当前文件队列
 
   useEffect(() => {
     selection.current = { following, selectedId };
   }, [following, selectedId]);
 
+  const active_key = file === null ? null : log_file_key(file);
+
   useEffect(() => {
-    if (date === null) return;
-    const request_date = date;
+    if (file === null) return;
+    const request_file = file;
+    const request_key = log_file_key(request_file);
     const controller = new AbortController();
     let pages: LogPage[] = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let busy = false; // 当前日期只允许一个读取请求在途
+    let busy = false; // 当前文件只允许一个读取请求在途
     let older = false; // 滚动请求可在状态检查期间排队
     let older_loading = false; // 历史读取或队列已占位时合并重复滚动
     let expired = false;
     let failure_notified = false; // 连续后台轮询失败只通知一次，成功后恢复通知。
     let reset_revision = 0; // 文件失效通知页面清空选择与详情
     let entries: LogEntry[] =
-      current_state.current.date === request_date ? current_state.current.entries : [];
+      current_state.current.file !== null &&
+      log_file_key(current_state.current.file) === request_key
+        ? current_state.current.entries
+        : [];
 
     /** 只在页集合变化时更新摘要数组，空轮询保留引用。 */
     function publish(loading: boolean, failed = false, changed = true): void {
       if (changed) entries = pages.flatMap((page) => page.entries);
       set_state({
         entries,
-        date,
+        file: request_file,
         loading,
         failed,
         expired,
@@ -147,7 +157,8 @@ export function useLogPages(selectedId: string | null) {
         if (direction !== "after" && direction !== "check") publish(true, false, false);
         const page = await read_log_page(
           {
-            date: request_date,
+            date: request_file.date,
+            instance: request_file.instance,
             direction,
             ...(direction === "before"
               ? { cursor: before! }
@@ -163,7 +174,7 @@ export function useLogPages(selectedId: string | null) {
           reset_revision += 1;
           pages = [];
           set_following(false);
-          void refresh_dates();
+          void refresh_files();
         } else if (page.status === "cursor_invalid") {
           reset_revision += 1;
           pages = [];
@@ -244,27 +255,26 @@ export function useLogPages(selectedId: string | null) {
       load_older_ref.current = null;
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, [date, revision, t, refresh_dates]);
+  }, [file, revision, t, refresh_files]);
 
-  /** 稳定回调转交当前日期的历史读取队列。 */
+  /** 稳定回调转交当前文件的历史读取队列。 */
   const load_older = useCallback(() => load_older_ref.current?.(), []);
-  /** 重读所选日期末尾并恢复跟随，目录刷新仍保留选择。 */
+  /** 重读所选文件末尾并恢复跟随，目录刷新仍保留选择。 */
   const refresh = useCallback(() => {
     set_following(true);
     set_revision((value) => value + 1);
-    void refresh_dates();
-  }, [refresh_dates]);
-  /** 显式日期选择重置跟随，由生命周期切换取消旧请求。 */
-  const select_date = useCallback(
-    (next_date: string) => {
-      if (next_date === date) return;
+    void refresh_files();
+  }, [refresh_files]);
+  /** 显式文件选择重置跟随，由生命周期切换取消旧请求。 */
+  const select_file = useCallback(
+    (next: LogFileRef) => {
+      if (log_file_key(next) === active_key) return;
       set_following(true);
-      set_date(next_date);
+      set_file(next);
     },
-    [date],
-  );
-  const current =
-    state.date === date
+    [active_key],
+  );  const current =
+    state.file !== null && active_key !== null && log_file_key(state.file) === active_key
       ? state
       : {
           ...state,
@@ -284,16 +294,16 @@ export function useLogPages(selectedId: string | null) {
     );
   return {
     ...current,
-    date,
-    dates,
+    file,
+    files,
     following,
     set_following,
-    select_date,
-    refresh_dates,
+    select_file,
+    refresh_files,
     can_load_older,
     load_older,
     refresh,
-    loading: date === null ? dates_loading : current.loading,
-    failed: current.failed || dates_failed,
+    loading: file === null ? files_loading : current.loading,
+    failed: current.failed || files_failed,
   };
 }

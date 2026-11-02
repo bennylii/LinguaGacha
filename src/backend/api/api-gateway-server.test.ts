@@ -172,8 +172,10 @@ describe("ApiGatewayServer", () => {
     const gateway = create_gateway_fixture(app_root, database, log_manager).gateway;
 
     const started = await gateway.start();
+    const file = log_manager.files.list_files()[0]!;
     const response = await post_json(started.baseUrl, "/api/logs/page", {
-      date: log_manager.files.list_dates()[0]!,
+      date: file.date,
+      instance: file.instance,
       direction: "latest",
     });
     const page = (await response.json()) as {
@@ -185,7 +187,7 @@ describe("ApiGatewayServer", () => {
     const dates_response = await post_json(started.baseUrl, "/api/logs/files", {});
     expect(await dates_response.json()).toMatchObject({
       ok: true,
-      data: { dates: log_manager.files.list_dates() },
+      data: { files: log_manager.files.list_files() },
     });
     const detail_response = await post_json(started.baseUrl, "/api/logs/detail", {
       id: page.data.entries[0]!.id,
@@ -228,7 +230,7 @@ describe("ApiGatewayServer", () => {
 
     const [event] = (
       await log_manager.files.read_page({
-        date: log_manager.files.list_dates()[0]!,
+        ...log_manager.files.list_files()[0]!,
         direction: "latest",
       })
     ).entries;

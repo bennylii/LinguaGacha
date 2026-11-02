@@ -4,7 +4,8 @@ import type { LocaleMessageSchema } from "../../types";
 export const en_us_log_window_page = {
   title: "Logs",
   history: {
-    date: "Log date",
+    file: "Log file",
+    current: "Current instance",
     expired: "Logs for this date have been removed",
   },
   level: {

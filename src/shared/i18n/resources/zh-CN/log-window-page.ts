@@ -1,7 +1,8 @@
 export const zh_cn_log_window_page = {
   title: "日志",
   history: {
-    date: "日志日期",
+    file: "日志文件",
+    current: "当前实例",
     expired: "该日期的日志已清理",
   },
   level: {

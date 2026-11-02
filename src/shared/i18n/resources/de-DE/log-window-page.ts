@@ -4,7 +4,8 @@ import type { LocaleMessageSchema } from "../../types";
 export const de_de_log_window_page = {
   title: "Protokolle",
   history: {
-    date: "Protokolldatum",
+    file: "Protokolldatei",
+    current: "Aktuelle Instanz",
     expired: "Protokolle dieses Datums wurden entfernt",
   },
   level: {
