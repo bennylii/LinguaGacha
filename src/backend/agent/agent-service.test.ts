@@ -169,6 +169,7 @@ const fake_agent_state = vi.hoisted(() => ({
     | "tool_only"
     | "invalid_tool"
     | "tool_compaction"
+    | "novel_sync"
     | "overflow"
     | "length"
     | "length_pending"
@@ -384,6 +385,26 @@ function create_fake_response(context: TranscriptContext): FauxResponseStep {
   }
   const after_tool_call =
     context.messages.findLast((message) => message.role !== "system")?.role === "toolResult";
+  if (fake_agent_state.mode === "novel_sync") {
+    // 同一轮先预览再提交；端口夹具固定返回 stash-1，模型不需要解析预览文本。
+    const tool_results = context.messages.filter((message) => message.role === "toolResult").length;
+    if (tool_results === 0) {
+      return fauxAssistantMessage(fauxToolCall("novel_sync_preview", {}, { id: "sync-preview" }), {
+        stopReason: "toolUse",
+      });
+    }
+    if (tool_results === 1) {
+      return fauxAssistantMessage(
+        fauxToolCall(
+          "novel_sync_apply",
+          { stash_id: "stash-1", mode: "auto" },
+          { id: "sync-apply" },
+        ),
+        { stopReason: "toolUse" },
+      );
+    }
+    return fauxAssistantMessage("同步完成");
+  }
   if (fake_agent_state.batch_mode) {
     const retry = after_tool_call && fake_agent_state.batch_retries-- > 0;
     return after_tool_call && !retry
@@ -509,6 +530,104 @@ function create_fake_response(context: TranscriptContext): FauxResponseStep {
     );
   }
   return fauxAssistantMessage("已完成");
+}
+
+/** 同步预览与提交夹具共用同一份绑定和章节差异，避免两处漂移。 */
+function novel_sync_binding(): Awaited<ReturnType<AgentNovelSyncPreviewPort>>["binding"] {
+  return {
+    origin: "https://n.novelia.cc",
+    host: "n.novelia.cc",
+    kind: "web",
+    provider_id: "novelia",
+    novel_id: "n1",
+    url: "https://n.novelia.cc/novel/n1",
+    title: "测试小说",
+    asset_path: "测试小说.txt",
+    remote_hash: "hash",
+    chapter_count: 2,
+    synced_at: "2026-11-01T00:00:00.000Z",
+  };
+}
+
+function novel_sync_chapters(): Awaited<ReturnType<AgentNovelSyncPreviewPort>>["chapters"] {
+  return [
+    {
+      index: 1,
+      kind: "chapter",
+      title: "新增章",
+      status: "added",
+      old_index: null,
+      start_row: 0,
+      end_row: 2,
+      added: 2,
+      modified: 0,
+      removed: 0,
+      inherited: 0,
+      would_lose: 0,
+      removed_lines: [],
+    },
+  ];
+}
+
+function novel_sync_preview_result(): Awaited<ReturnType<AgentNovelSyncPreviewPort>> {
+  return {
+    stash_id: "stash-1",
+    created_at: "2026-11-03T00:00:00.000Z",
+    expires_at: "2026-11-03T00:10:00.000Z",
+    binding: novel_sync_binding(),
+    filename: "测试小说.txt",
+    remote_hash: "hash",
+    previous_source: "snapshot",
+    snapshot_available: true,
+    current_asset_changed: false,
+    stats: {
+      added: 2,
+      modified: 0,
+      removed: 0,
+      inherited: 0,
+      remote_inherited: 0,
+      would_lose: 0,
+      diverged: false,
+      requires_alignment: false,
+    },
+    chapters: novel_sync_chapters(),
+    files_revision: 0,
+    items_revision: 0,
+  };
+}
+
+function novel_sync_apply_result(): Awaited<ReturnType<AgentNovelSyncApplyPort>> {
+  return {
+    mode: "auto",
+    write: {
+      accepted: true,
+      changes: [
+        {
+          type: "project.changed",
+          eventId: "sync-event",
+          source: "remote_sync",
+          projectPath: "test.lg",
+          projectRevision: 1,
+          sectionRevisions: { files: 1, items: 1 },
+          updatedSections: ["files", "items"],
+          qualityStatisticsScope: "none",
+        },
+      ],
+    },
+    binding: novel_sync_binding(),
+    stats: {
+      added: 2,
+      modified: 0,
+      removed: 0,
+      inherited: 0,
+      remote_inherited: 0,
+      would_lose: 0,
+      diverged: false,
+      requires_alignment: false,
+    },
+    chapters: novel_sync_chapters(),
+    skipped_chapters: [],
+  };
 }
 
 /** 从模型实际收到的上下文读取最近 user 文本，兼容字符串与 text block。 */
@@ -2687,6 +2806,46 @@ describe("AgentService", () => {
 
     expect(fake_agent_state.tool_names.at(-1)).toContain("novel_sync_preview");
     expect(fake_agent_state.tool_names.at(-1)).toContain("novel_sync_apply");
+  });
+
+  it("整本同步工具在 Agent 回合内调用预览与提交端口", async () => {
+    fake_agent_state.mode = "novel_sync";
+    const preview_sync = vi.fn<AgentNovelSyncPreviewPort>(async () => novel_sync_preview_result());
+    const apply_sync = vi.fn<AgentNovelSyncApplyPort>(async () => novel_sync_apply_result());
+    const { service } = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      preview_sync,
+      apply_sync,
+    );
+
+    await service.send_message({ text: "同步整本", attachments: [] });
+    await wait_for_idle(service);
+
+    expect(preview_sync).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(apply_sync).toHaveBeenCalledWith(
+      { stash_id: "stash-1", mode: "auto" },
+      expect.any(AbortSignal),
+    );
+    expect(read_tool_output(service, "sync-preview")).toMatchObject({
+      stash_id: "stash-1",
+      stats: { added: 2 },
+    });
+    expect(read_tool_output(service, "sync-apply")).toMatchObject({
+      mode: "auto",
+      accepted: true,
+      updated_sections: ["files", "items"],
+    });
   });
 
   it("预览读取在请求前后校验会话，重置期间的旧响应失效", async () => {

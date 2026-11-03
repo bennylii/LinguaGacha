@@ -88,6 +88,7 @@ describe("Agent novel_sync_apply 工具", () => {
       { stash_id: "stash-1", mode: "manual" },
       { stash_id: "stash-1", mode: "auto", extra: true },
       { stash_id: "", mode: "auto" },
+      { stash_id: "stash-1" },
     ]) {
       expect(() =>
         validateToolArguments(tool, {

@@ -386,8 +386,9 @@ async function create_wenku_epub_fixture(options: {
     client: client as unknown as NoveliaClient,
     snapshots,
     writer: {
-      replace_remote_asset: async (request) => {
+      replace_remote_asset: async (request, options) => {
         writer.requests.push(request);
+        writer.replace_options.push(options);
         return { accepted: true as const, changes: [] };
       },
       bind_remote_source: async () => ({ accepted: true as const, changes: [] }),
@@ -1371,6 +1372,24 @@ describe("NovelSourceService", () => {
       expect(request.content).toContain("旧原文");
       expect(request.content).not.toContain("新原文");
       expect(request.content).toContain("追加原文");
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("文库整本 EPUB：Agent 提交时声明复用 Agent 写串行", async () => {
+    const fixture = await create_wenku_epub_fixture({
+      local: [{ href: "Text/ch1.xhtml", heading: "第一章", paragraphs: ["旧原文"] }],
+      remote: [{ href: "Text/ch1.xhtml", heading: "第一章", paragraphs: ["新原文"] }],
+    });
+    try {
+      const preview = await fixture.service.preview_sync();
+      await fixture.service.apply_sync_request(
+        { mode: "auto", stash_id: preview.stash_id, overrides: [] },
+        { under_agent: true },
+      );
+
+      expect(fixture.writer.replace_options).toEqual([{ under_agent: true }]);
     } finally {
       await fixture.database.close();
     }
