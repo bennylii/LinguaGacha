@@ -259,6 +259,15 @@ Agent 复用共享 `BatchTranslationService`，由批量引擎逐批提交译文
 
 查证结论写回 glossary 条目：`info` 只保留影响译法的适用条件，`evidence` 保存工程内出处、来源、URL、访问日期、简短摘录和未决问题。工程写入统一经 `workspace_apply` 的指纹、修订校验、审批和事务提交；写入术语不会自动启用术语表，`project_meta.glossary_enabled` 保持原值。
 
+### 远程小说同步
+
+绑定工程以站点为唯一事实源，对齐语义见 [BACKEND](BACKEND.md) 的远程小说小节。章节顺序就是资产行序，插入章节只让后续行后移；已匹配条目的身份与译文由内容锚点决定，不随位置改变。
+
+- 读取站点事实由章节工具承担：`novel_chapters` 给出章节身份、标题和站点译文有无，`novel_chapter_read` 给出逐段原文与站点译文。整章没有站点译文时 `zh` 为 `null`，有译文但该段为空时为 `""`，两者含义不同，不能合并处理。
+- 整本同步与上传只围绕绑定的单个资产进行（`binding.asset_path`）。`novel_chapter_import` 导入的是独立新资产，不能用来在整本书里插入章节。
+- 工程没有插入原文行的入口（见 [BACKEND](BACKEND.md) 的远程小说小节），缺行只能由站点补齐后重新同步吸收。
+- 同步推进 `files` 与 `items` 分区，执行后原工作区快照失效，后续操作需要重新 `workspace_run`。
+
 ## ⚙️ 工作区运行环境
 
 工作区复用应用发布的 Electron Node 模式和标准 npm 依赖树，使开发与发行包使用同版本的执行环境。
