@@ -8,7 +8,10 @@ import type { JsonValue } from "../../domain/json";
 import { AppError } from "../../shared/error/app-error";
 import { ProjectDatabase } from "../database/database-operations";
 import { EpubAst, is_epub_content_item } from "../file/epub/epub-ast";
-import type { RemoteAssetReplaceRequest } from "../project/project-content-service";
+import type {
+  RemoteAssetReplaceOptions,
+  RemoteAssetReplaceRequest,
+} from "../project/project-content-service";
 import {
   create_volume_epub_fixture,
   read_epub_entry_text,
@@ -87,6 +90,7 @@ interface Fixture {
   snapshots: RemoteSnapshotStore;
   writer: {
     requests: RemoteAssetReplaceRequest[];
+    replace_options: Array<RemoteAssetReplaceOptions | undefined>;
     bind_requests: RemoteSourceBinding[];
   };
   client: { download: ReturnType<typeof vi.fn> };
@@ -116,7 +120,7 @@ async function create_fixture(options: {
     get_user_data_path: (...parts: string[]) => path.join(temp_dir, "userdata", ...parts),
   };
   const snapshots = new RemoteSnapshotStore({ paths });
-  const writer: Fixture["writer"] = { requests: [], bind_requests: [] };
+  const writer: Fixture["writer"] = { requests: [], replace_options: [], bind_requests: [] };
   const asset_path = options.asset_path ?? ASSET_PATH;
   const client = {
     download: vi.fn(async (): Promise<RemoteNovelDownload> => {
@@ -151,8 +155,9 @@ async function create_fixture(options: {
     client: client as unknown as NoveliaClient,
     snapshots,
     writer: {
-      replace_remote_asset: async (request) => {
+      replace_remote_asset: async (request, options) => {
         writer.requests.push(request);
+        writer.replace_options.push(options);
         return { accepted: true as const, changes: [] };
       },
       bind_remote_source: async (request) => {
@@ -347,7 +352,7 @@ async function create_wenku_epub_fixture(options: {
     get_user_data_path: (...parts: string[]) => path.join(temp_dir, "userdata", ...parts),
   };
   const snapshots = new RemoteSnapshotStore({ paths });
-  const writer: Fixture["writer"] = { requests: [], bind_requests: [] };
+  const writer: Fixture["writer"] = { requests: [], replace_options: [], bind_requests: [] };
   const ref = parse_novel_url(WENKU_URL);
   const metadata = {
     title: "テスト小説",
@@ -923,6 +928,7 @@ describe("NovelSourceService", () => {
       expect(applied.binding.remote_hash).toBe(sha256_text(remote_text));
       expect(applied.binding.chapter_count).toBe(3);
       expect(fixture.writer.requests).toHaveLength(1);
+      expect(fixture.writer.replace_options).toEqual([undefined]);
       const request = fixture.writer.requests[0]!;
       expect(request.assetPath).toBe(ASSET_PATH);
       expect(request.content).toBe(remote_text);
@@ -933,6 +939,22 @@ describe("NovelSourceService", () => {
       await expect(
         fixture.service.apply_sync_request({ mode: "auto", stash_id: preview.stash_id }),
       ).rejects.toMatchObject({ code: "remote.stash_expired" });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("Agent 整本同步在写入时声明复用 Agent 写串行", async () => {
+    const remote_text = `${CURRENT_TEXT}\n# 第三章\n第四行`;
+    const fixture = await create_fixture({ text: CURRENT_TEXT, remote_text });
+    try {
+      const preview = await fixture.service.preview_sync();
+      await fixture.service.apply_sync_request(
+        { mode: "auto", stash_id: preview.stash_id },
+        { under_agent: true },
+      );
+
+      expect(fixture.writer.replace_options).toEqual([{ under_agent: true }]);
     } finally {
       await fixture.database.close();
     }

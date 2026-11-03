@@ -111,6 +111,11 @@ export interface RemoteSourceBindRequest {
   binding: RemoteSourceBinding;
 }
 
+/** Agent 写工具在自己的运行回合内提交时，复用 Agent 写串行而不是要求运行时空闲。 */
+export interface RemoteAssetReplaceOptions {
+  under_agent?: boolean;
+}
+
 const PROJECT_SETTINGS_UPDATE_SOURCE = "project_settings_update";
 // 条目、进度与项目设置都由后端从项目事实计算，请求携带这些字段视为旧载荷。
 const PROJECT_DERIVED_FIELDS = [
@@ -486,9 +491,10 @@ export class ProjectContentService {
    */
   public async replace_remote_asset(
     request: RemoteAssetReplaceRequest,
+    options: RemoteAssetReplaceOptions = {},
   ): Promise<ProjectWriteResult> {
     const project_path = this.session_state.require_loaded_project_path();
-    return await this.runtime_gate.run_project_write(async () => {
+    const write = async (): Promise<ProjectWriteResult> => {
       const snapshot = await this.read_project_write_snapshot(project_path);
       const existing_asset = snapshot.asset_records.find(
         (asset) => asset.path === request.assetPath,
@@ -653,7 +659,11 @@ export class ProjectContentService {
         items: build_project_item_persistent_records(write_output.items),
         meta,
       });
-    });
+    };
+    // Agent 写工具只能在自己的运行回合内提交；界面写入要求整个运行时空闲。
+    return options.under_agent === true
+      ? await this.runtime_gate.run_agent_project_write(write)
+      : await this.runtime_gate.run_project_write(write);
   }
 
   /**

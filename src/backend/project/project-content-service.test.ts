@@ -2614,6 +2614,120 @@ describe("ProjectContentService", () => {
     }
   });
 
+  it("Agent 租约内允许整本替换，界面写入仍要求运行时空闲", async () => {
+    const { database, service, runtime_gate, lg_path } = await create_service();
+    const asset_path = "agent-novel.txt";
+    const revisions = async (): Promise<ProjectDataSectionRevisions> =>
+      (
+        await database.read(lg_path, (access) =>
+          new ProjectDataReader(access).build_manifest({ loaded: true, projectPath: lg_path }),
+        )
+      ).sectionRevisions as unknown as ProjectDataSectionRevisions;
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      provider_id: "kakuyomu",
+      novel_id: "123456",
+      url: "https://n.novelia.cc/novel/kakuyomu/123456",
+      title: "测试小说",
+      asset_path,
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+    const rows: RemoteRowPlan[] = [
+      {
+        row: 0,
+        src: "第一行",
+        src_hash: "hash-0",
+        chapter_index: 0,
+        decision: "preserve",
+        old_item: {
+          item_id: 1,
+          row: 0,
+          src: "第一行",
+          dst: "译文1",
+          name_dst: null,
+          status: "PROCESSED",
+          extra_field: "",
+        },
+        remote_dst: null,
+        similarity: 1,
+        review: false,
+      },
+      {
+        row: 1,
+        src: "第二行",
+        src_hash: "hash-1",
+        chapter_index: 0,
+        decision: "retranslate",
+        old_item: null,
+        remote_dst: null,
+        similarity: 0,
+        review: false,
+      },
+    ];
+
+    try {
+      await database.transaction(lg_path, (writer) => {
+        writer.add_asset(lg_path, asset_path, Buffer.from("第一行"), "TXT", null, 0);
+        writer.set_items(lg_path, [
+          create_persistent_item({
+            item_id: 1,
+            src: "第一行",
+            dst: "译文1",
+            status: "PROCESSED",
+            file_path: asset_path,
+            row_number: 0,
+          }),
+        ]);
+      });
+
+      const agent_lease = runtime_gate.begin_runtime("agent");
+      try {
+        await expect(
+          service.replace_remote_asset({
+            assetPath: asset_path,
+            content: "第一行\n第二行",
+            binding,
+            rows,
+            overrides: new Map(),
+            expectedSectionRevisions: await revisions(),
+          }),
+        ).rejects.toThrow(expect.objectContaining({ code: "runtime.busy" }));
+
+        const result = await service.replace_remote_asset(
+          {
+            assetPath: asset_path,
+            content: "第一行\n第二行",
+            binding,
+            rows,
+            overrides: new Map(),
+            expectedSectionRevisions: await revisions(),
+          },
+          { under_agent: true },
+        );
+        expect(result.changes[0]).toMatchObject({ source: "remote_sync" });
+      } finally {
+        runtime_gate.finish_runtime(agent_lease);
+      }
+
+      expect((await database.read_asset_content(lg_path, asset_path))?.toString("utf8")).toBe(
+        "第一行\n第二行",
+      );
+      const saved = (await database.get_all_items(lg_path))
+        .map((item) => ({ row: Number(item["row"]), src: item["src"], dst: item["dst"] }))
+        .sort((left, right) => left.row - right.row);
+      expect(saved).toMatchObject([
+        { row: 0, src: "第一行", dst: "译文1" },
+        { row: 1, src: "第二行", dst: "" },
+      ]);
+    } finally {
+      await database.close();
+    }
+  });
+
   it("EPUB 整本替换写入二进制资产并按种子保留固定条目和正文译文", async () => {
     const { database, service, lg_path } = await create_service();
     const asset_path = "remote-novel.epub";

@@ -16,6 +16,7 @@ import {
   get_section_revision,
 } from "../project/project-data-reader";
 import type {
+  RemoteAssetReplaceOptions,
   RemoteAssetReplaceRequest,
   RemoteAssetRowOverride,
   RemoteSourceBindRequest,
@@ -71,7 +72,10 @@ const REMOTE_SYNC_MODES = ["add_only", "auto", "manual"] as const;
 export type RemoteSyncMode = (typeof REMOTE_SYNC_MODES)[number];
 
 export interface RemoteAssetWriter {
-  replace_remote_asset(request: RemoteAssetReplaceRequest): Promise<ProjectWriteResult>;
+  replace_remote_asset(
+    request: RemoteAssetReplaceRequest,
+    options?: RemoteAssetReplaceOptions,
+  ): Promise<ProjectWriteResult>;
   bind_remote_source(request: RemoteSourceBindRequest): Promise<ProjectWriteResult>;
 }
 
@@ -670,7 +674,10 @@ export class NovelSourceService implements RemoteNovelImportPort {
   }
 
   /** API 边界：按模式与人工覆盖应用预览，返回最终统计和写入结果。 */
-  public async apply_sync_request(body: JsonRecord): Promise<RemoteSyncApplyResult> {
+  public async apply_sync_request(
+    body: JsonRecord,
+    options: { under_agent?: boolean } = {},
+  ): Promise<RemoteSyncApplyResult> {
     const mode = body["mode"];
     if (mode !== "add_only" && mode !== "auto" && mode !== "manual") {
       throw new AppError("request.validation_failed", { public_details: { field: "mode" } });
@@ -678,7 +685,22 @@ export class NovelSourceService implements RemoteNovelImportPort {
     const stash_id = require_body_string(body, "stash_id");
     const stash = this.require_stash(stash_id);
     const overrides = normalize_sync_overrides(body["overrides"], mode, stash.plan);
-    return await this.apply_sync({ mode, stash_id, overrides });
+    return await this.apply_sync({
+      mode,
+      stash_id,
+      overrides,
+      under_agent: options.under_agent === true,
+    });
+  }
+
+  /** 界面提交要求运行时空闲；Agent 提交复用自身回合的写串行。 */
+  private async replace_remote_asset(
+    request: RemoteAssetReplaceRequest,
+    under_agent: boolean,
+  ): Promise<ProjectWriteResult> {
+    return under_agent
+      ? await this.writer.replace_remote_asset(request, { under_agent: true })
+      : await this.writer.replace_remote_asset(request);
   }
 
   /**
@@ -689,6 +711,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
     mode: RemoteSyncMode;
     stash_id: string;
     overrides: ReadonlyMap<number, RemoteAssetRowOverride>;
+    under_agent: boolean;
   }): Promise<RemoteSyncApplyResult> {
     const project_path = this.session_state.require_loaded_project_path();
     const stash = this.require_stash(input.stash_id);
@@ -718,6 +741,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
           stash,
           current,
           overrides: input.overrides,
+          under_agent: input.under_agent,
           files_revision,
           items_revision,
         });
@@ -742,24 +766,27 @@ export class NovelSourceService implements RemoteNovelImportPort {
               old_items: current.items,
             })
           : null;
-      const write = await this.writer.replace_remote_asset({
-        assetPath: binding.asset_path,
-        content: applied.text,
-        ...(epub_asset === null
-          ? {}
-          : {
-              assetBytes: epub_asset.bytes,
-              itemSeeds: epub_asset.content_seeds,
-              fixedItemSeeds: epub_asset.fixed_seeds,
-            }),
-        binding,
-        rows: applied.plan.rows,
-        overrides: input.overrides,
-        expectedSectionRevisions: {
-          files: files_revision,
-          items: items_revision,
+      const write = await this.replace_remote_asset(
+        {
+          assetPath: binding.asset_path,
+          content: applied.text,
+          ...(epub_asset === null
+            ? {}
+            : {
+                assetBytes: epub_asset.bytes,
+                itemSeeds: epub_asset.content_seeds,
+                fixedItemSeeds: epub_asset.fixed_seeds,
+              }),
+          binding,
+          rows: applied.plan.rows,
+          overrides: input.overrides,
+          expectedSectionRevisions: {
+            files: files_revision,
+            items: items_revision,
+          },
         },
-      });
+        input.under_agent,
+      );
       try {
         this.snapshots.write(project_path, binding, applied.text);
       } catch (cause) {
@@ -791,6 +818,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
     stash: SyncStash;
     current: { bytes: Uint8Array };
     overrides: ReadonlyMap<number, RemoteAssetRowOverride>;
+    under_agent: boolean;
     files_revision: number;
     items_revision: number;
   }): Promise<RemoteSyncApplyResult> {
@@ -823,21 +851,24 @@ export class NovelSourceService implements RemoteNovelImportPort {
       chapter_count: asset.map.documents.filter((document) => document.state === "active").length,
       synced_at: new Date().toISOString(),
     });
-    const write = await this.writer.replace_remote_asset({
-      assetPath: binding.asset_path,
-      content: asset.text,
-      assetBytes: asset.bytes,
-      itemSeeds: asset.content_seeds,
-      fixedItemSeeds: asset.fixed_seeds,
-      binding,
-      rows: plan.alignment.rows,
-      overrides: input.overrides,
-      expectedSectionRevisions: {
-        files: input.files_revision,
-        items: input.items_revision,
+    const write = await this.replace_remote_asset(
+      {
+        assetPath: binding.asset_path,
+        content: asset.text,
+        assetBytes: asset.bytes,
+        itemSeeds: asset.content_seeds,
+        fixedItemSeeds: asset.fixed_seeds,
+        binding,
+        rows: plan.alignment.rows,
+        overrides: input.overrides,
+        expectedSectionRevisions: {
+          files: input.files_revision,
+          items: input.items_revision,
+        },
+        extraMeta: { [REMOTE_EPUB_MAP_META_KEY]: asset.map as unknown as JsonValue },
       },
-      extraMeta: { [REMOTE_EPUB_MAP_META_KEY]: asset.map as unknown as JsonValue },
-    });
+      input.under_agent,
+    );
     try {
       this.snapshots.write(project_path, binding, asset.text);
     } catch (cause) {
