@@ -47,6 +47,8 @@ import type { AgentNovelChaptersPort } from "./tools/novel-chapters";
 import type { AgentNovelChapterImportPort } from "./tools/novel-chapter-import";
 import type { AgentNovelChapterReadPort } from "./tools/novel-chapter-read";
 import type { AgentNovelChapterSyncPort } from "./tools/novel-chapter-sync";
+import type { AgentNovelSyncPreviewPort } from "./tools/novel-sync-preview";
+import type { AgentNovelSyncApplyPort } from "./tools/novel-sync-apply";
 import * as workspace_tools from "./tools/workspace-run";
 import { ProjectSessionState } from "../project/project-session-state";
 import { RuntimeOperationGate } from "../runtime-operation-gate";
@@ -2548,7 +2550,7 @@ describe("AgentService", () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
-  it("宿主提供章节端口时注册 novel 工具，端口缺席时不注册", async () => {
+  it("宿主提供远程小说端口时注册 novel 工具，端口缺席时不注册", async () => {
     const novel_chapters = vi.fn<AgentNovelChaptersPort>(async () => ({
       origin: "https://n.novelia.cc",
       host: "n.novelia.cc",
@@ -2576,6 +2578,8 @@ describe("AgentService", () => {
     expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapters");
     expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_chapter_import");
     expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_chapter_read");
+    expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_sync_preview");
+    expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_sync_apply");
 
     const with_read = await create_service(
       true,
@@ -2659,6 +2663,30 @@ describe("AgentService", () => {
     await wait_for_idle(with_import.service);
 
     expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapter_import");
+
+    const novel_sync_preview = vi.fn<AgentNovelSyncPreviewPort>();
+    const novel_sync_apply = vi.fn<AgentNovelSyncApplyPort>();
+    const with_whole_book_sync = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      novel_chapters,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      novel_sync_preview,
+      novel_sync_apply,
+    );
+    await with_whole_book_sync.service.send_message({ text: "同步整本", attachments: [] });
+    await wait_for_idle(with_whole_book_sync.service);
+
+    expect(fake_agent_state.tool_names.at(-1)).toContain("novel_sync_preview");
+    expect(fake_agent_state.tool_names.at(-1)).toContain("novel_sync_apply");
   });
 
   it("预览读取在请求前后校验会话，重置期间的旧响应失效", async () => {
@@ -4996,6 +5024,8 @@ describe("AgentService", () => {
     novel_chapter_sync?: AgentNovelChapterSyncPort,
     term_lookup?: AgentTermLookupPort,
     term_lookup_enabled = true,
+    novel_sync_preview?: AgentNovelSyncPreviewPort,
+    novel_sync_apply?: AgentNovelSyncApplyPort,
   ): Promise<{
     workspace: AgentWorkspacePort;
     service: AgentService;
@@ -5177,6 +5207,8 @@ describe("AgentService", () => {
       novelChapterImport: novel_chapter_import,
       novelChapterRead: novel_chapter_read,
       novelChapterSync: novel_chapter_sync,
+      novelSyncPreview: novel_sync_preview,
+      novelSyncApply: novel_sync_apply,
       workspace: effective_workspace,
       logManager: { append: log_append },
       publish,

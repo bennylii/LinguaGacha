@@ -189,6 +189,14 @@ export class GuiBackendBootstrap {
           services.remote.chapters.read_chapter(request, signal),
         novelChapterSync: (request, signal) =>
           services.remote.chapters.sync_chapter(request, signal),
+        novelSyncPreview: (signal) => services.remote.sources.preview_sync(signal),
+        novelSyncApply: (request, signal) => {
+          signal.throwIfAborted();
+          return services.remote.sources.apply_sync_request(
+            { stash_id: request.stash_id, mode: request.mode },
+            { under_agent: true },
+          );
+        },
         workspace,
         logManager: resources.logManager,
         publish: (topic, payload) => event_stream.publish(topic, payload),

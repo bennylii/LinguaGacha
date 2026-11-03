@@ -85,6 +85,14 @@ import {
   create_agent_novel_chapter_sync_tool,
   type AgentNovelChapterSyncPort,
 } from "./tools/novel-chapter-sync";
+import {
+  create_agent_novel_sync_preview_tool,
+  type AgentNovelSyncPreviewPort,
+} from "./tools/novel-sync-preview";
+import {
+  create_agent_novel_sync_apply_tool,
+  type AgentNovelSyncApplyPort,
+} from "./tools/novel-sync-apply";
 import type { AgentWorkspacePort } from "./workspace/service";
 import { create_agent_workspace_run_tool } from "./tools/workspace-run";
 import { format_agent_skills_for_system_prompt } from "./agent-skills";
@@ -133,6 +141,8 @@ type AgentServiceOptions = {
   novelChapterImport: AgentNovelChapterImportPort | undefined;
   novelChapterRead: AgentNovelChapterReadPort | undefined;
   novelChapterSync: AgentNovelChapterSyncPort | undefined;
+  novelSyncPreview: AgentNovelSyncPreviewPort | undefined;
+  novelSyncApply: AgentNovelSyncApplyPort | undefined;
   workspace: AgentWorkspacePort;
   images: Pick<AgentImageService, "prepare" | "clear">;
   logManager: Pick<LogManager, "append">;
@@ -183,6 +193,8 @@ export class AgentService {
   private readonly novel_chapter_import: AgentNovelChapterImportPort | undefined;
   private readonly novel_chapter_read: AgentNovelChapterReadPort | undefined;
   private readonly novel_chapter_sync: AgentNovelChapterSyncPort | undefined;
+  private readonly novel_sync_preview: AgentNovelSyncPreviewPort | undefined;
+  private readonly novel_sync_apply: AgentNovelSyncApplyPort | undefined;
   private readonly workspace: AgentWorkspacePort;
   private readonly images: AgentServiceOptions["images"];
   private readonly log_manager: AgentServiceOptions["logManager"];
@@ -239,6 +251,8 @@ export class AgentService {
     this.novel_chapter_import = options.novelChapterImport;
     this.novel_chapter_read = options.novelChapterRead;
     this.novel_chapter_sync = options.novelChapterSync;
+    this.novel_sync_preview = options.novelSyncPreview;
+    this.novel_sync_apply = options.novelSyncApply;
     this.workspace = options.workspace;
     this.images = options.images;
     this.log_manager = options.logManager;
@@ -1536,6 +1550,29 @@ export class AgentService {
               this.session_state.require_loaded_project_path();
               signal.throwIfAborted();
               return this.novel_chapter_sync!(request, signal);
+            }),
+          ]),
+      ...(this.novel_sync_preview === undefined
+        ? []
+        : [
+            create_agent_novel_sync_preview_tool((signal) => {
+              // 预览只下载远端并写内存暂存，不需要写租约。
+              this.require_execution();
+              this.session_state.require_loaded_project_path();
+              signal.throwIfAborted();
+              return this.novel_sync_preview!(signal);
+            }),
+          ]),
+      ...(this.novel_sync_apply === undefined
+        ? []
+        : [
+            create_agent_novel_sync_apply_tool((request, signal) => {
+              const execution = this.require_execution();
+              this.session_state.require_loaded_project_path();
+              signal.throwIfAborted();
+              // 提交会替换资产并重建条目，必须仍然持有当前 Agent 执行租约。
+              this.runtime_gate.assert_current_runtime(execution.lease, "agent");
+              return this.novel_sync_apply!(request, signal);
             }),
           ]),
     ];
