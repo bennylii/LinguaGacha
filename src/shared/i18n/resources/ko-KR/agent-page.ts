@@ -164,6 +164,9 @@ export const ko_kr_agent_page = {
     error: "실패 · {duration}",
     stopped: "중지됨 · {duration}",
   },
+  timeline: {
+    show_earlier: "이전 {count}개 라운드 표시",
+  },
   upload: { uploading: "업로드 중", failed: "업로드 실패" },
   file_saved: "파일을 저장했습니다",
   error: {

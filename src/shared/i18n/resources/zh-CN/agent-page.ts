@@ -158,6 +158,9 @@ export const zh_cn_agent_page = {
     error: "失败 · {duration}",
     stopped: "已停止 · {duration}",
   },
+  timeline: {
+    show_earlier: "显示更早的 {count} 轮",
+  },
   upload: { uploading: "正在上传", failed: "上传失败" },
   file_saved: "文件已保存",
   error: {

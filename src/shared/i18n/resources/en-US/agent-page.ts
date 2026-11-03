@@ -169,6 +169,9 @@ export const en_us_agent_page = {
     error: "Failed · {duration}",
     stopped: "Stopped · {duration}",
   },
+  timeline: {
+    show_earlier: "Show {count} earlier rounds",
+  },
   upload: { uploading: "Uploading", failed: "Upload failed" },
   file_saved: "File saved",
   error: {

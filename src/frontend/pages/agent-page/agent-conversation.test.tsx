@@ -143,6 +143,7 @@ function install_scroll_metrics(target: HTMLElement, metrics: ScrollMetrics): vo
 }
 
 vi.mock("@frontend/app/session/agent/agent-chat-context", () => ({
+  useAgentChatId: () => "test-chat",
   useAgentTokenSpeed: () => null,
   useAgentTimeline: () => read_test_timeline().read(),
   useAgentEntry: (id: string | null) => read_test_timeline().entry(id),

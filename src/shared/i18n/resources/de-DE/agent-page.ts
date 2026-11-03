@@ -169,6 +169,9 @@ export const de_de_agent_page = {
     error: "Fehlgeschlagen · {duration}",
     stopped: "Gestoppt · {duration}",
   },
+  timeline: {
+    show_earlier: "{count} frühere Runden anzeigen",
+  },
   upload: {
     uploading: "Wird hochgeladen",
     failed: "Upload fehlgeschlagen",

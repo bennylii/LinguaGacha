@@ -608,6 +608,7 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
               skills={skills}
               compact_available={compact_available}
               on_compact={compact_context}
+              follow_latest={follow_latest}
               follow_reset_revision={follow_reset_revision}
               on_continue={continue_latest_round}
               auto_resume={controls.autoResume}

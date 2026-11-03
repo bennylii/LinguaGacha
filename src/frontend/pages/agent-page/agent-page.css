@@ -178,6 +178,12 @@
   margin-top: 4px;
 }
 
+/* 更早轮次按页换入，入口留在信息流顶部，不改变消息的角色对齐。 */
+.agent-page__timeline-earlier {
+  display: flex;
+  justify-content: center;
+}
+
 .agent-message {
   min-width: 0;
 }

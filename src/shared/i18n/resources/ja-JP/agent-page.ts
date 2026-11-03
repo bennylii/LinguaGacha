@@ -165,6 +165,9 @@ export const ja_jp_agent_page = {
     error: "失敗 · {duration}",
     stopped: "停止済み · {duration}",
   },
+  timeline: {
+    show_earlier: "以前の {count} ラウンドを表示",
+  },
   upload: { uploading: "アップロード中", failed: "アップロードに失敗" },
   file_saved: "ファイルを保存しました",
   error: {

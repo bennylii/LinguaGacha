@@ -108,6 +108,7 @@ describe("AgentTimeline", () => {
     skills: readonly AgentSkillSnapshot[] = [],
     auto_resume: AgentAutoResumeSnapshot | null = null,
     auto_continue: AgentAutoContinueSnapshot | null = null,
+    follow_latest = true,
   ): Promise<HTMLDivElement> {
     if (container === null) {
       container = document.createElement("div");
@@ -124,7 +125,7 @@ describe("AgentTimeline", () => {
               skills={skills}
               compact_available
               on_compact={on_compact}
-
+              follow_latest={follow_latest}
               follow_reset_revision={follow_reset_revision}
               on_continue={on_continue}
               auto_resume={auto_resume}
@@ -825,6 +826,60 @@ describe("AgentTimeline", () => {
       '请用 @skill("glossary-audit")\n查询',
     );
     expect(view.querySelector(".agent-round-footer")?.textContent).toContain("2s");
+  });
+
+  it("长会话只挂载最近轮次，并按页展开更早内容", async () => {
+    const entries = Array.from({ length: 45 }, (_, index) =>
+      user_entry(`user-${index}`, `任务 ${index}`, "success", index * 1_000, index * 1_000 + 500),
+    );
+    const view = await render_timeline(entries, 0, [], null, null, false);
+    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(20);
+    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 25");
+
+    const earlier = view.querySelector<HTMLButtonElement>(".agent-page__timeline-earlier button");
+    expect(earlier?.textContent).toBe("agent_page.timeline.show_earlier:20");
+    await act(async () => earlier?.click());
+    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(40);
+    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 5");
+    expect(
+      view.querySelector<HTMLButtonElement>(".agent-page__timeline-earlier button")?.textContent,
+    ).toBe("agent_page.timeline.show_earlier:5");
+
+    await act(async () =>
+      view.querySelector<HTMLButtonElement>(".agent-page__timeline-earlier button")?.click(),
+    );
+    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(45);
+    expect(view.querySelector(".agent-page__timeline-earlier")).toBeNull();
+  });
+
+  it("阅读历史时新增轮次不挤掉已展示内容，回到跟随后恢复最近窗口", async () => {
+    const first_batch = Array.from({ length: 30 }, (_, index) =>
+      user_entry(`user-${index}`, `任务 ${index}`, "success", index * 1_000, index * 1_000 + 500),
+    );
+    const view = await render_timeline(first_batch, 0, [], null, null, false);
+    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(20);
+    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 10");
+
+    const next_batch = [
+      ...first_batch,
+      ...Array.from({ length: 5 }, (_, index) => {
+        const position = first_batch.length + index;
+        return user_entry(
+          `user-${position}`,
+          `任务 ${position}`,
+          "success",
+          position * 1_000,
+          position * 1_000 + 500,
+        );
+      }),
+    ];
+    await render_timeline(next_batch, 0, [], null, null, false);
+    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(25);
+    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 10");
+
+    await render_timeline(next_batch, 0, [], null, null, true);
+    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(20);
+    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 15");
   });
 });
 

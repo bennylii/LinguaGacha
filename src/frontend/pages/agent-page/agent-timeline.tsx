@@ -1,5 +1,6 @@
 import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
 import {
+  useAgentChatId,
   useAgentEntry,
   useAgentRound,
   useAgentTimeline,
@@ -47,6 +48,9 @@ type Translate = ReturnType<typeof useI18n>["t"];
 type UserEntry = Extract<AgentEntry, { kind: "user_message" }>;
 type AssistantEntry = Extract<AgentEntry, { kind: "assistant_message" }>;
 const AGENT_THINKING_AUTO_COLLAPSE_DELAY_MS = 3_000; // 给用户留出确认终态的短暂视觉窗口
+// 历史正文全部常驻会持续放大布局与流式重绘成本。这里只限制渲染窗口，快照与模型上下文不丢弃。
+const AGENT_TIMELINE_RENDER_ROUNDS = 20;
+const AGENT_TIMELINE_RENDER_ROUND_PAGE = 20;
 
 /** 页面提供交互与展示设置，时间线事实由各层独立订阅。 */
 type AgentTimelineProps = {
@@ -55,6 +59,7 @@ type AgentTimelineProps = {
   compact_available: boolean;
   on_compact: () => void;
 
+  follow_latest: boolean;
   follow_reset_revision: number;
   on_continue: () => void;
   auto_resume: AgentAutoResumeSnapshot | null;
@@ -78,15 +83,51 @@ export function AgentTimeline(props: AgentTimelineProps): JSX.Element {
     if (props.active === false) set_selected_tool_id(null);
   }, [props.active]);
   const { roundIds, latestCompactionId } = useAgentTimeline();
+  const chat_id = useAgentChatId();
   const selected = useAgentEntry(selected_tool_id);
   const selected_tool = selected?.kind === "tool_call" ? selected : null;
+  // null 表示窗口贴住最新轮次；数字是用户显式展开后的最早可见轮次。
+  const [window_start, set_window_start] = useState<number | null>(null);
+  const natural_start = Math.max(0, roundIds.length - AGENT_TIMELINE_RENDER_ROUNDS);
+  const visible_start = Math.min(window_start ?? natural_start, natural_start);
+  const visible_rounds = roundIds.slice(visible_start);
+
+  // 换会话后重新贴住最新轮次，避免沿用上一段对话的展开位置。
+  useEffect(() => {
+    set_window_start(null);
+  }, [chat_id]);
+
+  // 跟随最新时窗口自动滑动；阅读历史时冻结最早可见轮次，新轮次只追加在下方。
+  useEffect(() => {
+    if (props.follow_latest) {
+      set_window_start(null);
+      return;
+    }
+    set_window_start((current) => current ?? natural_start);
+  }, [props.follow_latest, natural_start]);
+
+  const show_earlier = (): void => {
+    set_window_start((current) =>
+      Math.max(0, (current ?? natural_start) - AGENT_TIMELINE_RENDER_ROUND_PAGE),
+    );
+  };
+
   return (
     <>
       <AgentResponseAnnotationSelection
         disabled={props.annotation_disabled}
         on_add={props.on_add_annotation}
       >
-        {roundIds.map((roundId, index) => (
+        {visible_start === 0 ? null : (
+          <div className="agent-page__timeline-earlier">
+            <AppButton type="button" size="xs" variant="ghost" onClick={show_earlier}>
+              {t("agent_page.timeline.show_earlier", {
+                count: Math.min(visible_start, AGENT_TIMELINE_RENDER_ROUND_PAGE).toString(),
+              })}
+            </AppButton>
+          </div>
+        )}
+        {visible_rounds.map((roundId, index) => (
           <AgentRound
             key={roundId}
             roundId={roundId}
@@ -97,7 +138,7 @@ export function AgentTimeline(props: AgentTimelineProps): JSX.Element {
 
             follow_reset_revision={props.follow_reset_revision}
             t={t}
-            is_latest_round={index === roundIds.length - 1}
+            is_latest_round={index === visible_rounds.length - 1}
             on_continue={props.on_continue}
             auto_resume={props.auto_resume}
             on_cancel_auto_resume={props.on_cancel_auto_resume}
