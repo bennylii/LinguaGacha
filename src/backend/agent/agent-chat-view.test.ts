@@ -543,7 +543,7 @@ it("timeline_window 拒绝失效游标与非法页大小", () => {
   expect(() => view.timeline_window(null, 0)).toThrow("Agent timeline page size is invalid.");
 });
 
-it("分页只携带工具输出预览，完整输出仍保留在投影内", () => {
+it("常驻投影只保留工具输出预览，完整输出按条目身份按需读回", () => {
   const conversationId = 1 as ConversationId;
   const state = AgentChatDoc.definition.initial(null);
   state.rounds.round = {
@@ -592,15 +592,25 @@ it("分页只携带工具输出预览，完整输出仍保留在投影内", () =
     },
   ];
   const view = new AgentChatView();
+  // 生产路径由 restore_records / observe 填充原始记录，测试显式补上。
+  for (const record of records) view.records.set(record.id, record);
   view.reset(records, new Map(), [], {}, state);
 
-  const full = view.entries.find((entry) => entry.kind === "tool_call");
+  const tool_id = "tool:2:call";
+  const projection = view.entries.find((entry) => entry.kind === "tool_call");
   const preview = view
     .timeline_window(null, 40)
     .entries.find((entry) => entry.kind === "tool_call");
 
-  expect(full).toMatchObject({ output: ["x".repeat(3000)], outputTruncated: false });
+  // 常驻 rows 与分页窗口都只有预览，完整正文不重复持有。
+  expect(projection).toMatchObject({ output: ["x".repeat(2048)], outputTruncated: true });
   expect(preview).toMatchObject({ output: ["x".repeat(2048)], outputTruncated: true });
+  // 详情弹窗按身份读回完整输出，且清除截断标记。
+  expect(view.read_full_entry(tool_id)).toMatchObject({
+    output: ["x".repeat(3000)],
+    outputTruncated: false,
+  });
+  expect(view.read_full_entry("missing")).toBeUndefined();
 });
 
 /** 构造按记录身份排序的轮次历史，轮次头后接指定数量的助手内容。 */

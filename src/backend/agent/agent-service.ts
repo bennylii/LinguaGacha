@@ -452,9 +452,9 @@ export class AgentService {
     const id = request["id"];
     if (typeof id !== "string" || id === "")
       throw agent_queue_validation_error("agent_timeline_entry_unavailable");
-    const entry = chat.entries.find((candidate) => candidate.id === id);
-    if (entry === undefined)
-      throw agent_queue_validation_error("agent_timeline_entry_unavailable");
+    // 时间线只持有预览，详情弹窗按条目身份读回完整工具输出。
+    const entry = chat.view.read_full_entry(id);
+    if (entry === undefined) throw agent_queue_validation_error("agent_timeline_entry_unavailable");
     return { revision: this.revision, chatId: this.chat_id, entry };
   }
 
@@ -826,7 +826,8 @@ export class AgentService {
     const target = entries[index];
     // 日志记录目标所属轮次，历史修订不能误记为最新轮次。
     const round = entries.findLast(
-      (entry, position) => position <= index && entry.kind === "user_message" && is_round_header(entry),
+      (entry, position) =>
+        position <= index && entry.kind === "user_message" && is_round_header(entry),
     );
     const valid =
       target?.kind === "user_message"

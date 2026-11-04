@@ -125,6 +125,11 @@ export class AgentChatView {
   private readonly rows = new Map<string, Row>();
   private readonly inputSubmissions = new Map<number, SubmissionRecord>(); // 旧历史通过条目身份定位原提交回执
   private readonly calls = new Map<string, string>(); // 工具调用身份到公开条目的查询索引
+  /** 工具结果所在的 SDK 记录身份，供详情弹窗按需读回完整正文。 */
+  private readonly toolResultLocations = new Map<
+    string,
+    { recordId: number; toolCallId: string }
+  >();
   private readonly userRecords = new Map<string, EntryRecord>(); // 轮次状态变化时定位原用户消息
   private readonly changed = new Map<string, AgentEntry>(); // 尚未发布的条目，同一身份只保留最新值
   private readonly pendingRecords = new Set<number>();
@@ -236,6 +241,38 @@ export class AgentChatView {
       if (input.roundId === roundId) return root;
     }
     return root;
+  }
+
+  /**
+   * 按公开条目身份读取完整内容。时间线只持有工具输出预览，完整正文按需从
+   * 已提交的原始记录重建；阶段 1 改由存储窄查询提供时，本方法签名保持不变。
+   */
+  public read_full_entry(id: string): AgentEntry | undefined {
+    const row = this.rows.get(id);
+    if (row === undefined || row.entry.kind !== "tool_call") return row?.entry;
+    const location = this.toolResultLocations.get(id);
+    if (location === undefined) return row.entry;
+    // toolResult 位于发起调用之后的独立记录，位置索引只存身份，不常驻正文。
+    const result = this.records
+      .get(location.recordId)
+      ?.model?.find(
+        (message) => message.role === "toolResult" && message.toolCallId === location.toolCallId,
+      );
+    if (result === undefined || result.role !== "toolResult" || row.entry.status === "running")
+      return row.entry;
+    const output = result.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+    // 显式重建为终态工具条目，避免判别联合在展开时与 running 变体的 null 输出冲突。
+    return {
+      kind: "tool_call",
+      id: row.entry.id,
+      roundId: row.entry.roundId,
+      toolName: row.entry.toolName,
+      input: row.entry.input,
+      createdAt: row.entry.createdAt,
+      status: row.entry.status,
+      output,
+      outputTruncated: false,
+    };
   }
 
   /** 实例故障只覆盖当前公开轮次，重开投影仍由持久化回执决定。 */
@@ -391,6 +428,7 @@ export class AgentChatView {
     this.rows.clear();
     this.inputSubmissions.clear();
     this.calls.clear();
+    this.toolResultLocations.clear();
     this.userRecords.clear();
     this.changed.clear();
     this.order = [];
@@ -430,7 +468,10 @@ export class AgentChatView {
   }
 
   /** 同一身份原位更新，删除或非尾部顺序变化要求发布完整快照。 */
-  private put(entry: AgentEntry, order: number): void {
+  private put(raw: AgentEntry, order: number): void {
+    // 完整工具正文只留在 SDK 原始记录里，常驻投影与变更缓冲统一持有预览，
+    // 避免同一份大输出在 rows、changed、快照与事件里各占一份。
+    const entry = to_public_entry(raw);
     const previous = this.rows.get(entry.id);
     if (previous?.order === order && isDeepStrictEqual(previous.entry, entry)) return;
     this.rows.set(entry.id, { entry, order });
@@ -461,6 +502,7 @@ export class AgentChatView {
   /** 移除已撤回的临时正文，并让前端重新取得完整顺序。 */
   private remove(id: string): void {
     if (!this.rows.delete(id)) return;
+    this.toolResultLocations.delete(id);
     this.changed.delete(id);
     this.order = this.order.filter((candidate) => candidate !== id);
     this.replace = true;
@@ -572,8 +614,13 @@ export class AgentChatView {
         }
       } else if (message.role === "toolResult") {
         const id = this.calls.get(message.toolCallId);
-        const row = id === undefined ? undefined : this.rows.get(id);
+        if (id === undefined) continue;
+        const row = this.rows.get(id);
         if (row?.entry.kind !== "tool_call") continue;
+        this.toolResultLocations.set(id, {
+          recordId: record.id,
+          toolCallId: message.toolCallId,
+        });
         this.put(
           {
             ...row.entry,

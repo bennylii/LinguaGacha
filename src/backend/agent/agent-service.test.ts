@@ -4265,7 +4265,15 @@ describe("AgentService", () => {
     ) {
       if (delivery === "auto_continue")
         return Promise.reject(new Error("auto continue submit failed"));
-      return original_submit.call(this, message, prepared, execution, delivery, queuedId, commandId);
+      return original_submit.call(
+        this,
+        message,
+        prepared,
+        execution,
+        delivery,
+        queuedId,
+        commandId,
+      );
     });
 
     await service.send_message({ text: "提交失败", attachments: [] });
@@ -4460,27 +4468,43 @@ describe("AgentService", () => {
     ).rejects.toMatchObject({ code: "request.validation_failed" });
   });
 
-  it("工具详情按条目身份读取完整输出", async () => {
-    const { service } = await create_service();
-    fake_agent_state.mode = "tools";
-    await service.send_message({ text: "查询", attachments: [] });
-    await wait_for_idle(service);
-    const snapshot = service.get_snapshot();
-    const tool = snapshot.entries.find((entry) => entry.kind === "tool_call");
-    expect(tool).toBeDefined();
+  it("工具详情按条目身份读取完整输出，时间线只保留预览", async () => {
+    const full = "z".repeat(3000);
+    const create_tools = workspace_tools.create_agent_workspace_run_tool;
+    const mock = vi
+      .spyOn(workspace_tools, "create_agent_workspace_run_tool")
+      .mockImplementation((options) => ({
+        ...create_tools(options),
+        execute: async () => ({ output: [{ type: "text", text: full }], details: {} }),
+      }));
+    try {
+      const { service } = await create_service();
+      fake_agent_state.mode = "tool_only";
+      await service.send_message({ text: "查询", attachments: [] });
+      await wait_for_idle(service);
+      const snapshot = service.get_snapshot();
+      const tool = snapshot.entries.find((entry) => entry.kind === "tool_call");
+      expect(tool).toBeDefined();
+      expect(tool).toMatchObject({
+        output: ["z".repeat(2048)],
+        outputTruncated: true,
+      });
 
-    await expect(
-      service.get_timeline_entry({ chatId: snapshot.chatId, id: tool!.id }),
-    ).resolves.toMatchObject({
-      chatId: snapshot.chatId,
-      entry: { kind: "tool_call", id: tool!.id, output: expect.any(Array) },
-    });
-    await expect(
-      service.get_timeline_entry({ chatId: snapshot.chatId, id: "missing" }),
-    ).rejects.toMatchObject({ code: "request.validation_failed" });
-    await expect(
-      service.get_timeline_entry({ chatId: snapshot.chatId, id: "" }),
-    ).rejects.toMatchObject({ code: "request.validation_failed" });
+      await expect(
+        service.get_timeline_entry({ chatId: snapshot.chatId, id: tool!.id }),
+      ).resolves.toMatchObject({
+        chatId: snapshot.chatId,
+        entry: { kind: "tool_call", id: tool!.id, output: [full], outputTruncated: false },
+      });
+      await expect(
+        service.get_timeline_entry({ chatId: snapshot.chatId, id: "missing" }),
+      ).rejects.toMatchObject({ code: "request.validation_failed" });
+      await expect(
+        service.get_timeline_entry({ chatId: snapshot.chatId, id: "" }),
+      ).rejects.toMatchObject({ code: "request.validation_failed" });
+    } finally {
+      mock.mockRestore();
+    }
   });
 
   it("已受理 steer 的后续生成失败时，整个产品轮次失败并暂停草稿", async () => {
