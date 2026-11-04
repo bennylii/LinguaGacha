@@ -441,6 +441,101 @@ it("timeline_window 允许轮次头加加载更早的部分轮次", () => {
   expect(window).toMatchObject({ hasEarlier: true, nextCursor: "assistant:entry:11" });
 });
 
+it("压缩条目按任务身份归属历史轮次，不被最新轮次覆盖", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 2, compaction: true },
+    { id: "round-2", content: 2 },
+  ]);
+
+  const compaction = view.entries.find((entry) => entry.kind === "context_compaction");
+  expect(compaction?.roundId).toBe("round-1");
+});
+
+it("历史页按压缩条目真实轮次分页，不把最新轮次标记为更早", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 1, compaction: true },
+    { id: "round-2", content: 1 },
+    { id: "round-3", content: 1 },
+  ]);
+
+  const latest = view.timeline_window(null, 1);
+  expect(latest.rounds).toEqual([{ id: "round-3", hasEarlier: false }]);
+
+  const middle = view.timeline_window(latest.nextCursor, 1);
+  const earliest = view.timeline_window(middle.nextCursor, 1);
+  // 含历史压缩的页面只带自己的轮次头，不会把最新轮次头带回来。
+  expect(earliest.entries.map((entry) => entry.id)).toEqual(["compaction:3"]);
+  expect(earliest.rounds).toEqual([
+    { id: "round-1", hasEarlier: true },
+    { id: "round-2", hasEarlier: false },
+  ]);
+});
+
+it("压缩任务晚于后续轮次完成时仍归属创建时的轮次", () => {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  state.rounds["round-1"] = {
+    status: "success",
+    checkpoint: 0 as EntryId,
+    endedAt: 10,
+    averageTokensPerSecond: null,
+    failure: null,
+  };
+  state.rounds["round-2"] = { ...state.rounds["round-1"] };
+  const input = (id: number, roundId: string): EntryRecord => ({
+    id: id as EntryId,
+    conversationId,
+    kind: AGENT_INPUT_ENTRY_KIND,
+    data: {
+      roundId,
+      message: { text: roundId, attachments: [] },
+      delivery: "round",
+      queuedId: null,
+    },
+  });
+  const answer = (id: number): EntryRecord => ({
+    id: id as EntryId,
+    conversationId,
+    kind: "test",
+    model: [fauxAssistantMessage(`answer-${id}`, { timestamp: id })],
+  });
+  const running = {
+    id: 2 as TaskId<JsonValue>,
+    conversationId,
+    kind: "pi.compaction",
+    version: 1,
+    input: { reason: "manual" },
+    background: false,
+    abortRequested: false,
+    state: { status: "running", checkpoint: null },
+  } satisfies TaskRecord<JsonValue, JsonValue, JsonValue>;
+  const view = new AgentChatView();
+  view.observe({
+    seq: 1 as Seq,
+    changes: [
+      ...([input(1, "round-1"), answer(4), input(5, "round-2"), answer(6)] as EntryRecord[]).map(
+        (value) => ({ type: "entry" as const, value }),
+      ),
+      { type: "task", value: running },
+    ],
+  });
+  view.refresh(conversationId, state);
+  const timed = { ...state, compactionStartedAt: { 2: 1000 } };
+  view.refresh(conversationId, timed);
+  expect(view.entries.find((entry) => entry.kind === "context_compaction")?.roundId).toBe(
+    "round-1",
+  );
+  const completed = {
+    ...running,
+    state: { status: "terminal", outcome: { status: "completed", result: { entryId: 3 } } },
+  } satisfies TaskRecord<JsonValue, JsonValue, JsonValue>;
+  view.observe({ seq: 2 as Seq, changes: [{ type: "task", value: completed }] });
+  view.refresh(conversationId, timed);
+  expect(view.entries.find((entry) => entry.kind === "context_compaction")?.roundId).toBe(
+    "round-1",
+  );
+});
+
 it("timeline_window 拒绝失效游标与非法页大小", () => {
   const { view } = timeline_fixture([{ id: "round-1", content: 1 }]);
 
@@ -500,20 +595,23 @@ it("分页只携带工具输出预览，完整输出仍保留在投影内", () =
   view.reset(records, new Map(), [], {}, state);
 
   const full = view.entries.find((entry) => entry.kind === "tool_call");
-  const preview = view.timeline_window(null, 40).entries.find((entry) => entry.kind === "tool_call");
+  const preview = view
+    .timeline_window(null, 40)
+    .entries.find((entry) => entry.kind === "tool_call");
 
   expect(full).toMatchObject({ output: ["x".repeat(3000)], outputTruncated: false });
   expect(preview).toMatchObject({ output: ["x".repeat(2048)], outputTruncated: true });
 });
 
 /** 构造按记录身份排序的轮次历史，轮次头后接指定数量的助手内容。 */
-function timeline_fixture(rounds: Array<{ id: string; content: number }>): {
+function timeline_fixture(rounds: Array<{ id: string; content: number; compaction?: boolean }>): {
   view: AgentChatView;
   state: ReturnType<typeof AgentChatDoc.definition.initial>;
 } {
   const conversationId = 1 as ConversationId;
   const state = AgentChatDoc.definition.initial(null);
   const records: EntryRecord[] = [];
+  const tasks: TaskRecord<JsonValue, JsonValue, JsonValue>[] = [];
   let next_id = 1;
   for (const round of rounds) {
     records.push({
@@ -543,8 +641,23 @@ function timeline_fixture(rounds: Array<{ id: string; content: number }>): {
         model: [fauxAssistantMessage(`${round.id}-${index}`, { timestamp: id })],
       });
     }
+    // 压缩任务与条目共用身份序列，因此能落在该轮次内容之间。
+    if (round.compaction === true) {
+      const id = next_id++;
+      tasks.push({
+        id: id as TaskId<JsonValue>,
+        conversationId,
+        kind: "pi.compaction",
+        version: 1,
+        input: { reason: "manual" },
+        background: false,
+        abortRequested: false,
+        state: { status: "terminal", outcome: { status: "completed", result: { entryId: 3 } } },
+      });
+      state.compactionStartedAt[id] = id;
+    }
   }
   const view = new AgentChatView();
-  view.reset(records, new Map(), [], {}, state);
+  view.reset(records, new Map(), tasks, {}, state);
   return { view, state };
 }

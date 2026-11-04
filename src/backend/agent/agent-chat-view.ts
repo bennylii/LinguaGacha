@@ -97,6 +97,18 @@ function truncate_utf8(value: string, max_bytes: number): string {
   return value.slice(0, end);
 }
 
+/** 用户输入按历史身份标记轮次起点；压缩等无输入条目据此归属轮次。 */
+type RoundMark = { id: number; roundId: string };
+
+/** 任务属于其提交位置之前最近的用户轮次，读取顺序和后续轮次都不能改变它。 */
+function read_round_at(marks: readonly RoundMark[], order: number): string | undefined {
+  let round: string | undefined;
+  for (const mark of marks) {
+    if (mark.id > order) break;
+    round = mark.roundId;
+  }
+  return round;
+}
 
 /** 可重建的公开投影。原始事实和查询索引只在这里保存，正文更新不扫描历史。 */
 export class AgentChatView {
@@ -336,9 +348,14 @@ export class AgentChatView {
           if (startedAt !== previous.compactionStartedAt[id]) this.pendingTasks.add(Number(id));
         }
       }
-      for (const id of this.pendingTasks) {
-        const task = this.compactions.get(id)!;
-        if (this.visible(task.conversationId, id)) this.read_task(task);
+      if (this.pendingTasks.size > 0) {
+        // 压缩任务可能晚于后续轮次提交，按任务身份而不是读取顺序归属轮次。
+        const round_marks = this.read_round_marks(this.branch_records());
+        for (const id of this.pendingTasks) {
+          const task = this.compactions.get(id)!;
+          if (this.visible(task.conversationId, id))
+            this.read_task(task, read_round_at(round_marks, task.id));
+        }
       }
       if (this.liveChanged || previous.rounds !== state.rounds)
         this.read_live(this.live.get(conversationId) ?? {});
@@ -393,7 +410,8 @@ export class AgentChatView {
     this.restoring = true;
     try {
       for (const record of records) this.read_record(record);
-      for (const task of tasks) this.read_task(task);
+      const round_marks = this.read_round_marks(records);
+      for (const task of tasks) this.read_task(task, read_round_at(round_marks, task.id));
       this.read_live(live);
     } finally {
       this.restoring = false;
@@ -453,6 +471,16 @@ export class AgentChatView {
     return read_agent_input(record, this.inputSubmissions.get(record.id), this.state);
   }
 
+  /** 按身份顺序记录每个用户输入开启的轮次，供无输入条目归属。 */
+  private read_round_marks(records: readonly EntryRecord[]): RoundMark[] {
+    const marks: RoundMark[] = [];
+    for (const record of records) {
+      const input = this.read_input(record);
+      if (input !== undefined) marks.push({ id: record.id, roundId: input.roundId });
+    }
+    return marks;
+  }
+
   /** `hidden`、`auto_resume`、`manual_continue` 留在模型历史，普通输入与 `steer` 按产品身份展示。 */
   private read_user(record: EntryRecord, input: AgentInputRecord): void {
     const createdAt = record.model?.find((message) => message.role === "user")?.timestamp ?? 0;
@@ -467,7 +495,11 @@ export class AgentChatView {
       attachments: structuredClone(input.message.attachments),
       createdAt,
     };
-    if (input.delivery === "hidden" || input.delivery === "auto_resume" || input.delivery === "manual_continue")
+    if (
+      input.delivery === "hidden" ||
+      input.delivery === "auto_resume" ||
+      input.delivery === "manual_continue"
+    )
       return;
     const round = this.state.rounds[input.roundId];
     this.put(
@@ -556,7 +588,7 @@ export class AgentChatView {
   }
 
   /** 选择切点时隐藏运行块，确认摘要范围后公开，失败保留诊断条目。 */
-  private read_task(task: TaskRecordValue): void {
+  private read_task(task: TaskRecordValue, round_id: string | undefined): void {
     const { status } = read_agent_compaction_result(task, this.submissions);
     const startedAt = this.state.compactionStartedAt[task.id];
     const id = `compaction:${task.id}`;
@@ -572,7 +604,7 @@ export class AgentChatView {
       {
         kind: "context_compaction",
         id,
-        roundId: this.currentRound ?? "",
+        roundId: round_id ?? "",
         createdAt: startedAt ?? null,
         status,
       },
