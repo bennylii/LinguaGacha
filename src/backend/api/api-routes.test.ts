@@ -57,6 +57,8 @@ const POST_PATHS = new Set([
   "/api/agent/queue/send",
   "/api/agent/round/revise",
   "/api/agent/round/fork",
+  "/api/agent/timeline/page",
+  "/api/agent/timeline/entry",
   "/api/agent/continue",
   "/api/agent/context/compact",
   "/api/agent/stop",
@@ -233,6 +235,16 @@ describe("register_api_routes", () => {
       read_post_handler(fixture.post_json, "/api/agent/context/compact")({}),
     ).resolves.toEqual({ revision: 7 });
     expect(fixture.compact_context).toHaveBeenCalledWith();
+    const page = { chatId: "chat", before: null, limit: 40 };
+    await expect(
+      read_post_handler(fixture.post_json, "/api/agent/timeline/page")(page),
+    ).resolves.toMatchObject({ request: page });
+    expect(fixture.get_timeline_page).toHaveBeenCalledWith(page);
+    const entry_request = { chatId: "chat", id: "tool-1" };
+    await expect(
+      read_post_handler(fixture.post_json, "/api/agent/timeline/entry")(entry_request),
+    ).resolves.toMatchObject({ request: entry_request });
+    expect(fixture.get_timeline_entry).toHaveBeenCalledWith(entry_request);
     const revision = { entryId: "assistant-1", message: { text: "修订", attachments: [] } };
     await expect(
       read_post_handler(fixture.post_json, "/api/agent/round/revise")(revision),
@@ -331,6 +343,22 @@ function create_route_fixture() {
   const compact_context = vi.fn(async () => acknowledgement);
   const stop = vi.fn(() => acknowledgement);
   const reset = vi.fn(async () => acknowledgement);
+  const get_timeline_page = vi.fn(async (request: JsonRecord) => ({
+    chatId: "chat",
+    revision: 1,
+    entries: [],
+    headers: [],
+    rounds: [],
+    hasEarlier: false,
+    nextCursor: null,
+    request,
+  }));
+  const get_timeline_entry = vi.fn(async (request: JsonRecord) => ({
+    chatId: "chat",
+    revision: 1,
+    entry: null,
+    request,
+  }));
   const update_settings = vi.fn((request: JsonRecord) => ({ settings: request }));
   const generate_files = vi.fn();
   const select_model = vi.fn((request: JsonRecord) => ({ selected: request }));
@@ -363,6 +391,8 @@ function create_route_fixture() {
     compact_context,
     stop,
     reset,
+    get_timeline_page,
+    get_timeline_entry,
   } as unknown as AgentService;
   const services = {
     modelCatalog: { get_snapshot: () => catalog_snapshot },
@@ -432,6 +462,8 @@ function create_route_fixture() {
     resolve_write_approval,
     reorder_queued_messages,
     update_queued_message,
+    get_timeline_page,
+    get_timeline_entry,
     source_file_summary,
     summarize_source_files,
     bind_source,

@@ -807,6 +807,7 @@ describe("AgentMessageEditor", () => {
       state: "idle",
       pendingDecision: null,
       entries: [],
+      timeline: { hasEarlier: false, nextCursor: null, rounds: [] },
       skills: [],
       inputQueue: { paused: false, canSendNow: false, items: [] },
       doing: null,

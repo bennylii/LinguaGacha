@@ -40,7 +40,7 @@ import {
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import type { AppLanguage } from "../../domain/app-language";
 import type { JsonRecord } from "../../domain/json";
-import type { AgentChatChange, AgentChatEvent } from "../../shared/agent";
+import type { AgentChatChange, AgentChatEvent, AgentEntry } from "../../shared/agent";
 import type { AgentWebSearchPort } from "./tools/web-search";
 import type { AgentTermLookupPort } from "./tools/lookup-term";
 import type { AgentNovelChaptersPort } from "./tools/novel-chapters";
@@ -1893,7 +1893,10 @@ describe("AgentService", () => {
     await wait_for_idle(service);
     const failed_round = service
       .get_snapshot()
-      .entries.find((entry) => entry.kind === "user_message" && entry.delivery === "round")!;
+      .entries.find(
+        (entry): entry is AgentEntry & { kind: "user_message"; delivery: "round" } =>
+          entry.kind === "user_message" && entry.delivery === "round",
+      )!;
     expect(failed_round).toMatchObject({
       status: "error",
       averageTokensPerSecond: expect.any(Number),
@@ -2511,6 +2514,7 @@ describe("AgentService", () => {
       state: "idle",
       pendingDecision: null,
       entries: [],
+      timeline: { hasEarlier: false, nextCursor: null, rounds: [] },
       skills: skill_test_fixture.snapshots,
       inputQueue: { paused: false, canSendNow: false, items: [] },
       doing: null,
@@ -3462,6 +3466,7 @@ describe("AgentService", () => {
       state: "idle",
       pendingDecision: null,
       entries: [],
+      timeline: { hasEarlier: false, nextCursor: null, rounds: [] },
       skills: skill_test_fixture.snapshots,
       inputQueue: { paused: false, canSendNow: false, items: [] },
       doing: null,
@@ -4065,7 +4070,7 @@ describe("AgentService", () => {
     expect(service.get_snapshot().entries[0]).toMatchObject({ status: "success" });
   });
 
-  it("判定为未完成时发出隐藏继续并接着跑同一轮次", async () => {
+  it("判定为未完成时发出自动继续并开始新轮次", async () => {
     const { service, set_auto_continue_settings } = await create_service();
     set_auto_continue_settings({ agent_auto_continue_enabled: true });
     agent_completion_judge_fixture.judge.mockResolvedValueOnce({
@@ -4078,11 +4083,17 @@ describe("AgentService", () => {
 
     // 继续之后的那一轮结束后仍要再判定一次，判定为完成才真正收口。
     expect(agent_completion_judge_fixture.judge).toHaveBeenCalledTimes(2);
-    // 判定后接着跑一次模型，轮次仍属于原来的那一轮。
+    // 判定后接着跑一次模型，新轮次作为可见的“继续”输入接在原任务之后。
     expect(fake_agent_state.model_call_count).toBe(2);
-    const entries = service.get_snapshot().entries;
-    expect(entries.filter((entry) => entry.kind === "user_message")).toHaveLength(1);
-    expect(entries[0]).toMatchObject({ status: "success" });
+    const rounds = service
+      .get_snapshot()
+      .entries.filter(
+        (entry): entry is Extract<AgentEntry, { kind: "user_message" }> =>
+          entry.kind === "user_message",
+      );
+    expect(rounds).toHaveLength(2);
+    expect(rounds[0]).toMatchObject({ text: "还有尾巴", delivery: "round", status: "success" });
+    expect(rounds[1]).toMatchObject({ delivery: "auto_continue", status: "success" });
     expect(service.get_snapshot()).toMatchObject({ state: "idle", autoContinue: null });
   });
 
@@ -4176,6 +4187,300 @@ describe("AgentService", () => {
     await service.send_message({ text: "第二轮", attachments: [] });
     await wait_for_idle(service);
     expect(agent_completion_judge_fixture.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it("自动继续次数按任务链累计并在重启后从历史恢复", async () => {
+    const { service, set_auto_continue_settings, set_auto_resume_settings, session_state } =
+      await create_service();
+    set_auto_continue_settings({
+      agent_auto_continue_enabled: true,
+      agent_auto_continue_max_continues: 3,
+    });
+    set_auto_resume_settings({ agent_auto_resume_enabled: false });
+    const attempts: Array<number | undefined> = [];
+    agent_completion_judge_fixture.judge
+      .mockImplementationOnce(async () => {
+        attempts.push(service.get_snapshot().autoContinue?.attempt);
+        return { completed: false, reason: "第 1 次未完成" };
+      })
+      .mockImplementationOnce(async () => {
+        attempts.push(service.get_snapshot().autoContinue?.attempt);
+        // 让自动继续轮次失败，验证重启后手动继续仍沿用同一任务链计数。
+        fake_agent_state.mode = "error";
+        return { completed: false, reason: "第 2 次未完成" };
+      })
+      .mockImplementation(async () => {
+        attempts.push(service.get_snapshot().autoContinue?.attempt);
+        return { completed: false, reason: "仍未完成" };
+      });
+
+    await service.send_message({ text: "整章校对", attachments: [] });
+    await wait_for_idle(service);
+    expect(
+      service.get_snapshot().entries.filter((entry) => entry.kind === "user_message"),
+    ).toHaveLength(3);
+    expect(service.get_snapshot().entries.at(-1)).toMatchObject({ status: "error" });
+
+    await session_state.mark_loaded("other.lg");
+    await session_state.mark_loaded("test.lg");
+    expect(service.get_snapshot().autoContinue).toBeNull();
+    fake_agent_state.mode = "success";
+
+    await service.continue_chat({ chatId: service.get_snapshot().chatId });
+    await wait_for_idle(service);
+
+    // 重启与手动继续都不会重置按任务链累计的自动继续次数。
+    expect(attempts).toEqual([1, 2, 3]);
+    const rounds = service
+      .get_snapshot()
+      .entries.filter(
+        (entry): entry is Extract<AgentEntry, { kind: "user_message" }> =>
+          entry.kind === "user_message",
+      );
+    expect(rounds.map((entry) => entry.delivery)).toEqual([
+      "round",
+      "auto_continue",
+      "auto_continue",
+      "auto_continue",
+    ]);
+    expect(rounds.every((entry) => entry.status === "success")).toBe(true);
+  });
+
+  it("自动继续提交失败时不消耗次数且当前轮次保持成功", async () => {
+    const { service, set_auto_continue_settings, diagnostics } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: true });
+    agent_completion_judge_fixture.judge.mockResolvedValueOnce({
+      completed: false,
+      reason: "remaining_count 仍是 4。",
+    });
+    const original_submit = AgentChat.prototype.submit;
+    vi.spyOn(AgentChat.prototype, "submit").mockImplementation(function (
+      this: AgentChat,
+      message,
+      prepared,
+      execution,
+      delivery,
+      queuedId,
+      commandId,
+    ) {
+      if (delivery === "auto_continue")
+        return Promise.reject(new Error("auto continue submit failed"));
+      return original_submit.call(this, message, prepared, execution, delivery, queuedId, commandId);
+    });
+
+    await service.send_message({ text: "提交失败", attachments: [] });
+    await wait_for_idle(service);
+
+    // 提交失败不写入历史，因此次数仍按 0 推导，原轮次保持成功收口。
+    const rounds = service
+      .get_snapshot()
+      .entries.filter(
+        (entry): entry is Extract<AgentEntry, { kind: "user_message" }> =>
+          entry.kind === "user_message",
+      );
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]).toMatchObject({ delivery: "round", status: "success" });
+    expect(service.get_snapshot()).toMatchObject({ state: "idle", autoContinue: null });
+    expect(diagnostics()).toMatchObject([
+      { level: "warning", content: { event: "operation_end", operation: "cleanup" } },
+    ]);
+  });
+
+  it("自动继续轮次失败后自动重试定位该轮次", async () => {
+    vi.useFakeTimers();
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: true });
+    agent_completion_judge_fixture.judge
+      .mockImplementationOnce(async () => {
+        fake_agent_state.mode = "retry_exhausted";
+        return { completed: false, reason: "remaining_count 仍是 2。" };
+      })
+      .mockResolvedValue({ completed: true, reason: "已完成" });
+
+    await service.send_message({ text: "继续后失败", attachments: [] });
+    await advance_to_auto_resume(service);
+
+    const failed = service
+      .get_snapshot()
+      .entries.findLast(
+        (entry): entry is Extract<AgentEntry, { kind: "user_message" }> =>
+          entry.kind === "user_message",
+      );
+    expect(failed).toMatchObject({ delivery: "auto_continue", status: "error" });
+    expect(service.get_snapshot().autoResume).toMatchObject({
+      roundId: failed!.id,
+      attempt: 1,
+    });
+
+    fake_agent_state.mode = "success";
+    await vi.advanceTimersByTimeAsync(5_000);
+    await wait_for_idle(service);
+
+    expect(service.get_snapshot().autoResume).toBeNull();
+    expect(service.get_snapshot().entries.find((entry) => entry.id === failed!.id)).toMatchObject({
+      status: "success",
+      failure: null,
+    });
+  });
+
+  it("自动继续轮次失败后可手动继续同一轮次", async () => {
+    vi.useFakeTimers();
+    const { service, set_auto_continue_settings } = await create_service();
+    set_auto_continue_settings({ agent_auto_continue_enabled: true });
+    agent_completion_judge_fixture.judge
+      .mockImplementationOnce(async () => {
+        fake_agent_state.mode = "retry_exhausted";
+        return { completed: false, reason: "未完成" };
+      })
+      .mockResolvedValue({ completed: true, reason: "已完成" });
+
+    await service.send_message({ text: "手动接续", attachments: [] });
+    await advance_to_auto_resume(service);
+    const failed = service
+      .get_snapshot()
+      .entries.findLast(
+        (entry): entry is Extract<AgentEntry, { kind: "user_message" }> =>
+          entry.kind === "user_message",
+      );
+    expect(failed).toMatchObject({ delivery: "auto_continue", status: "error" });
+
+    await service.stop();
+    fake_agent_state.mode = "success";
+    await service.continue_chat({ chatId: service.get_snapshot().chatId });
+    await wait_for_idle(service);
+
+    // 手动继续沿用失败轮次，不新建轮次。
+    expect(
+      service.get_snapshot().entries.filter((entry) => entry.kind === "user_message"),
+    ).toHaveLength(2);
+    expect(service.get_snapshot().entries.find((entry) => entry.id === failed!.id)).toMatchObject({
+      status: "success",
+    });
+  });
+
+  it("取消等待与手动继续都不消耗自动重试次数", async () => {
+    vi.useFakeTimers();
+    const { service } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "取消等待", attachments: [] });
+    await advance_to_auto_resume(service);
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1 });
+
+    await service.stop();
+    expect(service.get_snapshot().autoResume).toBeNull();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(fake_agent_state.model_call_count).toBe(4);
+
+    await service.continue_chat({ chatId: service.get_snapshot().chatId });
+    await advance_to_auto_resume(service);
+    // 取消等待没有写入历史，手动继续也不写入 auto_resume，下一次等待仍从第 1 次开始。
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1 });
+    await service.stop();
+  });
+
+  it("重启后自动重试次数按已提交历史恢复", async () => {
+    vi.useFakeTimers();
+    const { service, session_state } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "重启后计数", attachments: [] });
+    await advance_to_auto_resume(service);
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 1 });
+
+    // 第一次自动重试实际提交并再次失败，历史里留下一条 auto_resume。
+    await vi.advanceTimersByTimeAsync(5_000);
+    await advance_to_auto_resume(service);
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 2 });
+
+    await service.stop();
+    await session_state.mark_loaded("other.lg");
+    await session_state.mark_loaded("test.lg");
+    expect(service.get_snapshot().autoResume).toBeNull();
+
+    await service.continue_chat({ chatId: service.get_snapshot().chatId });
+    await advance_to_auto_resume(service);
+    // 已提交的 1 次自动重试仍计入，重启与手动继续都不会清零。
+    expect(service.get_snapshot().autoResume).toMatchObject({ attempt: 2 });
+    await service.stop();
+  });
+
+  it("空闲等待自动重试时停止立即发布清除快照", async () => {
+    vi.useFakeTimers();
+    const { service, publish } = await create_service();
+    fake_agent_state.mode = "retry_exhausted";
+
+    await service.send_message({ text: "停止等待", attachments: [] });
+    await advance_to_auto_resume(service);
+    expect(service.get_snapshot().autoResume).not.toBeNull();
+    publish.mockClear();
+
+    await service.stop();
+
+    expect(service.get_snapshot().autoResume).toBeNull();
+    expect(change_calls(publish)).toContainEqual([
+      expect.any(String),
+      expect.objectContaining({ type: "auto_resume", autoResume: null }),
+    ]);
+  });
+
+  it("分页读取窗口并拒绝失效游标与非法页大小", async () => {
+    const { service } = await create_service();
+    for (const text of ["第一轮", "第二轮"]) {
+      await service.send_message({ text, attachments: [] });
+      await wait_for_idle(service);
+    }
+    const chat_id = service.get_snapshot().chatId;
+
+    const latest = await service.get_timeline_page({ chatId: chat_id, before: null, limit: 1 });
+    expect(latest.chatId).toBe(chat_id);
+    expect(latest.entries).toHaveLength(1);
+    expect(latest.headers.length).toBeGreaterThan(0);
+    expect(latest.nextCursor).not.toBeNull();
+
+    const earlier = await service.get_timeline_page({
+      chatId: chat_id,
+      before: latest.nextCursor,
+      limit: 40,
+    });
+    expect(earlier.chatId).toBe(chat_id);
+    expect(earlier.entries.length).toBeLessThanOrEqual(40);
+
+    await expect(
+      service.get_timeline_page({ chatId: chat_id, before: "missing", limit: 40 }),
+    ).rejects.toMatchObject({
+      code: "request.validation_failed",
+      public_details: { reason: "agent_timeline_cursor_expired" },
+    });
+    await expect(
+      service.get_timeline_page({ chatId: chat_id, before: null, limit: 41 }),
+    ).rejects.toMatchObject({ code: "request.validation_failed" });
+    await expect(
+      service.get_timeline_page({ chatId: chat_id, before: null, limit: 0 }),
+    ).rejects.toMatchObject({ code: "request.validation_failed" });
+  });
+
+  it("工具详情按条目身份读取完整输出", async () => {
+    const { service } = await create_service();
+    fake_agent_state.mode = "tools";
+    await service.send_message({ text: "查询", attachments: [] });
+    await wait_for_idle(service);
+    const snapshot = service.get_snapshot();
+    const tool = snapshot.entries.find((entry) => entry.kind === "tool_call");
+    expect(tool).toBeDefined();
+
+    await expect(
+      service.get_timeline_entry({ chatId: snapshot.chatId, id: tool!.id }),
+    ).resolves.toMatchObject({
+      chatId: snapshot.chatId,
+      entry: { kind: "tool_call", id: tool!.id, output: expect.any(Array) },
+    });
+    await expect(
+      service.get_timeline_entry({ chatId: snapshot.chatId, id: "missing" }),
+    ).rejects.toMatchObject({ code: "request.validation_failed" });
+    await expect(
+      service.get_timeline_entry({ chatId: snapshot.chatId, id: "" }),
+    ).rejects.toMatchObject({ code: "request.validation_failed" });
   });
 
   it("已受理 steer 的后续生成失败时，整个产品轮次失败并暂停草稿", async () => {

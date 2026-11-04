@@ -373,3 +373,178 @@ it("摘要阶段取消保留起点，选择阶段取消隐藏，失败保留诊�
   view.reset([], new Map(), [failed], {}, state);
   expect(view.entries[0]).toMatchObject({ status: "error", createdAt: null });
 });
+
+it("timeline_window 按内容条目分页并额外附带轮次头", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 3 },
+    { id: "round-2", content: 3 },
+    { id: "round-3", content: 2 },
+  ]);
+
+  const window = view.timeline_window(null, 4);
+
+  // 4 条内容条目落在第 2、3 轮，轮次头额外附带且不占页预算。
+  expect(window.entries.map((entry) => entry.id)).toEqual([
+    "assistant:entry:7",
+    "assistant:entry:8",
+    "assistant:entry:10",
+    "assistant:entry:11",
+  ]);
+  expect(window.headers.map((entry) => entry.id)).toEqual(["round-2", "round-3"]);
+  expect(window.rounds).toEqual([
+    { id: "round-2", hasEarlier: true },
+    { id: "round-3", hasEarlier: false },
+  ]);
+  expect(window).toMatchObject({ hasEarlier: true, nextCursor: "assistant:entry:7" });
+});
+
+it("timeline_window 用游标继续向前读取并收敛到最早一页", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 3 },
+    { id: "round-2", content: 3 },
+    { id: "round-3", content: 2 },
+  ]);
+
+  const middle = view.timeline_window("assistant:entry:7", 4);
+  expect(middle.entries.map((entry) => entry.id)).toEqual([
+    "assistant:entry:2",
+    "assistant:entry:3",
+    "assistant:entry:4",
+    "assistant:entry:6",
+  ]);
+  expect(middle.headers.map((entry) => entry.id)).toEqual(["round-1", "round-2"]);
+  expect(middle.rounds).toEqual([
+    { id: "round-1", hasEarlier: false },
+    { id: "round-2", hasEarlier: false },
+  ]);
+  expect(middle).toMatchObject({ hasEarlier: true, nextCursor: "assistant:entry:2" });
+
+  const first = view.timeline_window(middle.nextCursor, 4);
+  expect(first.entries).toEqual([]);
+  expect(first.headers.map((entry) => entry.id)).toEqual(["round-1"]);
+  expect(first.rounds).toEqual([{ id: "round-1", hasEarlier: false }]);
+  expect(first).toMatchObject({ hasEarlier: false, nextCursor: null });
+});
+
+it("timeline_window 允许轮次头加加载更早的部分轮次", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 3 },
+    { id: "round-2", content: 3 },
+    { id: "round-3", content: 2 },
+  ]);
+
+  const window = view.timeline_window(null, 1);
+
+  expect(window.entries.map((entry) => entry.id)).toEqual(["assistant:entry:11"]);
+  expect(window.headers.map((entry) => entry.id)).toEqual(["round-3"]);
+  expect(window.rounds).toEqual([{ id: "round-3", hasEarlier: true }]);
+  expect(window).toMatchObject({ hasEarlier: true, nextCursor: "assistant:entry:11" });
+});
+
+it("timeline_window 拒绝失效游标与非法页大小", () => {
+  const { view } = timeline_fixture([{ id: "round-1", content: 1 }]);
+
+  expect(() => view.timeline_window("missing", 4)).toThrow("agent_timeline_cursor_expired");
+  expect(() => view.timeline_window(null, 0)).toThrow("Agent timeline page size is invalid.");
+});
+
+it("分页只携带工具输出预览，完整输出仍保留在投影内", () => {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  state.rounds.round = {
+    status: "success",
+    checkpoint: 0 as EntryId,
+    endedAt: 10,
+    averageTokensPerSecond: null,
+    failure: null,
+  };
+  const records: EntryRecord[] = [
+    {
+      id: 1 as EntryId,
+      conversationId,
+      kind: AGENT_INPUT_ENTRY_KIND,
+      data: {
+        roundId: "round",
+        message: { text: "查询", attachments: [] },
+        delivery: "round",
+        queuedId: null,
+      },
+    },
+    {
+      id: 2 as EntryId,
+      conversationId,
+      kind: "test",
+      model: [
+        fauxAssistantMessage([fauxToolCall("query", { value: 1 }, { id: "call" })], {
+          timestamp: 2,
+        }),
+      ],
+    },
+    {
+      id: 3 as EntryId,
+      conversationId,
+      kind: "test",
+      model: [
+        {
+          role: "toolResult",
+          toolCallId: "call",
+          toolName: "query",
+          content: [{ type: "text", text: "x".repeat(3000) }],
+          isError: false,
+          timestamp: 3,
+        },
+      ],
+    },
+  ];
+  const view = new AgentChatView();
+  view.reset(records, new Map(), [], {}, state);
+
+  const full = view.entries.find((entry) => entry.kind === "tool_call");
+  const preview = view.timeline_window(null, 40).entries.find((entry) => entry.kind === "tool_call");
+
+  expect(full).toMatchObject({ output: ["x".repeat(3000)], outputTruncated: false });
+  expect(preview).toMatchObject({ output: ["x".repeat(2048)], outputTruncated: true });
+});
+
+/** 构造按记录身份排序的轮次历史，轮次头后接指定数量的助手内容。 */
+function timeline_fixture(rounds: Array<{ id: string; content: number }>): {
+  view: AgentChatView;
+  state: ReturnType<typeof AgentChatDoc.definition.initial>;
+} {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  const records: EntryRecord[] = [];
+  let next_id = 1;
+  for (const round of rounds) {
+    records.push({
+      id: next_id++ as EntryId,
+      conversationId,
+      kind: AGENT_INPUT_ENTRY_KIND,
+      data: {
+        roundId: round.id,
+        message: { text: round.id, attachments: [] },
+        delivery: "round",
+        queuedId: null,
+      },
+    });
+    state.rounds[round.id] = {
+      status: "success",
+      checkpoint: 0 as EntryId,
+      endedAt: 10,
+      averageTokensPerSecond: null,
+      failure: null,
+    };
+    for (let index = 0; index < round.content; index++) {
+      const id = next_id++;
+      records.push({
+        id: id as EntryId,
+        conversationId,
+        kind: "test",
+        model: [fauxAssistantMessage(`${round.id}-${index}`, { timestamp: id })],
+      });
+    }
+  }
+  const view = new AgentChatView();
+  view.reset(records, new Map(), [], {}, state);
+  return { view, state };
+}

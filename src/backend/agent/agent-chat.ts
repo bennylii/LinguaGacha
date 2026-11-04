@@ -53,6 +53,7 @@ import {
   AGENT_INPUT_ENTRY_KIND,
   read_agent_input,
   type AgentChatData,
+  type AgentInputDelivery,
   type AgentInputRecord,
 } from "./agent-chat-data";
 import { read_agent_compaction_result, type AgentCompactionResult } from "./agent-compaction";
@@ -693,7 +694,7 @@ export class AgentChat {
     message: AgentMessageInput,
     prepared: PreparedAgentMessage,
     execution: AgentExecution,
-    delivery: "round" | "steer" | "hidden",
+    delivery: AgentInputDelivery,
     queuedId: string | null = null,
     commandId: string | undefined = execution.commandId,
   ): Promise<SubmittedInput> {
@@ -701,7 +702,7 @@ export class AgentChat {
     execution.controller.signal.throwIfAborted();
     const requestId = uuidv7();
     const conversation = this.conversation; // 提交意图与 SDK 调用使用同一分支
-    if (delivery === "round") {
+    if (delivery === "round" || delivery === "auto_continue") {
       execution.roundId = requestId;
       this.reset_recovery(execution);
     }
@@ -717,7 +718,7 @@ export class AgentChat {
         command.requestId = requestId;
         command.conversationId = conversation.id;
       }
-      if (delivery === "round")
+      if (delivery === "round" || delivery === "auto_continue")
         state.rounds[requestId] = {
           status: "running",
           checkpoint,
@@ -727,8 +728,11 @@ export class AgentChat {
         };
     });
     execution.controller.signal.throwIfAborted();
-    if (delivery === "round")
-      this.log.begin_run(execution.roundId, queuedId === null ? "prompt" : "queued");
+    if (delivery === "round" || delivery === "auto_continue")
+      this.log.begin_run(
+        execution.roundId,
+        delivery === "auto_continue" ? "continue" : queuedId === null ? "prompt" : "queued",
+      );
     const submission = await conversation.submit(
       {
         type: "input",
@@ -990,12 +994,16 @@ export class AgentChat {
     const entries = this.entries;
     const index = entries.findIndex(
       (entry) =>
-        entry.kind === "user_message" && entry.delivery === "round" && entry.id === roundId,
+        entry.kind === "user_message" &&
+        (entry.delivery === "round" || entry.delivery === "auto_continue") &&
+        entry.id === roundId,
     );
     const user = entries[index];
     const nextIndex = entries.findIndex(
       (entry, position) =>
-        position > index && entry.kind === "user_message" && entry.delivery === "round",
+        position > index &&
+        entry.kind === "user_message" &&
+        (entry.delivery === "round" || entry.delivery === "auto_continue"),
     );
     const end = nextIndex < 0 ? entries.length : nextIndex;
     if (
@@ -1035,7 +1043,10 @@ export class AgentChat {
     thinkingLevel: ModelThinkingLevel,
     commandId: string,
   ): Promise<void> {
-    if (entry.kind !== "user_message" || entry.delivery !== "round")
+    if (
+      entry.kind !== "user_message" ||
+      (entry.delivery !== "round" && entry.delivery !== "auto_continue")
+    )
       throw new AppError("request.validation_failed");
     this.model = model;
     this.conversation = await this.conversation.fork(

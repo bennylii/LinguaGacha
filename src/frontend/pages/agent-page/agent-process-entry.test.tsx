@@ -35,6 +35,7 @@ it("压缩耗时沿用后端起始时间，重挂载可恢复，新任务重新�
   const running: CompactionEntry = {
     kind: "context_compaction",
     id: "compact",
+    roundId: "round",
     status: "running",
     createdAt: 100_000,
   };
@@ -70,12 +71,14 @@ it("最新失败压缩整行重试，禁用时收起提示，其它记录和状�
     kind: "context_compaction",
     createdAt: null,
     id: "old",
+    roundId: "round",
     status: "error",
   };
   const failed: CompactionEntry = {
     kind: "context_compaction",
     createdAt: null,
     id: "failed",
+    roundId: "round",
     status: "error",
   };
   const on_compact = vi.fn();

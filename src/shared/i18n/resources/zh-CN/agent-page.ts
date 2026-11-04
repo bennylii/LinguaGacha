@@ -151,6 +151,9 @@ export const zh_cn_agent_page = {
     details: "{tool} 工具调用详情",
     input: "输入",
     output: "输出",
+    loading_full: "正在读取完整输出 …",
+    load_failed: "完整输出读取失败。",
+    retry: "重试",
   },
   round: {
     running: "处理中 · {duration}",
@@ -159,7 +162,11 @@ export const zh_cn_agent_page = {
     stopped: "已停止 · {duration}",
   },
   timeline: {
-    show_earlier: "显示更早的 {count} 轮",
+    show_earlier: "显示更早的消息",
+    show_earlier_in_round: "显示本轮更早的消息",
+    loading: "正在加载更早的消息 …",
+    retry: "更早的消息加载失败，点击重试",
+    cursor_expired: "历史已变化，已回到最新消息。",
   },
   upload: { uploading: "正在上传", failed: "上传失败" },
   file_saved: "文件已保存",

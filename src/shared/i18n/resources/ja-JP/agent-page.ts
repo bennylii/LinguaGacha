@@ -158,6 +158,9 @@ export const ja_jp_agent_page = {
     details: "{tool} ツール呼び出しの詳細",
     input: "入力",
     output: "出力",
+    loading_full: "完全な出力を読み込み中 …",
+    load_failed: "完全な出力を読み込めませんでした。",
+    retry: "再試行",
   },
   round: {
     running: "処理中 {duration}",
@@ -166,7 +169,11 @@ export const ja_jp_agent_page = {
     stopped: "停止済み · {duration}",
   },
   timeline: {
-    show_earlier: "以前の {count} ラウンドを表示",
+    show_earlier: "以前のメッセージを表示",
+    show_earlier_in_round: "このラウンドの以前のメッセージを表示",
+    loading: "以前のメッセージを読み込み中 …",
+    retry: "以前のメッセージを読み込めませんでした。再試行",
+    cursor_expired: "履歴が変更されたため、最新のメッセージに戻りました。",
   },
   upload: { uploading: "アップロード中", failed: "アップロードに失敗" },
   file_saved: "ファイルを保存しました",

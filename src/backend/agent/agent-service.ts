@@ -20,6 +20,13 @@ import { type AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { isDeepStrictEqual } from "node:util";
 import { AgentChat, type AgentExecution } from "./agent-chat";
+import {
+  AGENT_TIMELINE_PAGE_SIZE,
+  AgentTimelineCursorExpiredError,
+  is_round_header,
+  to_public_entry,
+  type AgentChatView,
+} from "./agent-chat-view";
 import { AgentModelError, describe_run_failure } from "./agent-run-failure";
 import {
   AGENT_COMPACTION_RESUME_MAX_ATTEMPTS,
@@ -50,6 +57,9 @@ import {
   type AgentEntry,
   type AgentAutoResumeSnapshot,
   type AgentAutoContinueSnapshot,
+  type AgentTimelineEntryResponse,
+  type AgentTimelinePage,
+  type AgentTimelineWindow,
 } from "../../shared/agent";
 import * as AppErrors from "../../shared/error";
 import { format_i18n_message } from "../../shared/i18n";
@@ -180,7 +190,10 @@ type AgentChatFields = Pick<
 >;
 
 /** 失败轮次的身份与终态是自动续跑恢复前的唯一校验依据。 */
-type FailedAgentRound = Extract<AgentEntry, { kind: "user_message"; delivery: "round" }>;
+type FailedAgentRound = Extract<
+  AgentEntry,
+  { kind: "user_message"; delivery: "round" | "auto_continue" }
+>;
 
 /** 启动时加载的基础提示词和会话种子。 */
 type LoadedAgentResources = Readonly<{
@@ -225,9 +238,7 @@ export class AgentService {
   private token_speed_updated_at: number | null = null;
   private auto_resume_timer: ReturnType<typeof setTimeout> | null = null; // 只存在于当前进程，工程切换或退出即失效
   private auto_resume_snapshot: AgentAutoResumeSnapshot | null = null;
-  private readonly auto_resume_attempts = new Map<string, number>(); // 轮次身份 -> 已安排的自动续跑次数
   private auto_continue_snapshot: AgentAutoContinueSnapshot | null = null;
-  private readonly auto_continue_attempts = new Map<string, number>(); // 轮次身份 -> 已发出的自动继续次数
   private chat_id = "inactive"; // 无工程时的快照身份，激活后采用持久化身份
   private readonly database: AgentServiceOptions["database"];
   private store: AgentChatStorage | null = null; // 工程连接的使用权覆盖 SDK 与上传收尾
@@ -382,12 +393,71 @@ export class AgentService {
 
   /** 快照由相同的提交事实投影，调用者只能取得独立值。 */
   public get_snapshot(): AgentChatSnapshot {
+    const timeline = this.read_timeline_window();
     return {
       ...this.read_fields(),
       revision: this.revision,
-      entries: structuredClone(this.chat?.entries ?? []),
+      entries: flatten_timeline_window(timeline),
+      timeline: {
+        hasEarlier: timeline.hasEarlier,
+        nextCursor: timeline.nextCursor,
+        rounds: timeline.rounds,
+      },
     };
   }
+  /** 读取最新窗口，供快照、替换事件与分页共用同一投影。 */
+  private read_timeline_window(): ReturnType<AgentChatView["timeline_window"]> {
+    return (
+      this.chat?.view.timeline_window(null, AGENT_TIMELINE_PAGE_SIZE) ?? {
+        entries: [],
+        headers: [],
+        rounds: [],
+        hasEarlier: false,
+        nextCursor: null,
+      }
+    );
+  }
+  /** 读取完整历史中某个位置之前的窗口。 */
+  public async get_timeline_page(request: JsonRecord): Promise<AgentTimelinePage> {
+    const chat = await this.command_chat(request["chatId"]);
+    this.assert_available();
+    if (request["chatId"] !== this.chat_id)
+      throw agent_queue_validation_error("agent_input_command_invalid");
+    const before = request["before"];
+    if (before !== null && typeof before !== "string") throw agent_timeline_cursor_error();
+    const limit = request["limit"] ?? AGENT_TIMELINE_PAGE_SIZE;
+    if (
+      typeof limit !== "number" ||
+      !Number.isSafeInteger(limit) ||
+      limit <= 0 ||
+      limit > AGENT_TIMELINE_PAGE_SIZE
+    )
+      throw agent_queue_validation_error("agent_timeline_page_invalid");
+    let window;
+    try {
+      window = chat.view.timeline_window(before, limit);
+    } catch (error) {
+      if (error instanceof AgentTimelineCursorExpiredError) throw agent_timeline_cursor_error();
+      throw error;
+    }
+    return { ...window, revision: this.revision, chatId: this.chat_id };
+  }
+
+  /** 工具详情按需读取完整条目，时间线只公开预览。 */
+  public async get_timeline_entry(request: JsonRecord): Promise<AgentTimelineEntryResponse> {
+    const chat = await this.command_chat(request["chatId"]);
+    this.assert_available();
+    if (request["chatId"] !== this.chat_id)
+      throw agent_queue_validation_error("agent_input_command_invalid");
+    const id = request["id"];
+    if (typeof id !== "string" || id === "")
+      throw agent_queue_validation_error("agent_timeline_entry_unavailable");
+    const entry = chat.entries.find((candidate) => candidate.id === id);
+    if (entry === undefined)
+      throw agent_queue_validation_error("agent_timeline_entry_unavailable");
+    return { revision: this.revision, chatId: this.chat_id, entry };
+  }
+
   /** 读取会话控制字段，用于事件比较和完整快照组装。 */
   private read_fields(): AgentChatFields {
     const chat = this.chat;
@@ -648,10 +718,12 @@ export class AgentService {
     this.assert_queue_available();
     this.session_state.require_loaded_project_path();
     const round = chat.entries.findLast(
-      (entry) => entry.kind === "user_message" && entry.delivery === "round",
+      (entry) =>
+        entry.kind === "user_message" &&
+        (entry.delivery === "round" || entry.delivery === "auto_continue"),
     );
     const failed_round =
-      round?.kind === "user_message" && round.delivery === "round" && round.status === "error"
+      round?.kind === "user_message" && is_round_header(round) && round.status === "error"
         ? round
         : null;
     const message = read_agent_continue_message(request, this.resolve_file);
@@ -674,11 +746,10 @@ export class AgentService {
         await this.accept_round(execution, next, next.id);
         return;
       }
-      // 用户主动继续重新获得完整的自动续跑额度；恢复队列与回到运行合并发布。
-      this.auto_resume_attempts.delete(failed_round.id);
+      // 手动继续保持隐藏且不重置计数；恢复队列与回到运行合并发布。
       await this.merge_publish(async () => {
         await resume_queue();
-        await this.resume_failed_round(chat, execution, failed_round);
+        await this.resume_failed_round(chat, execution, failed_round, "manual_continue");
       });
     });
   }
@@ -688,6 +759,7 @@ export class AgentService {
     chat: AgentChat,
     execution: AgentExecution,
     round: FailedAgentRound,
+    delivery: "auto_resume" | "manual_continue",
   ): Promise<void> {
     await this.update_model(chat, execution);
     execution.roundId = round.id;
@@ -714,7 +786,7 @@ export class AgentService {
       { text, attachments: [] },
       { text, images: [] },
       execution,
-      "hidden",
+      delivery,
     );
     chat.log.begin_run(round.id, "continue");
     this.launch(chat, execution, () => this.drive(chat, execution, accepted));
@@ -754,12 +826,11 @@ export class AgentService {
     const target = entries[index];
     // 日志记录目标所属轮次，历史修订不能误记为最新轮次。
     const round = entries.findLast(
-      (entry, position) =>
-        position <= index && entry.kind === "user_message" && entry.delivery === "round",
+      (entry, position) => position <= index && entry.kind === "user_message" && is_round_header(entry),
     );
     const valid =
       target?.kind === "user_message"
-        ? target.delivery === "round" && target.status !== "running"
+        ? is_round_header(target) && target.status !== "running"
         : target?.kind === "assistant_message" &&
           target.status !== "running" &&
           revision.message.text !== "" &&
@@ -768,7 +839,7 @@ export class AgentService {
             (entry, position) =>
               position > index &&
               (entry.kind === "assistant_message" ||
-                (entry.kind === "user_message" && entry.delivery === "round")),
+                (entry.kind === "user_message" && is_round_header(entry))),
           );
     if (!valid || target === undefined || round === undefined)
       throw agent_queue_validation_error("agent_revision_unavailable");
@@ -826,8 +897,8 @@ export class AgentService {
     const execution = this.execution;
     if (chat?.can_stop === false) throw new AppErrors.AppError("runtime.busy");
     if (execution === null) {
-      // 等待自动续跑时没有活动执行，停止语义是取消等待而不是拒绝命令。
-      this.cancel_auto_resume(false);
+      // 等待自动续跑时没有活动执行，停止语义是取消等待并立即清除前端倒计时。
+      this.cancel_auto_resume();
       return this.ack();
     }
     if (execution.cancellation !== undefined) return this.ack();
@@ -1005,8 +1076,6 @@ export class AgentService {
   ): ReturnType<AgentChat["submit"]> {
     execution.phase = "running";
     execution.translationStopped = false;
-    this.auto_resume_attempts.clear();
-    this.auto_continue_attempts.clear();
     this.token_speed.reset();
     this.token_speed_updated_at = null;
     this.token_speed_snapshot = null;
@@ -1078,7 +1147,6 @@ export class AgentService {
         }
         break;
       }
-      this.auto_resume_attempts.clear();
       this.cancel_auto_resume();
       const next = chat.queue.read_next();
       if (next === null) {
@@ -1117,18 +1185,18 @@ export class AgentService {
     const policy = read_agent_auto_resume_policy(this.settings.read_setting());
     const had_snapshot = this.auto_resume_snapshot !== null;
     this.cancel_auto_resume(false);
-    const attempt = (this.auto_resume_attempts.get(round_id) ?? 0) + 1;
+    const used = chat.view.count_inputs(round_id, "auto_resume");
+    const attempt = used + 1;
     const max_attempts =
       retry_cap === undefined
         ? policy.maxAttempts
         : policy.maxAttempts > 0
           ? Math.min(policy.maxAttempts, retry_cap)
           : retry_cap;
-    if (!policy.enabled || (max_attempts > 0 && attempt > max_attempts)) {
+    if (!policy.enabled || (max_attempts > 0 && used >= max_attempts)) {
       if (had_snapshot) this.publish_snapshot();
       return;
     }
-    this.auto_resume_attempts.set(round_id, attempt);
     const delay = auto_resume_delay_ms(attempt, policy);
     this.auto_resume_snapshot = {
       roundId: round_id,
@@ -1182,11 +1250,13 @@ export class AgentService {
       return;
     }
     const round = chat.entries.findLast(
-      (entry) => entry.kind === "user_message" && entry.delivery === "round",
+      (entry) =>
+        entry.kind === "user_message" &&
+        (entry.delivery === "round" || entry.delivery === "auto_continue"),
     );
     if (
       round?.kind !== "user_message" ||
-      round.delivery !== "round" ||
+      !is_round_header(round) ||
       round.id !== round_id ||
       round.status !== "error" ||
       round.failure === null
@@ -1218,7 +1288,7 @@ export class AgentService {
       await this.accept(execution, () =>
         this.merge_publish(async () => {
           await chat.change_queue((queue) => queue.resume());
-          await this.resume_failed_round(chat, execution, round);
+          await this.resume_failed_round(chat, execution, round, "auto_resume");
         }),
       );
     } catch (error) {
@@ -1251,7 +1321,8 @@ export class AgentService {
     if (round_id === null || this.disposed || chat.sealed) return null;
     if (execution.controller.signal.aborted) return null;
     const policy = read_agent_auto_continue_policy(this.settings.read_setting());
-    const used = this.auto_continue_attempts.get(round_id) ?? 0;
+    const root_id = chat.view.find_round_root(round_id) ?? round_id;
+    const used = chat.view.count_chain_inputs(root_id, "auto_continue");
     if (!policy.enabled || is_agent_auto_continue_exhausted(policy, used)) {
       // 不再判定时清掉上一轮留下的“正在继续”状态。
       this.cancel_auto_continue();
@@ -1263,7 +1334,7 @@ export class AgentService {
       this.cancel_auto_continue();
       return null;
     }
-    const task = this.read_agent_round_task(chat, round_id);
+    const task = this.read_agent_round_task(chat, root_id);
     const answer = this.read_agent_last_answer(chat);
     if (task === "" && answer === "") {
       this.cancel_auto_continue();
@@ -1277,28 +1348,24 @@ export class AgentService {
       this.cancel_auto_continue();
       return null;
     }
-    // 判定为未完成：轮次回到运行中，用隐藏继续输入接着做。
+    // 判定为未完成：新建一个可见的自动继续轮次，显示为用户发送“继续”。
     try {
-      await chat.change((state) => {
-        const previous = state.rounds[round_id]!;
-        previous.status = "running";
-        previous.endedAt = null;
-        previous.failure = null;
-      });
-      this.auto_continue_attempts.set(round_id, attempt);
-      this.auto_continue_snapshot = { roundId: round_id, attempt, phase: "continuing" };
-      this.publish_snapshot();
       const text = this.read_continue_text();
       const accepted = await chat.submit(
         { text, attachments: [] },
         { text, images: [] },
         execution,
-        "hidden",
+        "auto_continue",
       );
-      chat.log.begin_run(round_id, "continue");
+      this.auto_continue_snapshot = {
+        roundId: accepted.input.roundId,
+        attempt,
+        phase: "continuing",
+      };
+      this.publish_snapshot();
       return accepted;
     } catch (error) {
-      // 继续动作失败时回到结束状态，判定不得让轮次停不下来。
+      // 提交失败不消耗次数，当前轮次保持成功。
       this.cancel_auto_continue();
       chat.log.report_failure("cleanup", error);
       return null;
@@ -1365,11 +1432,10 @@ export class AgentService {
     if (publish) this.publish_snapshot();
   }
 
-  /** 判定输入取本轮的用户任务原文。 */
+  /** 判定输入取任务链根的用户任务原文，不取自动继续的“继续”。 */
   private read_agent_round_task(chat: AgentChat, round_id: string): string {
     const round = chat.entries.findLast(
-      (entry) =>
-        entry.kind === "user_message" && entry.delivery === "round" && entry.id === round_id,
+      (entry) => entry.kind === "user_message" && is_round_header(entry) && entry.id === round_id,
     );
     return round?.kind === "user_message" ? round.text : "";
   }
@@ -1686,10 +1752,16 @@ export class AgentService {
     const timeline = this.chat?.view.take_change();
     if (force || previous === null || previous.chatId !== fields.chatId || timeline?.replace) {
       this.revision++;
+      const window = this.read_timeline_window();
       const snapshot = {
         ...fields,
         revision: this.revision,
-        entries: structuredClone(this.chat?.entries ?? []),
+        entries: flatten_timeline_window(window),
+        timeline: {
+          hasEarlier: window.hasEarlier,
+          nextCursor: window.nextCursor,
+          rounds: window.rounds,
+        },
       };
       this.publish(AGENT_CHAT_EVENT_TOPIC, {
         type: "snapshot_seed",
@@ -1704,7 +1776,8 @@ export class AgentService {
         changes.push({ type: "auto_resume", autoResume: fields.autoResume });
       if (!isDeepStrictEqual(fields.autoContinue, previous.autoContinue))
         changes.push({ type: "auto_continue", autoContinue: fields.autoContinue });
-      for (const entry of timeline?.entries ?? []) changes.push({ type: "entry_upsert", entry });
+      for (const entry of timeline?.entries ?? [])
+        changes.push({ type: "entry_upsert", entry: to_public_entry(entry) });
       if (fields.state !== previous.state)
         changes.push({ type: "chat_status", state: fields.state });
       if (!isDeepStrictEqual(fields.pendingDecision, previous.pendingDecision))
@@ -1840,8 +1913,6 @@ export class AgentService {
   private async close_chat(reason: AgentStopReason): Promise<void> {
     this.cancel_auto_resume(false);
     this.cancel_auto_continue(false);
-    this.auto_resume_attempts.clear();
-    this.auto_continue_attempts.clear();
     const chat = this.chat;
     const execution = this.execution;
     const store = this.store;
@@ -1995,9 +2066,38 @@ function read_agent_continue_message(
   return message;
 }
 
+/** 快照按轮次展开：轮次头在前，随后是该轮次已加载内容；未归属条目保持原顺序。 */
+function flatten_timeline_window(window: AgentTimelineWindow): AgentEntry[] {
+  const by_round = new Map<string, AgentEntry[]>();
+  for (const entry of window.entries) {
+    const list = by_round.get(entry.roundId);
+    if (list === undefined) by_round.set(entry.roundId, [entry]);
+    else list.push(entry);
+  }
+  const result: AgentEntry[] = [];
+  const header_ids = new Set<string>();
+  for (const header of window.headers) {
+    header_ids.add(header.id);
+    result.push(header);
+    result.push(...(by_round.get(header.id) ?? []));
+  }
+  for (const entry of window.entries) {
+    if (!header_ids.has(entry.roundId)) result.push(entry);
+  }
+  return result;
+}
+
 /** 队列校验错误复用公开 validation code，并把细分原因留给诊断。 */
 function agent_queue_validation_error(reason: string): AppErrors.AppError {
   return new AppErrors.AppError("request.validation_failed", { diagnostic_context: { reason } });
+}
+
+/** 游标失效是前端可恢复的分页状态，因此公开细分原因。 */
+function agent_timeline_cursor_error(): AppErrors.AppError {
+  return new AppErrors.AppError("request.validation_failed", {
+    public_details: { reason: "agent_timeline_cursor_expired" },
+    diagnostic_context: { reason: "agent_timeline_cursor_expired" },
+  });
 }
 
 /** 仅公开输入入口加入命令身份，内部 FIFO 和恢复输入直接使用 SDK 尝试身份。 */

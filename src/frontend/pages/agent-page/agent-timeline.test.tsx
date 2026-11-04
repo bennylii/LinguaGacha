@@ -17,6 +17,7 @@ import type {
   AgentEntryStatus,
   AgentRunFailure,
   AgentSkillSnapshot,
+  AgentTimelineSnapshot,
   AgentToolEntry,
 } from "@shared/agent";
 import { TooltipProvider } from "@frontend/shadcn/tooltip";
@@ -108,7 +109,7 @@ describe("AgentTimeline", () => {
     skills: readonly AgentSkillSnapshot[] = [],
     auto_resume: AgentAutoResumeSnapshot | null = null,
     auto_continue: AgentAutoContinueSnapshot | null = null,
-    follow_latest = true,
+    timeline?: AgentTimelineSnapshot,
   ): Promise<HTMLDivElement> {
     if (container === null) {
       container = document.createElement("div");
@@ -116,7 +117,7 @@ describe("AgentTimeline", () => {
       root = createRoot(container);
     }
     await act(async () => {
-      timeline_store.replace(entries);
+      timeline_store.replace(entries, timeline);
       timeline_store.notify();
       root?.render(
         <AgentChatStoreContext.Provider value={timeline_session}>
@@ -125,7 +126,6 @@ describe("AgentTimeline", () => {
               skills={skills}
               compact_available
               on_compact={on_compact}
-              follow_latest={follow_latest}
               follow_reset_revision={follow_reset_revision}
               on_continue={on_continue}
               auto_resume={auto_resume}
@@ -189,6 +189,7 @@ describe("AgentTimeline", () => {
     const steer: AgentEntry = {
       kind: "user_message",
       id: "user-steer",
+      roundId: "user-round",
       delivery: "steer",
       text: "立即补充",
       attachments: [],
@@ -222,8 +223,20 @@ describe("AgentTimeline", () => {
           index * 4_000,
           status === "running" ? null : (index + 1) * 4_000,
         ),
-        assistant_entry(`middle-${status}`, `${status} 中间回复`, "success", index * 4_000 + 1_000),
-        assistant_entry(`last-${status}`, `${status} 最终回复`, status, index * 4_000 + 2_000),
+        assistant_entry(
+          `middle-${status}`,
+          `${status} 中间回复`,
+          "success",
+          index * 4_000 + 1_000,
+          `user-${status}`,
+        ),
+        assistant_entry(
+          `last-${status}`,
+          `${status} 最终回复`,
+          status,
+          index * 4_000 + 2_000,
+          `user-${status}`,
+        ),
       ],
     );
     const view = await render_timeline(entries);
@@ -252,9 +265,9 @@ describe("AgentTimeline", () => {
   it("历史输入均可编辑，助手修订与继续入口只属于最新失败轮次", async () => {
     const view = await render_timeline([
       user_entry("user-old-error", "旧任务", "error", 0, 2_000),
-      assistant_entry("assistant-old-error", "旧部分结果", "error", 1_000),
+      assistant_entry("assistant-old-error", "旧部分结果", "error", 1_000, "user-old-error"),
       user_entry("user-error", "最新任务", "error", 3_000, 5_000),
-      assistant_entry("assistant-error", "最新部分结果", "error", 4_000),
+      assistant_entry("assistant-error", "最新部分结果", "error", 4_000, "user-error"),
     ]);
     const assistants = view.querySelectorAll(".agent-message--assistant");
     const continue_entries = view.querySelectorAll<HTMLButtonElement>(".agent-continue-entry");
@@ -496,8 +509,8 @@ describe("AgentTimeline", () => {
     ];
     const view = await render_timeline([
       ...round,
-      { kind: "context_compaction", createdAt: null, id: "old-compaction", status: "error" },
-      { kind: "context_compaction", createdAt: null, id: "compaction-1", status: "error" },
+      { kind: "context_compaction", createdAt: null, id: "old-compaction", roundId: "user-error", status: "error" },
+      { kind: "context_compaction", createdAt: null, id: "compaction-1", roundId: "user-error", status: "error" },
     ]);
     expect(view.querySelector('.agent-process-entry [role="status"]')?.textContent).toContain(
       "agent_page.compaction.error",
@@ -510,7 +523,7 @@ describe("AgentTimeline", () => {
     expect(on_compact).toHaveBeenCalledOnce();
     await act(async () => {
       timeline_store.update([
-        { kind: "context_compaction", createdAt: null, id: "retry", status: "running" },
+        { kind: "context_compaction", createdAt: null, id: "retry", roundId: "user-error", status: "running" },
       ]);
       timeline_store.notify();
     });
@@ -828,58 +841,38 @@ describe("AgentTimeline", () => {
     expect(view.querySelector(".agent-round-footer")?.textContent).toContain("2s");
   });
 
-  it("长会话只挂载最近轮次，并按页展开更早内容", async () => {
+  it("时间线渲染 Store 提供的完整窗口，不再自行截断轮次", async () => {
     const entries = Array.from({ length: 45 }, (_, index) =>
       user_entry(`user-${index}`, `任务 ${index}`, "success", index * 1_000, index * 1_000 + 500),
     );
-    const view = await render_timeline(entries, 0, [], null, null, false);
-    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(20);
-    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 25");
-
-    const earlier = view.querySelector<HTMLButtonElement>(".agent-page__timeline-earlier button");
-    expect(earlier?.textContent).toBe("agent_page.timeline.show_earlier:20");
-    await act(async () => earlier?.click());
-    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(40);
-    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 5");
-    expect(
-      view.querySelector<HTMLButtonElement>(".agent-page__timeline-earlier button")?.textContent,
-    ).toBe("agent_page.timeline.show_earlier:5");
-
-    await act(async () =>
-      view.querySelector<HTMLButtonElement>(".agent-page__timeline-earlier button")?.click(),
-    );
+    const view = await render_timeline(entries);
     expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(45);
-    expect(view.querySelector(".agent-page__timeline-earlier")).toBeNull();
+    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 0");
   });
 
-  it("阅读历史时新增轮次不挤掉已展示内容，回到跟随后恢复最近窗口", async () => {
-    const first_batch = Array.from({ length: 30 }, (_, index) =>
-      user_entry(`user-${index}`, `任务 ${index}`, "success", index * 1_000, index * 1_000 + 500),
+  it("顶部与轮次内更早入口按窗口状态显示", async () => {
+    const view = await render_timeline(
+      [user_entry("user-1", "任务 1", "success", 0, 500)],
+      0,
+      [],
+      null,
+      null,
+      {
+        hasEarlier: true,
+        nextCursor: "older-1",
+        rounds: [{ id: "user-1", hasEarlier: true }],
+      },
     );
-    const view = await render_timeline(first_batch, 0, [], null, null, false);
-    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(20);
-    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 10");
+    const earlier = [...view.querySelectorAll<HTMLButtonElement>(".agent-page__timeline-earlier")];
+    expect(earlier).toHaveLength(2);
+    expect(earlier[0]?.textContent).toBe("agent_page.timeline.show_earlier");
+    expect(earlier[1]?.classList.contains("agent-page__timeline-earlier--in-round")).toBe(true);
+    expect(earlier[1]?.textContent).toBe("agent_page.timeline.show_earlier_in_round");
+  });
 
-    const next_batch = [
-      ...first_batch,
-      ...Array.from({ length: 5 }, (_, index) => {
-        const position = first_batch.length + index;
-        return user_entry(
-          `user-${position}`,
-          `任务 ${position}`,
-          "success",
-          position * 1_000,
-          position * 1_000 + 500,
-        );
-      }),
-    ];
-    await render_timeline(next_batch, 0, [], null, null, false);
-    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(25);
-    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 10");
-
-    await render_timeline(next_batch, 0, [], null, null, true);
-    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(20);
-    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 15");
+  it("无更早历史时不显示加载入口", async () => {
+    const view = await render_timeline([user_entry("user-1", "任务", "success", 0, 500)]);
+    expect(view.querySelector(".agent-page__timeline-earlier")).toBeNull();
   });
 });
 
@@ -907,6 +900,7 @@ function user_entry(
   return {
     kind: "user_message" as const,
     id,
+    roundId: id,
     delivery: "round" as const,
     averageTokensPerSecond: null,
     text,
@@ -919,8 +913,14 @@ function user_entry(
 }
 
 /** 纯文本场景复用分段消息夹具。 */
-function assistant_entry(id: string, text: string, status: AgentEntryStatus, createdAt: number) {
-  return assistant_parts_entry(id, [{ kind: "text", text }], status, createdAt);
+function assistant_entry(
+  id: string,
+  text: string,
+  status: AgentEntryStatus,
+  createdAt: number,
+  roundId = "",
+) {
+  return assistant_parts_entry(id, [{ kind: "text", text }], status, createdAt, roundId);
 }
 
 /** 保留分段结构供正文、思考和媒体渲染场景组合。 */
@@ -929,10 +929,12 @@ function assistant_parts_entry(
   parts: AgentAssistantMessageParts,
   status: AgentEntryStatus,
   createdAt: number,
+  roundId = "",
 ) {
   return {
     kind: "assistant_message" as const,
     id,
+    roundId,
     parts,
     status,
     createdAt,
@@ -947,8 +949,17 @@ function tool_entry(
   output: string | null,
   createdAt: number,
   input = "{}",
+  roundId = "",
 ): AgentToolEntry {
-  const base = { kind: "tool_call" as const, id, toolName, input, createdAt };
+  const base = {
+    kind: "tool_call" as const,
+    id,
+    roundId,
+    toolName,
+    input,
+    outputTruncated: false as const,
+    createdAt,
+  };
   if (status === "running" || status === "stopped") {
     if (output !== null) throw new Error("开放或停止工具不得携带输出");
     return { ...base, status, output: null };

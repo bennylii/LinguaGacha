@@ -142,10 +142,44 @@ function install_scroll_metrics(target: HTMLElement, metrics: ScrollMetrics): vo
   });
 }
 
+/** 构造 jsdom 不提供的布局矩形。 */
+function layout_rect(top: number, height: number): DOMRect {
+  return {
+    top,
+    bottom: top + height,
+    left: 0,
+    right: 0,
+    width: 0,
+    height,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** 按条目顺序模拟等高层级，供前插锚点测试读取真实位移。 */
+function install_entry_layout(conversation: HTMLElement, entry_height: number): void {
+  const read_entries = (): HTMLElement[] => [
+    ...conversation.querySelectorAll<HTMLElement>(".agent-message-frame, .agent-process-entry"),
+  ];
+  for (const entry of read_entries()) {
+    if (entry.dataset.testLayout === "true") continue;
+    entry.dataset.testLayout = "true";
+    Object.defineProperty(entry, "getBoundingClientRect", {
+      configurable: true,
+      value: (): DOMRect => {
+        const top = read_entries().indexOf(entry) * entry_height - conversation.scrollTop;
+        return layout_rect(top, entry_height);
+      },
+    });
+  }
+}
+
 vi.mock("@frontend/app/session/agent/agent-chat-context", () => ({
   useAgentChatId: () => "test-chat",
   useAgentTokenSpeed: () => null,
   useAgentTimeline: () => read_test_timeline().read(),
+  useAgentTimelineStatus: () => ({ loading: false, error: null }),
   useAgentEntry: (id: string | null) => read_test_timeline().entry(id),
   useAgentRound: (id: string) => ({
     entryIds: read_test_timeline().round(id),
@@ -240,6 +274,7 @@ describe("AgentConversation", () => {
     model_thinking_state.thinking_level = "OFF";
     model_thinking_state.available_thinking_levels = [];
     model_selection_commands.select_model.mockClear();
+    test_timeline_has_earlier = false;
   });
 
   afterEach(async () => {
@@ -720,6 +755,119 @@ describe("AgentConversation", () => {
     expect(button.getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("跟随状态下直接滚到顶部也会自动加载更早历史", async () => {
+    test_timeline_has_earlier = true;
+    const loadEarlier = vi.fn(async () => undefined);
+    const view = await render_page({ loadEarlier });
+    const conversation = view.querySelector<HTMLElement>(".agent-page__conversation");
+    if (conversation === null) throw new Error("缺少消息滚动容器");
+    const scroll = { top: 600, height: 1_000, viewport: 400 };
+    install_scroll_metrics(conversation, scroll);
+    await act(async () => notify_resize_observers());
+    await act(async () => next_animation_frame());
+    expect(scroll.top).toBe(scroll_end(scroll));
+    // jsdom 初始尺寸为零会先触发首屏补页，这里只观察滚动引起的加载。
+    loadEarlier.mockClear();
+
+    // 一次拖到顶部时 follow_latest 仍是旧值，自动加载不能依赖本帧的跟随状态。
+    scroll.top = 0;
+    await act(async () => conversation.dispatchEvent(new Event("scroll")));
+
+    expect(loadEarlier).toHaveBeenCalledOnce();
+    expect(get_follow_latest_button(view).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("前插更早页按阅读锚点恢复位置，底部并发追加不改变阅读位置", async () => {
+    test_timeline_has_earlier = true;
+    const initial = [
+      user_entry("user-1", "继续", "success", 0, 1),
+      assistant_entry("a1", "第一段", "success", 1, "user-1"),
+      assistant_entry("a2", "第二段", "success", 2, "user-1"),
+    ];
+    const loadEarlier = vi.fn(async () => undefined);
+    const view = await render_page({ entries: initial, loadEarlier });
+    const conversation = view.querySelector<HTMLElement>(".agent-page__conversation");
+    if (conversation === null) throw new Error("缺少消息滚动容器");
+    const scroll = { top: 100, height: 300, viewport: 100 };
+    install_scroll_metrics(conversation, scroll);
+    Object.defineProperty(conversation, "getBoundingClientRect", {
+      configurable: true,
+      value: () => layout_rect(0, scroll.viewport),
+    });
+    install_entry_layout(conversation, 100);
+    await act(async () => notify_resize_observers());
+    await act(async () => next_animation_frame());
+    loadEarlier.mockClear();
+
+    // 阅读位置停在首条助手消息，而不是轮次头。
+    scroll.top = 100;
+    await act(async () => conversation.dispatchEvent(new Event("scroll")));
+    expect(loadEarlier).toHaveBeenCalledOnce();
+
+    // 前插两条更早消息，同时在底部追加一条新消息。
+    const next_entries = [
+      assistant_entry("x1", "更早一", "success", 3, "user-1"),
+      assistant_entry("x2", "更早二", "success", 4, "user-1"),
+      ...initial,
+      assistant_entry("z1", "追加", "success", 5, "user-1"),
+    ];
+    scroll.height += 300; // 前插 200 + 底部追加 100
+    await render_page({ entries: next_entries, loadEarlier });
+    install_entry_layout(conversation, 100);
+
+    // 只按前插高度恢复；底部追加不参与阅读锚点的视口位置。
+    expect(scroll.top).toBe(300);
+    const anchor = [...conversation.querySelectorAll<HTMLElement>(".agent-message-frame")].find(
+      (element) => element.textContent?.includes("第一段"),
+    );
+    expect(anchor?.getBoundingClientRect().top).toBe(0);
+  });
+
+  it("轮次头位于视口顶部时按首条内容恢复阅读位置", async () => {
+    test_timeline_has_earlier = true;
+    const initial = [
+      user_entry("user-1", "继续", "success", 0, 1),
+      assistant_entry("a1", "第一段", "success", 1, "user-1"),
+      assistant_entry("a2", "第二段", "success", 2, "user-1"),
+    ];
+    const loadEarlier = vi.fn(async () => undefined);
+    const view = await render_page({ entries: initial, loadEarlier });
+    const conversation = view.querySelector<HTMLElement>(".agent-page__conversation");
+    if (conversation === null) throw new Error("缺少消息滚动容器");
+    const scroll = { top: 0, height: 300, viewport: 100 };
+    install_scroll_metrics(conversation, scroll);
+    Object.defineProperty(conversation, "getBoundingClientRect", {
+      configurable: true,
+      value: () => layout_rect(0, scroll.viewport),
+    });
+    install_entry_layout(conversation, 100);
+    await act(async () => notify_resize_observers());
+    await act(async () => next_animation_frame());
+    loadEarlier.mockClear();
+
+    // 视口顶部是轮次头，但前插点在它下方，锚点必须取首条内容。
+    scroll.top = 0;
+    await act(async () => conversation.dispatchEvent(new Event("scroll")));
+    expect(loadEarlier).toHaveBeenCalledOnce();
+
+    const next_entries = [
+      assistant_entry("x1", "更早一", "success", 3, "user-1"),
+      assistant_entry("x2", "更早二", "success", 4, "user-1"),
+      ...initial,
+    ];
+    scroll.height += 200;
+    await render_page({ entries: next_entries, loadEarlier });
+    install_entry_layout(conversation, 100);
+
+    // 阅读位置由首条内容保持；轮次头随前插内容一起移出视口。
+    expect(scroll.top).toBe(200);
+    const frames = [...conversation.querySelectorAll<HTMLElement>(".agent-message-frame")];
+    const header = frames.find((element) => element.textContent?.includes("继续"));
+    const first_content = frames.find((element) => element.textContent?.includes("第一段"));
+    expect(header?.getBoundingClientRect().top).toBe(-200);
+    expect(first_content?.getBoundingClientRect().top).toBe(100);
+  });
+
   it("满消息队列时页面禁用新增发送并显示容量提示", async () => {
     const view = await render_page({
       state: "running",
@@ -829,6 +977,7 @@ describe("AgentConversation", () => {
           [{ kind: "thinking", text: "第一步\n第二步" }],
           "running",
           1,
+          "user-thinking",
         ),
       ],
     });
@@ -868,6 +1017,7 @@ describe("AgentConversation", () => {
           [{ kind: "thinking", text: "第一步\n第二步" }],
           "success",
           1,
+          "user-thinking",
         ),
       ],
     });
@@ -918,10 +1068,12 @@ describe("AgentConversation", () => {
         {
           kind: "tool_call",
           id: "apply-1",
+          roundId: "user-1",
           toolName: "workspace_apply",
           input: "{}",
           status: "running",
           output: null,
+          outputTruncated: false,
           createdAt: 1,
         },
       ],
@@ -1001,10 +1153,11 @@ describe("AgentConversation", () => {
           kind: "context_compaction",
           createdAt: null,
           id: "compaction-1",
+          roundId: "user-1",
           status: "error",
         },
         user_entry("user-2", "继续检查", "error", 2_000, 3_000),
-        assistant_entry("assistant-1", "部分结果", "error", 2_500),
+        assistant_entry("assistant-1", "部分结果", "error", 2_500, "user-2"),
       ],
       send,
       continue: continue_session,
@@ -1029,7 +1182,7 @@ describe("AgentConversation", () => {
     const compactContext = vi.fn(async () => undefined);
     const entries: AgentEntry[] = [
       user_entry("user", "检查", "success", 0, 1_000),
-      { kind: "context_compaction", createdAt: null, id: "compact", status: "error" },
+      { kind: "context_compaction", createdAt: null, id: "compact", roundId: "user", status: "error" },
     ];
     const options = {
       entries,
@@ -1150,8 +1303,8 @@ describe("AgentConversation", () => {
     const reviseRound = vi.fn(async () => undefined);
     const entries = [
       user_entry("user-write", "原输入", "success", 0, 3),
-      workspace_apply_entry("apply-1"),
-      assistant_entry("assistant-write", "原输出", "success", 2),
+      workspace_apply_entry("apply-1", "user-write"),
+      assistant_entry("assistant-write", "原输出", "success", 2, "user-write"),
     ];
     const ordinary_input = build_state().input;
     ordinary_input.draft.write({ text: "普通草稿", attachments: [] });
@@ -1297,10 +1450,10 @@ describe("AgentConversation", () => {
       forkRound,
       entries: [
         user_entry("user-1", "第一问", "success", 0, 1),
-        assistant_entry("middle", "中间回复", "success", 1),
-        assistant_entry("final", "最终回复", "success", 2),
+        assistant_entry("middle", "中间回复", "success", 1, "user-1"),
+        assistant_entry("final", "最终回复", "success", 2, "user-1"),
         user_entry("user-2", "第二问", "success", 3, 4),
-        assistant_entry("final-2", "第二答", "success", 4),
+        assistant_entry("final-2", "第二答", "success", 4, "user-2"),
       ],
     });
     const buttons = [
@@ -1374,7 +1527,7 @@ function build_state(overrides: Partial<AgentPageState> = {}): AgentPageState {
     pendingDecision: null,
     entries: [
       user_entry("user-1", "开始", "success", 0, 1),
-      assistant_entry("assistant-1", "**变更方案**", "success", 1),
+      assistant_entry("assistant-1", "**变更方案**", "success", 1, "user-1"),
     ],
     skills: [],
     inputQueue: { paused: false, canSendNow: false, items: [] },
@@ -1402,6 +1555,12 @@ function build_state(overrides: Partial<AgentPageState> = {}): AgentPageState {
     compactContext: vi.fn(async () => undefined),
     stop: vi.fn(),
     reset: vi.fn(async () => undefined),
+    loadEarlier: vi.fn(async () => undefined),
+    retryLoadEarlier: vi.fn(async () => undefined),
+    trimTimeline: vi.fn(),
+    readEntry: vi.fn(async (id: string) => {
+      throw new Error(`unexpected tool read: ${id}`);
+    }),
     resolveQuestion: vi.fn(async () => undefined),
     resolveWriteApproval: vi.fn(async () => undefined),
     setQuestionFocused: vi.fn(),
@@ -1430,6 +1589,7 @@ function user_entry(
   return {
     kind: "user_message" as const,
     id,
+    roundId: id,
     delivery: "round" as const,
     averageTokensPerSecond: null,
     text,
@@ -1442,19 +1602,27 @@ function user_entry(
 }
 
 /** 将普通助手正文装配为公开 parts 消息。 */
-function assistant_entry(id: string, text: string, status: AgentEntryStatus, createdAt: number) {
-  return assistant_parts_entry(id, [{ kind: "text", text }], status, createdAt);
+function assistant_entry(
+  id: string,
+  text: string,
+  status: AgentEntryStatus,
+  createdAt: number,
+  roundId = "",
+) {
+  return assistant_parts_entry(id, [{ kind: "text", text }], status, createdAt, roundId);
 }
 
 /** 构造最新轮次内已经成功落盘的 apply 条目。 */
-function workspace_apply_entry(id: string) {
+function workspace_apply_entry(id: string, roundId = "") {
   return {
     kind: "tool_call" as const,
     id,
+    roundId,
     toolName: "workspace_apply",
     input: "{}",
     status: "success" as const,
     output: ["{}"],
+    outputTruncated: false,
     createdAt: 1,
   };
 }
@@ -1465,10 +1633,12 @@ function assistant_parts_entry(
   parts: AgentAssistantMessageParts,
   status: AgentEntryStatus,
   createdAt: number,
+  roundId = "",
 ) {
   return {
     kind: "assistant_message" as const,
     id,
+    roundId,
     parts,
     status,
     createdAt,
@@ -1545,11 +1715,19 @@ function get_portal_cancel_button(): HTMLButtonElement {
 
 const test_timeline = new AgentTimelineStore(); // 页面交互夹具通过真实结构索引提供订阅快照。
 let test_timeline_entries: readonly AgentEntry[] | undefined;
-/** 只在夹具条目集合替换后更新索引，模拟稳定的结构快照。 */
+let test_timeline_has_earlier = false;
+/** 只在夹具条目集合或更早历史状态替换后更新索引，模拟稳定的结构快照。 */
 function read_test_timeline(): AgentTimelineStore {
-  if (test_timeline_entries !== page_state.current.entries) {
+  if (
+    test_timeline_entries !== page_state.current.entries ||
+    test_timeline_has_earlier !== test_timeline.read().hasEarlier
+  ) {
     test_timeline_entries = page_state.current.entries;
-    test_timeline.replace(test_timeline_entries);
+    test_timeline.replace(test_timeline_entries, {
+      hasEarlier: test_timeline_has_earlier,
+      nextCursor: test_timeline_has_earlier ? (test_timeline_entries[0]?.id ?? null) : null,
+      rounds: [],
+    });
   }
   return test_timeline;
 }

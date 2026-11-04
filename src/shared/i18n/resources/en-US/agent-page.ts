@@ -162,6 +162,9 @@ export const en_us_agent_page = {
     details: "{tool} tool call details",
     input: "Input",
     output: "Output",
+    loading_full: "Loading full output …",
+    load_failed: "Could not load the full output.",
+    retry: "Retry",
   },
   round: {
     running: "Processing for {duration}",
@@ -170,7 +173,11 @@ export const en_us_agent_page = {
     stopped: "Stopped · {duration}",
   },
   timeline: {
-    show_earlier: "Show {count} earlier rounds",
+    show_earlier: "Show earlier messages",
+    show_earlier_in_round: "Show earlier messages in this round",
+    loading: "Loading earlier messages …",
+    retry: "Could not load earlier messages. Retry",
+    cursor_expired: "History changed. Returned to the latest messages.",
   },
   upload: { uploading: "Uploading", failed: "Upload failed" },
   file_saved: "File saved",

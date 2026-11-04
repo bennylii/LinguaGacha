@@ -1,9 +1,11 @@
 import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
 import {
+  useAgentChatActions,
   useAgentChatId,
   useAgentEntry,
   useAgentRound,
   useAgentTimeline,
+  useAgentTimelineStatus,
 } from "@frontend/app/session/agent/agent-chat-context";
 import { find_agent_mention_ranges } from "./agent-mention";
 import {
@@ -48,9 +50,6 @@ type Translate = ReturnType<typeof useI18n>["t"];
 type UserEntry = Extract<AgentEntry, { kind: "user_message" }>;
 type AssistantEntry = Extract<AgentEntry, { kind: "assistant_message" }>;
 const AGENT_THINKING_AUTO_COLLAPSE_DELAY_MS = 3_000; // 给用户留出确认终态的短暂视觉窗口
-// 历史正文全部常驻会持续放大布局与流式重绘成本。这里只限制渲染窗口，快照与模型上下文不丢弃。
-const AGENT_TIMELINE_RENDER_ROUNDS = 20;
-const AGENT_TIMELINE_RENDER_ROUND_PAGE = 20;
 
 /** 页面提供交互与展示设置，时间线事实由各层独立订阅。 */
 type AgentTimelineProps = {
@@ -59,7 +58,6 @@ type AgentTimelineProps = {
   compact_available: boolean;
   on_compact: () => void;
 
-  follow_latest: boolean;
   follow_reset_revision: number;
   on_continue: () => void;
   auto_resume: AgentAutoResumeSnapshot | null;
@@ -75,41 +73,30 @@ type AgentTimelineProps = {
   annotation_disabled: boolean;
 };
 
-/** 时间线订阅轮次顺序，仅在本地保存工具详情选择。 */
+/** 时间线订阅已加载窗口，仅在本地保存工具详情选择。 */
 export function AgentTimeline(props: AgentTimelineProps): JSX.Element {
   const { t } = useI18n();
   const [selected_tool_id, set_selected_tool_id] = useState<string | null>(null);
-  useEffect(() => {
-    if (props.active === false) set_selected_tool_id(null);
-  }, [props.active]);
-  const { roundIds, latestCompactionId } = useAgentTimeline();
+  const { roundIds, latestCompactionId, hasEarlier, roundHasEarlier } = useAgentTimeline();
+  const timeline_status = useAgentTimelineStatus();
+  const actions = useAgentChatActions();
   const chat_id = useAgentChatId();
   const selected = useAgentEntry(selected_tool_id);
   const selected_tool = selected?.kind === "tool_call" ? selected : null;
-  // null 表示窗口贴住最新轮次；数字是用户显式展开后的最早可见轮次。
-  const [window_start, set_window_start] = useState<number | null>(null);
-  const natural_start = Math.max(0, roundIds.length - AGENT_TIMELINE_RENDER_ROUNDS);
-  const visible_start = Math.min(window_start ?? natural_start, natural_start);
-  const visible_rounds = roundIds.slice(visible_start);
 
-  // 换会话后重新贴住最新轮次，避免沿用上一段对话的展开位置。
+  // 换会话后关闭旧详情，避免把上一段对话的工具身份带到新历史。
   useEffect(() => {
-    set_window_start(null);
+    if (props.active === false) set_selected_tool_id(null);
+  }, [props.active]);
+  useEffect(() => {
+    set_selected_tool_id(null);
   }, [chat_id]);
 
-  // 跟随最新时窗口自动滑动；阅读历史时冻结最早可见轮次，新轮次只追加在下方。
-  useEffect(() => {
-    if (props.follow_latest) {
-      set_window_start(null);
-      return;
-    }
-    set_window_start((current) => current ?? natural_start);
-  }, [props.follow_latest, natural_start]);
-
-  const show_earlier = (): void => {
-    set_window_start((current) =>
-      Math.max(0, (current ?? natural_start) - AGENT_TIMELINE_RENDER_ROUND_PAGE),
-    );
+  const load_earlier = (): void => {
+    void actions.loadEarlier();
+  };
+  const retry_load_earlier = (): void => {
+    void actions.retryLoadEarlier();
   };
 
   return (
@@ -118,16 +105,27 @@ export function AgentTimeline(props: AgentTimelineProps): JSX.Element {
         disabled={props.annotation_disabled}
         on_add={props.on_add_annotation}
       >
-        {visible_start === 0 ? null : (
+        {hasEarlier ? (
           <div className="agent-page__timeline-earlier">
-            <AppButton type="button" size="xs" variant="ghost" onClick={show_earlier}>
-              {t("agent_page.timeline.show_earlier", {
-                count: Math.min(visible_start, AGENT_TIMELINE_RENDER_ROUND_PAGE).toString(),
-              })}
-            </AppButton>
+            {timeline_status.loading ? (
+              <span role="status">{t("agent_page.timeline.loading")}</span>
+            ) : timeline_status.error === "failed" ? (
+              <AppButton type="button" size="xs" variant="ghost" onClick={retry_load_earlier}>
+                {t("agent_page.timeline.retry")}
+              </AppButton>
+            ) : (
+              <AppButton type="button" size="xs" variant="ghost" onClick={load_earlier}>
+                {t("agent_page.timeline.show_earlier")}
+              </AppButton>
+            )}
           </div>
-        )}
-        {visible_rounds.map((roundId, index) => (
+        ) : null}
+        {timeline_status.error === "cursor_expired" ? (
+          <div className="agent-page__timeline-earlier" role="status">
+            {t("agent_page.timeline.cursor_expired")}
+          </div>
+        ) : null}
+        {roundIds.map((roundId, index) => (
           <AgentRound
             key={roundId}
             roundId={roundId}
@@ -135,10 +133,13 @@ export function AgentTimeline(props: AgentTimelineProps): JSX.Element {
             compact_available={props.compact_available}
             on_compact={props.on_compact}
             latest_compaction_id={latestCompactionId}
+            has_earlier_in_round={roundHasEarlier.get(roundId) ?? false}
+            load_earlier_disabled={timeline_status.loading}
+            on_load_earlier={load_earlier}
 
             follow_reset_revision={props.follow_reset_revision}
             t={t}
-            is_latest_round={index === visible_rounds.length - 1}
+            is_latest_round={index === roundIds.length - 1}
             on_continue={props.on_continue}
             auto_resume={props.auto_resume}
             on_cancel_auto_resume={props.on_cancel_auto_resume}
@@ -166,6 +167,9 @@ type AgentRoundProps = {
   on_compact: () => void;
   latest_compaction_id: string | null;
   roundId: string;
+  has_earlier_in_round: boolean;
+  load_earlier_disabled: boolean;
+  on_load_earlier: () => void;
 
   follow_reset_revision: number;
   t: Translate;
@@ -187,7 +191,11 @@ type AgentRoundProps = {
 const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
   const user = useAgentEntry(props.roundId);
   const { entryIds, latestAssistantId } = useAgentRound(props.roundId);
-  if (user?.kind !== "user_message" || user.delivery !== "round") return null;
+  if (
+    user?.kind !== "user_message" ||
+    (user.delivery !== "round" && user.delivery !== "auto_continue")
+  )
+    return null;
   const mention_ranges = find_agent_mention_ranges(user.text, props.skills);
   const mention_only =
     mention_ranges.length === 1 &&
@@ -204,6 +212,7 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
     <>
       <AgentMessageFrame
         role="user"
+        round_header
         actions={
           ended && user_editor === null ? (
             <AgentMessageActions
@@ -231,6 +240,19 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
           </article>
         )}
       </AgentMessageFrame>
+      {props.has_earlier_in_round ? (
+        <div className="agent-page__timeline-earlier agent-page__timeline-earlier--in-round">
+          <AppButton
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={props.load_earlier_disabled}
+            onClick={props.on_load_earlier}
+          >
+            {props.t("agent_page.timeline.show_earlier_in_round")}
+          </AppButton>
+        </div>
+      ) : null}
       {entryIds.map((id) => (
         <AgentRoundItem
           key={id}
@@ -343,9 +365,13 @@ function AgentMessageFrame(props: {
   role: "user" | "assistant";
   actions: ReactNode;
   children: ReactNode;
+  round_header?: boolean; // 轮次头位于前插点之上，阅读锚点需要跳过它
 }): JSX.Element {
   return (
-    <div className={`agent-message-frame agent-message-frame--${props.role}`}>
+    <div
+      className={`agent-message-frame agent-message-frame--${props.role}`}
+      data-round-header={props.round_header === true ? "true" : undefined}
+    >
       {props.children}
       {props.actions}
     </div>

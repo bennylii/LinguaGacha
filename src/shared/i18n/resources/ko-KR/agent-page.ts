@@ -157,6 +157,9 @@ export const ko_kr_agent_page = {
     details: "{tool} 도구 호출 상세 정보",
     input: "입력",
     output: "출력",
+    loading_full: "전체 출력을 불러오는 중 …",
+    load_failed: "전체 출력을 불러오지 못했습니다.",
+    retry: "다시 시도",
   },
   round: {
     running: "처리 중 {duration}",
@@ -165,7 +168,11 @@ export const ko_kr_agent_page = {
     stopped: "중지됨 · {duration}",
   },
   timeline: {
-    show_earlier: "이전 {count}개 라운드 표시",
+    show_earlier: "이전 메시지 표시",
+    show_earlier_in_round: "이 라운드의 이전 메시지 표시",
+    loading: "이전 메시지를 불러오는 중 …",
+    retry: "이전 메시지를 불러오지 못했습니다. 다시 시도",
+    cursor_expired: "기록이 변경되어 최신 메시지로 돌아왔습니다.",
   },
   upload: { uploading: "업로드 중", failed: "업로드 실패" },
   file_saved: "파일을 저장했습니다",

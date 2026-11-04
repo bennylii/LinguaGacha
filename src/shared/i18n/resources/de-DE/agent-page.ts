@@ -162,6 +162,9 @@ export const de_de_agent_page = {
     details: "Werkzeugaufrufdetails für {tool}",
     input: "Eingabe",
     output: "Ausgabe",
+    loading_full: "Vollständige Ausgabe wird geladen …",
+    load_failed: "Die vollständige Ausgabe konnte nicht geladen werden.",
+    retry: "Erneut versuchen",
   },
   round: {
     running: "Wird seit {duration} verarbeitet",
@@ -170,7 +173,11 @@ export const de_de_agent_page = {
     stopped: "Gestoppt · {duration}",
   },
   timeline: {
-    show_earlier: "{count} frühere Runden anzeigen",
+    show_earlier: "Frühere Nachrichten anzeigen",
+    show_earlier_in_round: "Frühere Nachrichten dieser Runde anzeigen",
+    loading: "Frühere Nachrichten werden geladen …",
+    retry: "Frühere Nachrichten konnten nicht geladen werden. Erneut versuchen",
+    cursor_expired: "Der Verlauf hat sich geändert. Zu den neuesten Nachrichten zurückgekehrt.",
   },
   upload: {
     uploading: "Wird hochgeladen",

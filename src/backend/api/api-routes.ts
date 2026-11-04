@@ -171,6 +171,8 @@ export function register_api_routes(context: ApiRouteContext): void {
   context.app.get("/api/agent/snapshot", (hono_context) =>
     hono_context.json(ok(agent.get_snapshot())),
   );
+  context.postJson("/api/agent/timeline/page", (body) => agent.get_timeline_page(body));
+  context.postJson("/api/agent/timeline/entry", (body) => agent.get_timeline_entry(body));
   context.postJson("/api/agent/message", (body) => agent.input_command("send", body));
   context.postJson("/api/agent/input-status", (body) => agent.input_command_status(body));
   context.request("POST", "/api/agent/uploads", async (request) => {
