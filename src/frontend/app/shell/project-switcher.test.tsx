@@ -193,4 +193,33 @@ describe("ProjectSwitcher", () => {
       path: "E:/projects/other.lg",
     });
   });
+
+  it("当前工程同时保留在最近工程列表，刚添加的工程不会因处于打开状态而消失", async () => {
+    const on_open_in_current_window = vi.fn(async () => {});
+    await mount_switcher({
+      current_project_path: "E:/projects/remote.lg",
+      recent_projects: [{ path: "E:/projects/remote.lg", name: "remote" }],
+      on_open_in_current_window,
+    });
+
+    await open_menu();
+
+    const recent_trigger = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-slot="dropdown-menu-sub-trigger"]'),
+    ).find((element) => element.textContent?.includes("E:/projects/remote.lg") ?? false);
+    if (recent_trigger === undefined) throw new Error("最近工程列表缺少当前工程。");
+
+    await act(async () => {
+      recent_trigger.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      find_menu_item("在当前窗口打开").click();
+    });
+
+    expect(on_open_in_current_window).toHaveBeenCalledWith("E:/projects/remote.lg");
+  });
 });

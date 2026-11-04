@@ -589,6 +589,10 @@ describe("ProjectPage", () => {
         path: "E:\\Projects\\テスト小説.lg",
       }),
     );
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/settings/recent-projects/add", {
+      path: "E:\\Projects\\テスト小説.lg",
+      name: "テスト小説",
+    });
   });
 
   it("来源模式切换会清空另一种模式的候选", async () => {

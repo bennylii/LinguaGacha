@@ -60,9 +60,9 @@ export function ProjectSwitcher(props: ProjectSwitcherProps): JSX.Element {
   const other_instances = instances.filter(
     (instance) => !instance.current && instance.project_path !== props.current_project_path,
   );
-  const recent_projects = props.recent_projects.filter(
-    (project) => project.path !== props.current_project_path,
-  );
+  // 当前工程也保留在最近列表中：新建或打开的工程会立即写入最近记录，
+  // 用户需要在「最近工程」里看到刚添加的工程，而不是只出现在禁用的当前工程项。
+  const recent_projects = props.recent_projects;
 
   const refresh_instances = useCallback(async (): Promise<void> => {
     set_is_loading_instances(true);
