@@ -36,6 +36,21 @@ export interface BuildRemoteSourceBindingInput {
   synced_at: string;
 }
 
+/** 绑定身份排除标题、哈希和同步时间；等待期间只允许这些派生字段变化。 */
+export function same_remote_source_identity(
+  left: RemoteSourceBinding,
+  right: RemoteSourceBinding,
+): boolean {
+  return (
+    left.origin === right.origin &&
+    left.kind === right.kind &&
+    left.provider_id === right.provider_id &&
+    left.novel_id === right.novel_id &&
+    left.url === right.url &&
+    left.asset_path === right.asset_path
+  );
+}
+
 /** 由站点解析结果生成绑定；字段名称与 API 载荷保持一致。 */
 export function build_remote_source_binding(
   input: BuildRemoteSourceBindingInput,

@@ -11,6 +11,7 @@ import { EpubAst, is_epub_content_item } from "../file/epub/epub-ast";
 import type {
   RemoteAssetReplaceOptions,
   RemoteAssetReplaceRequest,
+  RemoteSourceBindOptions,
 } from "../project/project-content-service";
 import {
   create_volume_epub_fixture,
@@ -20,9 +21,9 @@ import {
 import { read_zip_fixture, write_zip } from "../../test/zip-fixture";
 import type { ProjectFileLock } from "../project/project-file-lock";
 import { ProjectSessionState } from "../project/project-session-state";
-import type { NoveliaClient, RemoteNovelDownload } from "./novelia-client";
+import type { NoveliaClient, RemoteNovelDownload, RemoteWorkspace } from "./novelia-client";
 import { NovelSourceService, type RemoteAssetWriter } from "./novel-source-service";
-import { parse_novel_url, sha256_text } from "./novelia-source";
+import { parse_novel_url, sha256_text, type RemoteNovelRef } from "./novelia-source";
 import { RemoteSnapshotStore } from "./remote-snapshot-store";
 import {
   build_remote_source_binding,
@@ -92,8 +93,12 @@ interface Fixture {
     requests: RemoteAssetReplaceRequest[];
     replace_options: Array<RemoteAssetReplaceOptions | undefined>;
     bind_requests: RemoteSourceBinding[];
+    bind_options: Array<RemoteSourceBindOptions | undefined>;
   };
-  client: { download: ReturnType<typeof vi.fn> };
+  client: {
+    download: ReturnType<typeof vi.fn>;
+    read_workspace: ReturnType<typeof vi.fn>;
+  };
   lg_path: string;
 }
 
@@ -107,9 +112,21 @@ async function create_fixture(options: {
   epub?: Buffer;
   fail_bind?: boolean | "committed";
   name?: string;
-  on_download?: (context: { database: ProjectDatabase; lg_path: string }) => Promise<void>;
+  on_download?: (context: {
+    database: ProjectDatabase;
+    lg_path: string;
+    signal: AbortSignal | undefined;
+  }) => Promise<void>;
+  on_project_lock?: (context: {
+    database: ProjectDatabase;
+    lg_path: string;
+  }) => void | Promise<void>;
   translations?: ReadonlyMap<number, string>;
   target_language?: "ZH" | "EN";
+  binding_url?: string;
+  download_title?: string;
+  read_workspace?: (ref: RemoteNovelRef) => Promise<RemoteWorkspace>;
+  refresh_credentials?: (origin: string) => Promise<boolean>;
 }): Promise<Fixture> {
   const database = new ProjectDatabase("1.0.0");
   const lg_path = path.join(temp_dir, `${options.name ?? "demo"}.lg`);
@@ -120,15 +137,20 @@ async function create_fixture(options: {
     get_user_data_path: (...parts: string[]) => path.join(temp_dir, "userdata", ...parts),
   };
   const snapshots = new RemoteSnapshotStore({ paths });
-  const writer: Fixture["writer"] = { requests: [], replace_options: [], bind_requests: [] };
+  const writer: Fixture["writer"] = {
+    requests: [],
+    replace_options: [],
+    bind_requests: [],
+    bind_options: [],
+  };
   const asset_path = options.asset_path ?? ASSET_PATH;
   const client = {
-    download: vi.fn(async (): Promise<RemoteNovelDownload> => {
-      await options.on_download?.({ database, lg_path });
+    download: vi.fn(async (_ref: unknown, signal?: AbortSignal): Promise<RemoteNovelDownload> => {
+      await options.on_download?.({ database, lg_path, signal });
       return {
         metadata: {
-          title: "テスト小説",
-          title_jp: "テスト小説",
+          title: options.download_title ?? "テスト小説",
+          title_jp: options.download_title ?? "テスト小説",
           title_zh: null,
           introduction_jp: "",
           introduction_zh: null,
@@ -143,10 +165,17 @@ async function create_fixture(options: {
         chapter_count: 2,
       };
     }),
+    read_workspace: vi.fn(
+      async (ref: RemoteNovelRef): Promise<RemoteWorkspace> =>
+        options.read_workspace?.(ref) ?? create_workspace(2),
+    ),
     read_metadata: vi.fn(),
   };
   const lock = {
-    run: async <T>(_project_path: string, action: () => Promise<T>): Promise<T> => await action(),
+    run: async <T>(_project_path: string, action: () => Promise<T>): Promise<T> => {
+      await options.on_project_lock?.({ database, lg_path });
+      return await action();
+    },
   };
   const service = new NovelSourceService({
     paths,
@@ -160,8 +189,9 @@ async function create_fixture(options: {
         writer.replace_options.push(options);
         return { accepted: true as const, changes: [] };
       },
-      bind_remote_source: async (request) => {
+      bind_remote_source: async (request, bind_options) => {
         writer.bind_requests.push(request.binding);
+        writer.bind_options.push(bind_options);
         if (options.fail_bind === true) {
           throw new Error("bind failed");
         }
@@ -179,6 +209,9 @@ async function create_fixture(options: {
       },
     } satisfies RemoteAssetWriter,
     project_lock: lock as unknown as ProjectFileLock,
+    ...(options.refresh_credentials === undefined
+      ? {}
+      : { refresh_credentials: options.refresh_credentials }),
   });
   const file_type = options.asset_type ?? "TXT";
   const epub_bytes = options.epub ?? (file_type === "EPUB" ? await create_test_epub() : null);
@@ -224,7 +257,7 @@ async function create_fixture(options: {
       database_writer.set_meta(lg_path, "target_language", options.target_language);
     }
     if (options.bound !== false) {
-      const binding = create_binding(options.text, asset_path);
+      const binding = create_binding(options.text, asset_path, options.binding_url);
       database_writer.set_meta(lg_path, REMOTE_SOURCE_META_KEY, binding as unknown as JsonValue);
     }
   });
@@ -316,9 +349,30 @@ async function create_wenku_service(options: {
   return { service, database, lg_path, snapshots };
 }
 
-function create_binding(text: string, assetPath = ASSET_PATH): RemoteSourceBinding {
+function create_workspace(chapter_count: number): RemoteWorkspace {
+  return {
+    title_jp: "テスト小説",
+    title_zh: null,
+    introduction_jp: "",
+    introduction_zh: null,
+    glossary_id: "no glossary",
+    glossary: {},
+    chapters: Array.from({ length: chapter_count }, (_value, index) => ({
+      chapter_id: `c${index + 1}`,
+      volume_id: null,
+      title: `第${index + 1}章`,
+      translated: false,
+    })),
+  };
+}
+
+function create_binding(
+  text: string,
+  assetPath = ASSET_PATH,
+  url = NOVEL_URL,
+): RemoteSourceBinding {
   return build_remote_source_binding({
-    ref: parse_novel_url(NOVEL_URL),
+    ref: parse_novel_url(url),
     title: "テスト小説",
     asset_path: assetPath,
     remote_hash: sha256_text(text),
@@ -352,7 +406,12 @@ async function create_wenku_epub_fixture(options: {
     get_user_data_path: (...parts: string[]) => path.join(temp_dir, "userdata", ...parts),
   };
   const snapshots = new RemoteSnapshotStore({ paths });
-  const writer: Fixture["writer"] = { requests: [], replace_options: [], bind_requests: [] };
+  const writer: Fixture["writer"] = {
+    requests: [],
+    replace_options: [],
+    bind_requests: [],
+    bind_options: [],
+  };
   const ref = parse_novel_url(WENKU_URL);
   const metadata = {
     title: "テスト小説",
@@ -793,6 +852,369 @@ describe("NovelSourceService", () => {
         (await fixture.database.get_all_meta(fixture.lg_path))[REMOTE_SOURCE_META_KEY],
       ).toBeUndefined();
       expect(fixture.writer.bind_requests).toHaveLength(0);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源保留资产与条目，更新绑定并清理旧快照", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: `${CURRENT_TEXT}\n新作品行`,
+      download_title: "新作品",
+    });
+    try {
+      const before = await fixture.service.read_bound_source();
+      const binding = before.binding!;
+      const before_items = await fixture.database.get_all_items(fixture.lg_path);
+      fixture.snapshots.write(
+        fixture.lg_path,
+        {
+          origin: binding.origin,
+          kind: binding.kind,
+          provider_id: binding.provider_id,
+          novel_id: binding.novel_id,
+        },
+        CURRENT_TEXT,
+      );
+      const result = await fixture.service.rebind_existing(rebind_url, undefined, {
+        under_agent: true,
+      });
+      expect(result).toEqual({
+        changed: true,
+        previous: { url: NOVEL_URL, title: "テスト小説", kind: "web" },
+        current: { url: rebind_url, title: "新作品", kind: "web", chapter_count: 2 },
+        asset_path: ASSET_PATH,
+        text_matches: false,
+      });
+      expect(fixture.writer.bind_options).toEqual([{ under_agent: true }]);
+      expect(
+        (await fixture.database.get_all_meta(fixture.lg_path))[REMOTE_SOURCE_META_KEY],
+      ).toMatchObject({
+        url: rebind_url,
+        title: "新作品",
+        asset_path: ASSET_PATH,
+        chapter_count: 2,
+      });
+      expect(fixture.snapshots.read(fixture.lg_path)).toBeNull();
+      expect(await fixture.database.get_all_items(fixture.lg_path)).toEqual(before_items);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源文本一致时回执 text_matches，同 URL 不触网", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const fixture = await create_fixture({ text: CURRENT_TEXT, remote_text: CURRENT_TEXT });
+    try {
+      await expect(fixture.service.rebind_existing(rebind_url)).resolves.toMatchObject({
+        changed: true,
+        text_matches: true,
+      });
+      const workspace_calls = fixture.client.read_workspace.mock.calls.length;
+      const download_calls = fixture.client.download.mock.calls.length;
+      await expect(fixture.service.rebind_existing(rebind_url)).resolves.toMatchObject({
+        changed: false,
+        text_matches: null,
+        current: { url: rebind_url, chapter_count: 2 },
+      });
+      expect(fixture.client.read_workspace).toHaveBeenCalledTimes(workspace_calls);
+      expect(fixture.client.download).toHaveBeenCalledTimes(download_calls);
+      expect(fixture.writer.bind_requests).toHaveLength(1);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源只比较章节数量，标题差异只进入回执", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      download_title: "新作品",
+      read_workspace: async (ref) => {
+        const workspace = create_workspace(2);
+        const old = ref.novel_id === "12345";
+        return {
+          ...workspace,
+          title_jp: old ? "旧作品" : "新作品",
+          chapters: workspace.chapters.map((chapter, index) => ({
+            ...chapter,
+            title: old ? `旧标题${index + 1}` : `完全不同的新标题${index + 1}`,
+          })),
+        };
+      },
+    });
+    try {
+      await expect(fixture.service.rebind_existing(rebind_url)).resolves.toMatchObject({
+        changed: true,
+        previous: { title: "テスト小説" },
+        current: { title: "新作品", chapter_count: 2 },
+      });
+      expect(fixture.writer.bind_requests).toHaveLength(1);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源要求章节数量一致，不一致时不写绑定", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      read_workspace: async (ref) => create_workspace(ref.novel_id === "12345" ? 2 : 1),
+    });
+    try {
+      await expect(fixture.service.rebind_existing(rebind_url)).rejects.toMatchObject({
+        code: "remote.chapter_structure_mismatch",
+        public_details: { expected: 2, actual: 1 },
+      });
+      expect(fixture.writer.bind_requests).toHaveLength(0);
+      expect(fixture.client.download).not.toHaveBeenCalled();
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源下载期间绑定变化时拒绝写入", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      on_download: async ({ database, lg_path }) => {
+        await database.transaction(lg_path, (writer) => {
+          writer.set_meta(lg_path, REMOTE_SOURCE_META_KEY, {
+            ...create_binding(CURRENT_TEXT),
+            novel_id: "changed",
+            url: "https://n.novelia.cc/novel/kakuyomu/changed",
+          } as unknown as JsonValue);
+        });
+      },
+    });
+    try {
+      await expect(fixture.service.rebind_existing(rebind_url)).rejects.toMatchObject({
+        code: "remote.binding_changed",
+      });
+      expect(fixture.writer.bind_requests).toHaveLength(0);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源下载中取消时不写绑定并保留旧绑定", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const controller = new AbortController();
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      on_download: async ({ signal }) => {
+        expect(signal).toBe(controller.signal);
+        controller.abort(new Error("下载中取消"));
+      },
+    });
+    try {
+      await expect(fixture.service.rebind_existing(rebind_url, controller.signal)).rejects.toThrow(
+        "下载中取消",
+      );
+      expect(fixture.writer.bind_requests).toHaveLength(0);
+      expect(
+        (await fixture.database.get_all_meta(fixture.lg_path))[REMOTE_SOURCE_META_KEY],
+      ).toMatchObject({ url: NOVEL_URL, novel_id: "12345" });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源项目锁内资产消失时拒绝写入", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      on_project_lock: async ({ database, lg_path }) => {
+        await database.transaction(lg_path, (writer) => writer.delete_asset(lg_path, ASSET_PATH));
+      },
+    });
+    try {
+      await expect(fixture.service.rebind_existing(rebind_url)).rejects.toMatchObject({
+        code: "remote.source_not_bound",
+        public_details: { reason: "asset_changed" },
+      });
+      expect(fixture.writer.bind_requests).toHaveLength(0);
+      expect(
+        (await fixture.database.get_all_meta(fixture.lg_path))[REMOTE_SOURCE_META_KEY],
+      ).toMatchObject({ url: NOVEL_URL });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源绑定写入失败时保留旧绑定与快照", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      fail_bind: true,
+    });
+    try {
+      const binding = (await fixture.service.read_bound_source()).binding!;
+      fixture.snapshots.write(
+        fixture.lg_path,
+        {
+          origin: binding.origin,
+          kind: binding.kind,
+          provider_id: binding.provider_id,
+          novel_id: binding.novel_id,
+        },
+        CURRENT_TEXT,
+      );
+      await expect(fixture.service.rebind_existing(rebind_url)).rejects.toThrow("bind failed");
+      expect(fixture.writer.bind_requests).toHaveLength(1);
+      expect(
+        (await fixture.database.get_all_meta(fixture.lg_path))[REMOTE_SOURCE_META_KEY],
+      ).toMatchObject({ url: NOVEL_URL });
+      expect(fixture.snapshots.read(fixture.lg_path)?.text).toBe(CURRENT_TEXT);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源拒绝未绑定、文库、EPUB 和非网页目标", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const unbound = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      bound: false,
+      name: "rebind-unbound",
+    });
+    try {
+      await expect(unbound.service.rebind_existing(rebind_url)).rejects.toMatchObject({
+        code: "remote.source_not_bound",
+      });
+    } finally {
+      await unbound.database.close();
+    }
+
+    const wenku = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      binding_url: WENKU_URL,
+      name: "rebind-wenku",
+    });
+    try {
+      await expect(wenku.service.rebind_existing(rebind_url)).rejects.toMatchObject({
+        code: "remote.rebind_unsupported",
+        public_details: { reason: "wenku_single_channel" },
+      });
+    } finally {
+      await wenku.database.close();
+    }
+
+    const epub = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      asset_type: "EPUB",
+      asset_path: EPUB_ASSET_PATH,
+      name: "rebind-epub",
+    });
+    try {
+      await expect(epub.service.rebind_existing(rebind_url)).rejects.toMatchObject({
+        code: "remote.rebind_unsupported",
+        public_details: { reason: "epub_requires_import" },
+      });
+    } finally {
+      await epub.database.close();
+    }
+
+    const pdf = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      asset_type: "PDF",
+      name: "rebind-pdf",
+    });
+    try {
+      await expect(pdf.service.rebind_existing(rebind_url)).rejects.toMatchObject({
+        code: "remote.rebind_unsupported",
+        public_details: { reason: "asset_not_supported" },
+      });
+    } finally {
+      await pdf.database.close();
+    }
+
+    const missing_asset = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      asset_type: "NONE",
+      name: "rebind-missing-asset",
+    });
+    try {
+      await expect(missing_asset.service.rebind_existing(rebind_url)).rejects.toMatchObject({
+        code: "remote.source_not_bound",
+        public_details: { reason: "asset_missing" },
+      });
+    } finally {
+      await missing_asset.database.close();
+    }
+
+    const web = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      name: "rebind-target",
+    });
+    try {
+      await expect(web.service.rebind_existing(WENKU_URL)).rejects.toMatchObject({
+        code: "remote.rebind_unsupported",
+        public_details: { reason: "target_not_web" },
+      });
+    } finally {
+      await web.database.close();
+    }
+  });
+
+  it("换源读取目录和下载都支持凭据续期", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    let workspace_attempts = 0;
+    const refresh_credentials = vi.fn(async () => true);
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      refresh_credentials,
+      read_workspace: async () => {
+        workspace_attempts += 1;
+        if (workspace_attempts === 1) throw new AppError("remote.auth_rejected");
+        return create_workspace(2);
+      },
+    });
+    try {
+      await expect(fixture.service.rebind_existing(rebind_url)).resolves.toMatchObject({
+        changed: true,
+      });
+      expect(refresh_credentials).toHaveBeenCalledWith("https://n.novelia.cc");
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("换源下载支持凭据续期", async () => {
+    const rebind_url = "https://n.novelia.cc/novel/kakuyomu/67890";
+    const refresh_credentials = vi.fn(async () => true);
+    let download_attempts = 0;
+    const fixture = await create_fixture({
+      text: CURRENT_TEXT,
+      remote_text: CURRENT_TEXT,
+      refresh_credentials,
+      on_download: async () => {
+        download_attempts += 1;
+        if (download_attempts === 1) throw new AppError("remote.auth_rejected");
+      },
+    });
+    try {
+      await expect(fixture.service.rebind_existing(rebind_url)).resolves.toMatchObject({
+        changed: true,
+      });
+      expect(refresh_credentials).toHaveBeenCalledTimes(1);
+      expect(refresh_credentials).toHaveBeenCalledWith("https://n.novelia.cc");
+      expect(download_attempts).toBe(2);
     } finally {
       await fixture.database.close();
     }

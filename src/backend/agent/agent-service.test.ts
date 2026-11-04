@@ -47,6 +47,9 @@ import type { AgentNovelChaptersPort } from "./tools/novel-chapters";
 import type { AgentNovelChapterImportPort } from "./tools/novel-chapter-import";
 import type { AgentNovelChapterReadPort } from "./tools/novel-chapter-read";
 import type { AgentNovelChapterSyncPort } from "./tools/novel-chapter-sync";
+import type { AgentNovelSourceRebindPort } from "./tools/novel-source-rebind";
+import type { AgentNovelChapterUploadPort } from "./tools/novel-chapter-upload";
+import type { AgentNovelChapterLineUploadPort } from "./tools/novel-chapter-line-upload";
 import type { AgentNovelSyncPreviewPort } from "./tools/novel-sync-preview";
 import type { AgentNovelSyncApplyPort } from "./tools/novel-sync-apply";
 import * as workspace_tools from "./tools/workspace-run";
@@ -170,6 +173,7 @@ const fake_agent_state = vi.hoisted(() => ({
     | "invalid_tool"
     | "tool_compaction"
     | "novel_sync"
+    | "novel_upload"
     | "overflow"
     | "length"
     | "length_pending"
@@ -404,6 +408,42 @@ function create_fake_response(context: TranscriptContext): FauxResponseStep {
       );
     }
     return fauxAssistantMessage("同步完成");
+  }
+  if (fake_agent_state.mode === "novel_upload") {
+    const tool_results = context.messages.filter((message) => message.role === "toolResult").length;
+    if (tool_results === 0) {
+      return fauxAssistantMessage(
+        fauxToolCall(
+          "novel_source_rebind",
+          { url: "https://n.novelia.cc/novel/kakuyomu/67890" },
+          {
+            id: "source-rebind",
+          },
+        ),
+        { stopReason: "toolUse" },
+      );
+    }
+    if (tool_results === 1) {
+      return fauxAssistantMessage(
+        fauxToolCall(
+          "novel_chapter_upload",
+          { chapter_id: "c2", text: "第一段译文\n第二段译文" },
+          { id: "chapter-upload" },
+        ),
+        { stopReason: "toolUse" },
+      );
+    }
+    if (tool_results === 2) {
+      return fauxAssistantMessage(
+        fauxToolCall(
+          "novel_chapter_line_upload",
+          { chapter_id: "c2", line: 1, text: "补传译文" },
+          { id: "chapter-line-upload" },
+        ),
+        { stopReason: "toolUse" },
+      );
+    }
+    return fauxAssistantMessage("上传完成");
   }
   if (fake_agent_state.batch_mode) {
     const retry = after_tool_call && fake_agent_state.batch_retries-- > 0;
@@ -2697,6 +2737,9 @@ describe("AgentService", () => {
     expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapters");
     expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_chapter_import");
     expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_chapter_read");
+    expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_source_rebind");
+    expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_chapter_upload");
+    expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_chapter_line_upload");
     expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_sync_preview");
     expect(fake_agent_state.tool_names.at(-1)).not.toContain("novel_sync_apply");
 
@@ -2806,6 +2849,35 @@ describe("AgentService", () => {
 
     expect(fake_agent_state.tool_names.at(-1)).toContain("novel_sync_preview");
     expect(fake_agent_state.tool_names.at(-1)).toContain("novel_sync_apply");
+
+    const novel_source_rebind = vi.fn<AgentNovelSourceRebindPort>();
+    const novel_chapter_upload = vi.fn<AgentNovelChapterUploadPort>();
+    const novel_chapter_line_upload = vi.fn<AgentNovelChapterLineUploadPort>();
+    const with_uploads = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      novel_chapters,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      novel_source_rebind,
+      novel_chapter_upload,
+      novel_chapter_line_upload,
+    );
+    await with_uploads.service.send_message({ text: "上传章节", attachments: [] });
+    await wait_for_idle(with_uploads.service);
+
+    expect(fake_agent_state.tool_names.at(-1)).toContain("novel_source_rebind");
+    expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapter_upload");
+    expect(fake_agent_state.tool_names.at(-1)).toContain("novel_chapter_line_upload");
   });
 
   it("整本同步工具在 Agent 回合内调用预览与提交端口", async () => {
@@ -2846,6 +2918,99 @@ describe("AgentService", () => {
       accepted: true,
       updated_sections: ["files", "items"],
     });
+  });
+
+  it("换源与逐章上传工具在 Agent 租约内调用端口并返回回执", async () => {
+    fake_agent_state.mode = "novel_upload";
+    let run_agent_write: (() => Promise<boolean>) | null = null;
+    const rebind_source = vi.fn<AgentNovelSourceRebindPort>(async (request) => {
+      // 模拟真实换源写路径：普通工程写会在 Agent 回合内返回 runtime.busy。
+      expect(run_agent_write).not.toBeNull();
+      await expect(run_agent_write!()).resolves.toBe(true);
+      return {
+        changed: true,
+        previous: {
+          url: "https://n.novelia.cc/novel/kakuyomu/12345",
+          title: "旧作品",
+          kind: "web",
+        },
+        current: {
+          url: request.url,
+          title: "新作品",
+          kind: "web",
+          chapter_count: 2,
+        },
+        asset_path: "测试小说.txt",
+        text_matches: false,
+      };
+    });
+    const upload_chapter = vi.fn<AgentNovelChapterUploadPort>(async () => ({
+      uploaded: true,
+      chapter_id: "c2",
+      volume_id: null,
+      title: "第二章",
+      paragraphs: 2,
+    }));
+    const upload_line = vi.fn<AgentNovelChapterLineUploadPort>(async () => ({
+      uploaded: true,
+      chapter_id: "c2",
+      volume_id: null,
+      title: "第二章",
+      paragraphs: 2,
+      line: 1,
+    }));
+    const upload_service = await create_service(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      rebind_source,
+      upload_chapter,
+      upload_line,
+    );
+    run_agent_write = () => upload_service.runtime_gate.run_agent_project_write(async () => true);
+
+    await upload_service.service.send_message({ text: "换源并上传", attachments: [] });
+    await wait_for_idle(upload_service.service);
+
+    expect(rebind_source).toHaveBeenCalledWith(
+      { url: "https://n.novelia.cc/novel/kakuyomu/67890" },
+      expect.any(AbortSignal),
+    );
+    expect(upload_chapter).toHaveBeenCalledWith(
+      { chapter_id: "c2", volume_id: null, text: "第一段译文\n第二段译文" },
+      expect.any(AbortSignal),
+    );
+    expect(upload_line).toHaveBeenCalledWith(
+      { chapter_id: "c2", volume_id: null, line: 1, text: "补传译文" },
+      expect.any(AbortSignal),
+    );
+    expect(read_tool_output(upload_service.service, "source-rebind")).toMatchObject({
+      changed: true,
+      current: { chapter_count: 2, title: "新作品" },
+      text_matches: false,
+    });
+    expect(read_tool_output(upload_service.service, "chapter-upload")).toMatchObject({
+      uploaded: true,
+      chapter_id: "c2",
+      paragraphs: 2,
+    });
+    expect(read_tool_output(upload_service.service, "chapter-line-upload")).toMatchObject({
+      uploaded: true,
+      line: 1,
+      paragraphs: 2,
+    });
+    await upload_service.service.dispose();
   });
 
   it("预览读取在请求前后校验会话，重置期间的旧响应失效", async () => {
@@ -5185,6 +5350,9 @@ describe("AgentService", () => {
     term_lookup_enabled = true,
     novel_sync_preview?: AgentNovelSyncPreviewPort,
     novel_sync_apply?: AgentNovelSyncApplyPort,
+    novel_source_rebind?: AgentNovelSourceRebindPort,
+    novel_chapter_upload?: AgentNovelChapterUploadPort,
+    novel_chapter_line_upload?: AgentNovelChapterLineUploadPort,
   ): Promise<{
     workspace: AgentWorkspacePort;
     service: AgentService;
@@ -5368,6 +5536,9 @@ describe("AgentService", () => {
       novelChapterSync: novel_chapter_sync,
       novelSyncPreview: novel_sync_preview,
       novelSyncApply: novel_sync_apply,
+      novelSourceRebind: novel_source_rebind,
+      novelChapterUpload: novel_chapter_upload,
+      novelChapterLineUpload: novel_chapter_line_upload,
       workspace: effective_workspace,
       logManager: { append: log_append },
       publish,

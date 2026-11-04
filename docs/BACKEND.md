@@ -302,6 +302,10 @@ SDK 内置聊天模型提供离线基线，远端聊天目录作为可撤回的�
 
 拒绝原因通过 `remote.source_not_bindable` 的 `reason` 返回：`no_assets`、`multiple_assets`、`asset_not_supported`、`epub_requires_import`、`asset_missing`、`asset_changed`；文本不一致使用 `remote.source_mismatch`。
 
+已绑定的网页小说可以由 Agent 通过 `novel_source_rebind` 换到同一站点的另一个作品页，不新增 API 路由。换源只更新绑定身份，保留原 `asset_path`、资产、条目和本地译文；未绑定工程不自动补绑定，文库作品没有多渠道，EPUB 资产必须按新地址重新导入，分别返回 `remote.source_not_bound` 或 `remote.rebind_unsupported`。新旧作品的章节数量必须一致，章节继续按站点目录顺序对应；数量不一致返回 `remote.chapter_structure_mismatch`，标题只进入回执；同 URL 直接返回 `changed: false` 且不触网。新作品全文与本地资产的 `remote_text_lines_match` 结果作为 `text_matches` 回执，只提示后续是否需要同步，不阻止换源。写入绑定前在工程锁内复查原绑定身份，成功后清除旧同步快照；目录读取与下载均经过凭据续期。
+
+Agent 的 `novel_chapter_upload` 与 `novel_chapter_line_upload` 以单章为单位提交站点译文，不保留跨章进度，也不自动补传下一章。整章上传要求提交文本按工程 TXT 口径切行后与站点 `paragraph_jp` 等长；不等长返回 `remote.chapter_paragraph_mismatch`，不提交。站点原文非空而行译文为空、纯空白或包含站点缺失标记时返回 `remote.chapter_paragraph_empty`；与站点旧译完全相同时返回 `unchanged: true`。按行补传只替换目标行，其他行必须使用站点旧译，旧译缺失、长度不一致或目标行之外的必填行没有旧译时返回 `remote.chapter_line_context_missing`。两个上传工具对网页小说首次读取使用 `sync: true`，文库使用 `sync: false`，写入前重新读取绑定与章节任务；等待期间绑定或原文变化分别返回 `remote.binding_changed` 与 `remote.chapter_changed`。站点写入与术语表变化重试由批量上传和 Agent 上传共用的辅助函数负责。
+
 对齐是存储替换的语义保护：
 
 - 未变化行保留原条目 id、译文、名称与状态；仅排版差异同样继承，已有旧译且相似度达到 `0.6` 的改写行保留旧译但标记复核，低于阈值重译。

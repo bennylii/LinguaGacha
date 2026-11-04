@@ -7,11 +7,12 @@ import type { RuntimeOperationGate, RuntimeLease } from "../runtime-operation-ga
 import type { ProjectSessionState } from "../project/project-session-state";
 import type { NoveliaClient, RemoteWorkspaceChapter } from "./novelia-client";
 import { call_with_credential_refresh } from "./credential-refresh";
+import { write_chapter_translation_with_retry } from "./chapter-translation-writer";
 import { read_epub_remote_source } from "./epub-remote-source";
 import {
-  is_missing_remote_translation,
   normalize_match_line,
   parse_novel_url,
+  same_as_old_translation,
   split_remote_document,
   type RemoteChapter,
 } from "./novelia-source";
@@ -376,7 +377,7 @@ export class RemoteWorkspaceSubmissionService {
     missing: number;
     message: string | null;
   }> {
-    let task = await call_with_credential_refresh(this.refresh_credentials, args.ref.origin, () =>
+    const task = await call_with_credential_refresh(this.refresh_credentials, args.ref.origin, () =>
       this.client.read_chapter_task(
         args.ref,
         args.chapter,
@@ -437,34 +438,15 @@ export class RemoteWorkspaceSubmissionService {
       };
     }
     args.on_uploading({ ready, missing });
-    try {
-      await call_with_credential_refresh(this.refresh_credentials, args.ref.origin, () =>
-        this.client.write_chapter_translation(
-          args.ref,
-          args.chapter,
-          { glossary_id: task.glossary_id, paragraphs_zh },
-          args.signal,
-        ),
-      );
-    } catch (error) {
-      if (args.signal.aborted) throw error;
-      // 术语表在取任务与上传之间变化时刷新一次；仍失败则记录本章失败。
-      const refreshed = await call_with_credential_refresh(
-        this.refresh_credentials,
-        args.ref.origin,
-        () => this.client.read_chapter_task(args.ref, args.chapter, { sync: false }, args.signal),
-      );
-      if (refreshed.glossary_id === task.glossary_id) throw error;
-      task = refreshed;
-      await call_with_credential_refresh(this.refresh_credentials, args.ref.origin, () =>
-        this.client.write_chapter_translation(
-          args.ref,
-          args.chapter,
-          { glossary_id: task.glossary_id, paragraphs_zh },
-          args.signal,
-        ),
-      );
-    }
+    await write_chapter_translation_with_retry({
+      client: this.client,
+      refresh_credentials: this.refresh_credentials,
+      ref: args.ref,
+      chapter: args.chapter,
+      glossary_id: task.glossary_id,
+      paragraphs_zh,
+      signal: args.signal,
+    });
     return {
       uploaded: true,
       ready,
@@ -658,22 +640,4 @@ function resolve_epub_paragraph_items(
   const items = documents.get(doc_path);
   if (items === undefined || items.length !== paragraphs.length) return null;
   return [...items];
-}
-
-/**
- * 上传内容是否与站点旧译逐段一致；空段不参与比较，长度不同视为有差异。
- * 旧译里的站点缺失标记不是真实译文，遇标记即视为不一致。
- */
-function same_as_old_translation(
-  paragraphs_zh: readonly string[],
-  old_paragraph_zh: readonly string[],
-): boolean {
-  if (paragraphs_zh.length !== old_paragraph_zh.length) return false;
-  return paragraphs_zh.every((paragraph, index) => {
-    const old_paragraph = old_paragraph_zh[index] ?? "";
-    if (old_paragraph.trim() === "") return false;
-    return (
-      !is_missing_remote_translation(old_paragraph) && old_paragraph.trim() === paragraph.trim()
-    );
-  });
 }

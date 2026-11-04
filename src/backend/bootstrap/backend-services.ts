@@ -267,15 +267,6 @@ export class BackendServices {
       { fetch: options.noveliaFetch ?? globalThis.fetch },
       (origin) => novelia_credentials.read_credential(origin),
     );
-    const remote_sources = new NovelSourceService({
-      paths,
-      database,
-      session_state,
-      client: novelia_client,
-      snapshots: remote_snapshots,
-      writer: project_content,
-      project_lock,
-    });
     const remote_auth = new RemoteAuthService({
       credentials: novelia_credentials,
       bridge: new NoveliaAuthBridge({
@@ -288,6 +279,16 @@ export class BackendServices {
     });
     const refresh_credentials = async (origin: string): Promise<boolean> =>
       await remote_auth.try_refresh(origin, { force: true });
+    const remote_sources = new NovelSourceService({
+      paths,
+      database,
+      session_state,
+      client: novelia_client,
+      snapshots: remote_snapshots,
+      writer: project_content,
+      project_lock,
+      refresh_credentials,
+    });
     this.remote = {
       auth: remote_auth,
       sources: remote_sources,

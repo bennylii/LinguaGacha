@@ -73,8 +73,10 @@ interface Fixture {
   service: RemoteChapterService;
   read_workspace: ReturnType<typeof vi.fn>;
   read_chapter_task: ReturnType<typeof vi.fn>;
+  write_chapter_translation: ReturnType<typeof vi.fn>;
   import_under_agent: ReturnType<typeof vi.fn>;
   refresh: ReturnType<typeof vi.fn>;
+  set_binding: (binding: RemoteSourceBinding) => void;
   staged_files: () => string[];
 }
 
@@ -85,10 +87,12 @@ function create_service(options: {
     ref: unknown,
     chapter: RemoteWorkspaceChapter,
     options: { sync: boolean },
+    signal?: AbortSignal,
   ) => RemoteChapterTask;
   refresh_result?: boolean;
   import_error?: Error;
 }): Fixture {
+  let binding = options.binding;
   const read_workspace = vi.fn(async () => ({
     title_jp: "作品",
     title_zh: null,
@@ -99,13 +103,18 @@ function create_service(options: {
     chapters: options.chapters,
   }));
   const read_chapter_task = vi.fn(options.tasks);
-  const client = { read_workspace, read_chapter_task } as unknown as NoveliaClient;
+  const write_chapter_translation = vi.fn(async () => undefined);
+  const client = {
+    read_workspace,
+    read_chapter_task,
+    write_chapter_translation,
+  } as unknown as NoveliaClient;
   const staging_root = fs.mkdtempSync(path.join(os.tmpdir(), "lg-chapter-staging-"));
   const staged: string[] = [];
   const sources = {
     read_bound_source: vi.fn(async () => ({
-      binding: options.binding,
-      asset_present: options.binding !== null,
+      binding,
+      asset_present: binding !== null,
       snapshot_present: false,
     })),
     stage_text: vi.fn(async (file_name: string, text: string) => {
@@ -139,8 +148,12 @@ function create_service(options: {
     service,
     read_workspace,
     read_chapter_task,
+    write_chapter_translation,
     import_under_agent,
     refresh,
+    set_binding: (next) => {
+      binding = next;
+    },
     staged_files: () => staged,
   };
 }
@@ -457,7 +470,10 @@ describe("RemoteChapterService", () => {
       ],
       tasks: () => task([]),
     });
-    const result = await fixture.service.read_chapter({ chapter_id: "001.txt", volume_id: "v1.txt" });
+    const result = await fixture.service.read_chapter({
+      chapter_id: "001.txt",
+      volume_id: "v1.txt",
+    });
     expect(result.total_paragraphs).toBe(0);
     expect(result.sync_available).toBeUndefined();
   });
@@ -539,6 +555,460 @@ describe("RemoteChapterService", () => {
     await expect(missing_fixture.service.sync_chapter({ chapter_id: "missing" })).rejects.toThrow(
       expect.objectContaining({ code: "remote.chapter_not_found" }),
     );
+  });
+
+  it("整章上传先同步网页任务，校验后提交整章数组", async () => {
+    let reads = 0;
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: (_ref, _chapter, options) => {
+        reads += 1;
+        expect(options).toEqual({ sync: reads === 1 });
+        return read_task({
+          paragraphs: ["第一段", "第二段"],
+          old_paragraph_zh: ["旧一", "旧二"],
+          glossary_id: reads === 1 ? "g1" : "g2",
+        });
+      },
+    });
+    const result = await fixture.service.upload_chapter({
+      chapter_id: "c2",
+      text: "新一\n新二",
+    });
+    expect(result).toEqual({
+      uploaded: true,
+      chapter_id: "c2",
+      volume_id: null,
+      title: "第二章",
+      paragraphs: 2,
+    });
+    expect(fixture.write_chapter_translation).toHaveBeenCalledTimes(1);
+    expect(fixture.write_chapter_translation.mock.calls[0]?.[2]).toEqual({
+      glossary_id: "g2",
+      paragraphs_zh: ["新一", "新二"],
+    });
+    expect(fixture.read_chapter_task).toHaveBeenCalledTimes(2);
+  });
+
+  it("整章上传拒绝行数不一致、空译文和重复旧译", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () =>
+        read_task({
+          paragraphs: ["第一段", "第二段"],
+          old_paragraph_zh: ["旧一", "旧二"],
+        }),
+    });
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "只有一行" }),
+    ).rejects.toMatchObject({
+      code: "remote.chapter_paragraph_mismatch",
+      public_details: { expected: 2, actual: 1 },
+    });
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "新一\n \t" }),
+    ).rejects.toMatchObject({
+      code: "remote.chapter_paragraph_empty",
+      public_details: { line: 2 },
+    });
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "旧一\n旧二" }),
+    ).resolves.toMatchObject({ uploaded: false, unchanged: true });
+    expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+  });
+
+  it("整章上传拒绝空章节 ID 与空章节", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task({ paragraphs: [] }),
+    });
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "  ", text: "" }),
+    ).rejects.toMatchObject({
+      code: "request.validation_failed",
+      public_details: { field: "chapter_id" },
+    });
+    expect(fixture.read_chapter_task).not.toHaveBeenCalled();
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "" }),
+    ).rejects.toMatchObject({
+      code: "remote.chapter_empty",
+      public_details: { chapter_id: "c2", title: "第二章" },
+    });
+    expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+  });
+
+  it("整章上传保留空原文行并忽略尾随换行", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task({ paragraphs: ["第一段", "", "第三段"] }),
+    });
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "新一\n\n新三\n" }),
+    ).resolves.toMatchObject({ uploaded: true, paragraphs: 3 });
+    expect(fixture.write_chapter_translation.mock.calls[0]?.[2]).toEqual({
+      glossary_id: "g2",
+      paragraphs_zh: ["新一", "", "新三"],
+    });
+  });
+
+  it("按行补传用站点旧译补齐其他行，只替换目标行", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () =>
+        read_task({
+          paragraphs: ["第一段", "第二段", "第三段"],
+          old_paragraph_zh: ["旧一", "旧二", "旧三"],
+        }),
+    });
+    const result = await fixture.service.upload_line({
+      chapter_id: "c2",
+      line: 2,
+      text: "新二",
+    });
+    expect(result).toMatchObject({ uploaded: true, line: 2, paragraphs: 3 });
+    expect(fixture.write_chapter_translation.mock.calls[0]?.[2]).toEqual({
+      glossary_id: "g2",
+      paragraphs_zh: ["旧一", "新二", "旧三"],
+    });
+    await expect(
+      fixture.service.upload_line({ chapter_id: "c2", line: 2, text: "旧二" }),
+    ).resolves.toMatchObject({ uploaded: false, unchanged: true });
+  });
+
+  it("按行补传拒绝缺失上下文、非法换行和非法行号", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () =>
+        read_task({
+          paragraphs: ["第一段", "第二段", "第三段"],
+          old_paragraph_zh: ["", "旧二", "旧三"],
+        }),
+    });
+    await expect(
+      fixture.service.upload_line({ chapter_id: "c2", line: 2, text: "新二" }),
+    ).rejects.toMatchObject({
+      code: "remote.chapter_line_context_missing",
+      public_details: { missing_lines: [1] },
+    });
+    for (const text of ["两行\n文本", "两行\r\n文本", "两行\u2028文本"]) {
+      await expect(
+        fixture.service.upload_line({ chapter_id: "c2", line: 2, text }),
+      ).rejects.toMatchObject({ code: "request.validation_failed" });
+    }
+    for (const line of [1.5, 9]) {
+      await expect(
+        fixture.service.upload_line({ chapter_id: "c2", line, text: "新二" }),
+      ).rejects.toMatchObject({ code: "request.validation_failed" });
+    }
+    expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+  });
+
+  it("按行补传区分旧译整体缺失、长度不一致和缺失标记", async () => {
+    const paragraphs = ["第一段", "第二段", "第三段"];
+    const missing = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task({ paragraphs, old_paragraph_zh: null }),
+    });
+    await expect(
+      missing.service.upload_line({ chapter_id: "c2", line: 2, text: "新二" }),
+    ).rejects.toMatchObject({
+      code: "remote.chapter_line_context_missing",
+      public_details: { reason: "old_translation_missing", missing_lines: [1, 3] },
+    });
+
+    const length_mismatch = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task({ paragraphs, old_paragraph_zh: ["旧一"] }),
+    });
+    await expect(
+      length_mismatch.service.upload_line({ chapter_id: "c2", line: 2, text: "新二" }),
+    ).rejects.toMatchObject({
+      code: "remote.chapter_line_context_missing",
+      public_details: {
+        reason: "old_translation_length_mismatch",
+        expected: 3,
+        actual: 1,
+      },
+    });
+
+    const missing_marker = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task({ paragraphs, old_paragraph_zh: ["旧一", "旧二", "gpt翻译缺失。"] }),
+    });
+    await expect(
+      missing_marker.service.upload_line({ chapter_id: "c2", line: 2, text: "新二" }),
+    ).rejects.toMatchObject({
+      code: "remote.chapter_line_context_missing",
+      public_details: { missing_lines: [3] },
+    });
+    expect(missing.write_chapter_translation).not.toHaveBeenCalled();
+    expect(length_mismatch.write_chapter_translation).not.toHaveBeenCalled();
+    expect(missing_marker.write_chapter_translation).not.toHaveBeenCalled();
+  });
+
+  it("按行补传允许目标旧译缺失并保留空原文行", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () =>
+        read_task({
+          paragraphs: ["第一段", "", "第三段"],
+          old_paragraph_zh: ["", "", "旧三"],
+        }),
+    });
+    await expect(
+      fixture.service.upload_line({ chapter_id: "c2", line: 1, text: "新一" }),
+    ).resolves.toMatchObject({ uploaded: true, line: 1, paragraphs: 3 });
+    expect(fixture.write_chapter_translation.mock.calls[0]?.[2]).toEqual({
+      glossary_id: "g2",
+      paragraphs_zh: ["新一", "", "旧三"],
+    });
+  });
+
+  it("按行补传拒绝目标空译文", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () =>
+        read_task({
+          paragraphs: ["第一段", "第二段", "第三段"],
+          old_paragraph_zh: ["旧一", "旧二", "旧三"],
+        }),
+    });
+    await expect(
+      fixture.service.upload_line({ chapter_id: "c2", line: 1, text: " \t" }),
+    ).rejects.toMatchObject({
+      code: "remote.chapter_paragraph_empty",
+      public_details: { line: 1 },
+    });
+    expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+  });
+
+  it("按行补传使用写入前最新旧译和术语表", async () => {
+    let reads = 0;
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => {
+        reads += 1;
+        return read_task({
+          paragraphs: ["第一段", "第二段", "第三段"],
+          old_paragraph_zh: reads === 1 ? ["旧一", "旧二", "旧三"] : ["新一", "旧二", "新三"],
+          glossary_id: reads === 1 ? "g1" : "g2",
+        });
+      },
+    });
+    await expect(
+      fixture.service.upload_line({ chapter_id: "c2", line: 2, text: "补二" }),
+    ).resolves.toMatchObject({ uploaded: true, line: 2, paragraphs: 3 });
+    expect(fixture.write_chapter_translation.mock.calls[0]?.[2]).toEqual({
+      glossary_id: "g2",
+      paragraphs_zh: ["新一", "补二", "新三"],
+    });
+  });
+
+  it("文库整章上传固定读取站点缓存", async () => {
+    const fixture = create_service({
+      binding: WENKU_BINDING,
+      chapters: [
+        { chapter_id: "001.txt", volume_id: "v1.txt", title: "第一卷 001.txt", translated: false },
+      ],
+      tasks: () => read_task({ paragraphs: ["段落"], old_paragraph_zh: null }),
+    });
+    await expect(
+      fixture.service.upload_chapter({
+        chapter_id: "001.txt",
+        volume_id: " v1.txt ",
+        text: "译文",
+      }),
+    ).resolves.toMatchObject({
+      uploaded: true,
+      chapter_id: "001.txt",
+      volume_id: "v1.txt",
+      paragraphs: 1,
+    });
+    expect(fixture.read_chapter_task.mock.calls.map((call) => call[2])).toEqual([
+      { sync: false },
+      { sync: false },
+    ]);
+    expect(fixture.write_chapter_translation).toHaveBeenCalledTimes(1);
+  });
+
+  it("上传前已取消时不读取站点", async () => {
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => read_task(),
+    });
+    const controller = new AbortController();
+    controller.abort(new Error("提前取消"));
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "新一\n新二" }, controller.signal),
+    ).rejects.toThrow("提前取消");
+    await expect(
+      fixture.service.upload_line({ chapter_id: "c2", line: 1, text: "新一" }, controller.signal),
+    ).rejects.toThrow("提前取消");
+    expect(fixture.read_workspace).not.toHaveBeenCalled();
+    expect(fixture.read_chapter_task).not.toHaveBeenCalled();
+  });
+
+  it("整章上传读取期间取消时不提交站点译文", async () => {
+    const controller = new AbortController();
+    let reads = 0;
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: (_ref, _chapter, _options, signal) => {
+        reads += 1;
+        if (reads === 2) {
+          expect(signal).toBe(controller.signal);
+          controller.abort(new Error("读取中取消"));
+        }
+        return read_task({
+          paragraphs: ["第一段", "第二段"],
+          old_paragraph_zh: ["旧一", "旧二"],
+        });
+      },
+    });
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "新一\n新二" }, controller.signal),
+    ).rejects.toThrow("读取中取消");
+    expect(reads).toBe(2);
+    expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+  });
+
+  it("按行上传读取期间取消时不提交站点译文", async () => {
+    const controller = new AbortController();
+    let reads = 0;
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: (_ref, _chapter, _options, signal) => {
+        reads += 1;
+        if (reads === 2) {
+          expect(signal).toBe(controller.signal);
+          controller.abort(new Error("读取中取消"));
+        }
+        return read_task({
+          paragraphs: ["第一段", "第二段"],
+          old_paragraph_zh: ["旧一", "旧二"],
+        });
+      },
+    });
+    await expect(
+      fixture.service.upload_line({ chapter_id: "c2", line: 1, text: "新一" }, controller.signal),
+    ).rejects.toThrow("读取中取消");
+    expect(reads).toBe(2);
+    expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+  });
+
+  it("整章上传写入期间取消时保留取消原因且不重试", async () => {
+    const controller = new AbortController();
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () =>
+        read_task({ paragraphs: ["第一段", "第二段"], old_paragraph_zh: ["旧一", "旧二"] }),
+    });
+    fixture.write_chapter_translation.mockImplementation(
+      async (_ref: unknown, _chapter: unknown, _payload: unknown, signal?: AbortSignal) => {
+        expect(signal).toBe(controller.signal);
+        controller.abort(new Error("写入中取消"));
+        signal?.throwIfAborted();
+      },
+    );
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "新一\n新二" }, controller.signal),
+    ).rejects.toThrow("写入中取消");
+    expect(fixture.write_chapter_translation).toHaveBeenCalledTimes(1);
+    expect(fixture.read_chapter_task).toHaveBeenCalledTimes(2);
+  });
+
+  it("按行上传写入期间取消时保留取消原因且不重试", async () => {
+    const controller = new AbortController();
+    const fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () =>
+        read_task({ paragraphs: ["第一段", "第二段"], old_paragraph_zh: ["旧一", "旧二"] }),
+    });
+    fixture.write_chapter_translation.mockImplementation(
+      async (_ref: unknown, _chapter: unknown, _payload: unknown, signal?: AbortSignal) => {
+        expect(signal).toBe(controller.signal);
+        controller.abort(new Error("写入中取消"));
+        signal?.throwIfAborted();
+      },
+    );
+    await expect(
+      fixture.service.upload_line({ chapter_id: "c2", line: 1, text: "新一" }, controller.signal),
+    ).rejects.toThrow("写入中取消");
+    expect(fixture.write_chapter_translation).toHaveBeenCalledTimes(1);
+    expect(fixture.read_chapter_task).toHaveBeenCalledTimes(2);
+  });
+
+  it("上传写入前复查绑定与章节原文，等待期间变化时拒绝", async () => {
+    let fixture!: Fixture;
+    fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => {
+        fixture.set_binding({
+          ...WEB_BINDING,
+          novel_id: "changed",
+          url: "https://n.novelia.cc/novel/kakuyomu/changed",
+        });
+        return read_task({ paragraphs: ["第一段", "第二段"], old_paragraph_zh: ["旧一", "旧二"] });
+      },
+    });
+    await expect(
+      fixture.service.upload_chapter({ chapter_id: "c2", text: "新一\n新二" }),
+    ).rejects.toMatchObject({ code: "remote.binding_changed" });
+    expect(fixture.write_chapter_translation).not.toHaveBeenCalled();
+
+    let line_fixture!: Fixture;
+    line_fixture = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => {
+        line_fixture.set_binding({
+          ...WEB_BINDING,
+          novel_id: "changed",
+          url: "https://n.novelia.cc/novel/kakuyomu/changed",
+        });
+        return read_task({ paragraphs: ["第一段", "第二段"], old_paragraph_zh: ["旧一", "旧二"] });
+      },
+    });
+    await expect(
+      line_fixture.service.upload_line({ chapter_id: "c2", line: 1, text: "新一" }),
+    ).rejects.toMatchObject({ code: "remote.binding_changed" });
+    expect(line_fixture.write_chapter_translation).not.toHaveBeenCalled();
+
+    let reads = 0;
+    const changed_chapter = create_service({
+      binding: WEB_BINDING,
+      chapters: web_chapters(),
+      tasks: () => {
+        reads += 1;
+        return read_task({
+          paragraphs: reads === 1 ? ["第一段", "第二段"] : ["第一段", "站点新原文"],
+          old_paragraph_zh: ["旧一", "旧二"],
+        });
+      },
+    });
+    await expect(
+      changed_chapter.service.upload_chapter({ chapter_id: "c2", text: "新一\n新二" }),
+    ).rejects.toMatchObject({ code: "remote.chapter_changed" });
+    expect(changed_chapter.write_chapter_translation).not.toHaveBeenCalled();
   });
 
   it("凭据续期同样适用于纯读取", async () => {

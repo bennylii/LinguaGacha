@@ -443,6 +443,27 @@ export function is_missing_remote_translation(text: string): boolean {
   return REMOTE_MISSING_TRANSLATION_MARKERS.some((marker) => text.includes(marker));
 }
 
+/** 空行、纯空白和站点缺失标记都不构成可沿用的译文。 */
+export function is_empty_translation_line(text: string): boolean {
+  return text.trim() === "" || is_missing_remote_translation(text);
+}
+
+/**
+ * 上传内容是否与站点旧译逐段一致；空段不参与比较，长度不同视为有差异。
+ * 旧译里的站点缺失标记不是真实译文，遇标记即视为不一致。
+ */
+export function same_as_old_translation(
+  paragraphs_zh: readonly string[],
+  old_paragraph_zh: readonly string[],
+): boolean {
+  if (paragraphs_zh.length !== old_paragraph_zh.length) return false;
+  return paragraphs_zh.every((paragraph, index) => {
+    const old_paragraph = old_paragraph_zh[index] ?? "";
+    if (is_empty_translation_line(old_paragraph)) return false;
+    return old_paragraph.trim() === paragraph.trim();
+  });
+}
+
 /** 对齐只消除排版差异，不改写新原文本身。 */
 export function normalize_match_line(text: string): string {
   return text.normalize("NFKC").replace(/\s+/gu, " ").trim();

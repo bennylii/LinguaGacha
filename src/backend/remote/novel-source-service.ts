@@ -19,10 +19,12 @@ import type {
   RemoteAssetReplaceOptions,
   RemoteAssetReplaceRequest,
   RemoteAssetRowOverride,
+  RemoteSourceBindOptions,
   RemoteSourceBindRequest,
 } from "../project/project-content-service";
 import type { ProjectFileLock } from "../project/project-file-lock";
 import type { ProjectSessionState } from "../project/project-session-state";
+import { call_with_credential_refresh } from "./credential-refresh";
 import { NoveliaClient, type RemoteNovelMetadata } from "./novelia-client";
 import { build_epub_remote_source, read_epub_remote_source } from "./epub-remote-source";
 import {
@@ -31,6 +33,7 @@ import {
   build_novel_filename,
   normalize_remote_source_text,
   parse_novel_ref,
+  remote_text_lines_match,
   sha256_text,
   split_remote_document,
   type RemoteAlignmentPlan,
@@ -47,6 +50,7 @@ import {
   read_remote_source_binding,
   REMOTE_EPUB_MAP_META_KEY,
   REMOTE_SOURCE_META_KEY,
+  same_remote_source_identity,
   type RemoteEpubMap,
   type RemoteSourceBinding,
 } from "./remote-source";
@@ -76,7 +80,10 @@ export interface RemoteAssetWriter {
     request: RemoteAssetReplaceRequest,
     options?: RemoteAssetReplaceOptions,
   ): Promise<ProjectWriteResult>;
-  bind_remote_source(request: RemoteSourceBindRequest): Promise<ProjectWriteResult>;
+  bind_remote_source(
+    request: RemoteSourceBindRequest,
+    options?: RemoteSourceBindOptions,
+  ): Promise<ProjectWriteResult>;
 }
 
 /** 一次已下载但尚未提交的导入；提交快照与清理暂存由调用方决定。 */
@@ -127,6 +134,25 @@ export interface RemoteSourceSnapshot {
   binding: RemoteSourceBinding | null;
   asset_present: boolean;
   snapshot_present: boolean;
+}
+
+/** 换源只更新作品身份，资产路径和本地译文保持不变。 */
+export interface RemoteSourceRebindResult {
+  changed: boolean;
+  previous: {
+    url: string;
+    title: string;
+    kind: RemoteSourceBinding["kind"];
+  };
+  current: {
+    url: string;
+    title: string;
+    kind: RemoteSourceBinding["kind"];
+    chapter_count: number;
+  };
+  asset_path: string;
+  /** 本地资产与下载文本是否一致；仅作为审批信息，不参与拒绝。 */
+  text_matches: boolean | null;
 }
 
 export type RemoteSyncBaseSource = "snapshot" | "current_asset";
@@ -204,6 +230,8 @@ export interface NovelSourceServiceOptions {
   snapshots: RemoteSnapshotStore;
   writer: RemoteAssetWriter;
   project_lock: ProjectFileLock;
+  /** 站点拒绝凭据时触发登录链路的 token 续期；CLI 缺席。 */
+  refresh_credentials?: ((origin: string) => Promise<boolean>) | undefined;
   native_fs?: NativeFs;
 }
 
@@ -219,6 +247,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
   private readonly snapshots: RemoteSnapshotStore;
   private readonly writer: RemoteAssetWriter;
   private readonly project_lock: ProjectFileLock;
+  private readonly refresh_credentials: ((origin: string) => Promise<boolean>) | null;
   private readonly native_fs: NativeFs;
   private staging_cleaned = false;
   private sync_stash: SyncStash | null = null; // 每个工程只保留最近一次预览
@@ -231,6 +260,7 @@ export class NovelSourceService implements RemoteNovelImportPort {
     this.snapshots = options.snapshots;
     this.writer = options.writer;
     this.project_lock = options.project_lock;
+    this.refresh_credentials = options.refresh_credentials ?? null;
     this.native_fs = options.native_fs ?? default_native_fs;
   }
 
@@ -493,6 +523,149 @@ export class NovelSourceService implements RemoteNovelImportPort {
         throw cause;
       }
       return await this.read_bound_source();
+    });
+  }
+
+  /**
+   * 把已绑定网页小说换到同一站点的另一个作品页。
+   * 只更新绑定身份，资产路径、条目与译文不动；章节数量不一致时拒绝换源。
+   */
+  public async rebind_existing(
+    url: string,
+    signal?: AbortSignal,
+    options: RemoteSourceBindOptions = {},
+  ): Promise<RemoteSourceRebindResult> {
+    signal?.throwIfAborted();
+    const project_path = this.session_state.require_loaded_project_path();
+    const previous = await this.require_binding(project_path);
+    const ref = parse_novel_ref(url);
+    if (ref.url === previous.url) {
+      return {
+        changed: false,
+        previous: { url: previous.url, title: previous.title, kind: previous.kind },
+        current: {
+          url: previous.url,
+          title: previous.title,
+          kind: previous.kind,
+          chapter_count: previous.chapter_count,
+        },
+        asset_path: previous.asset_path,
+        text_matches: null,
+      };
+    }
+    if (ref.kind !== "web") {
+      throw new AppError("remote.rebind_unsupported", {
+        public_details: { reason: "target_not_web", kind: ref.kind },
+      });
+    }
+    const assets = await this.database.get_all_asset_records(project_path);
+    const asset = assets.find((candidate) => candidate.path === previous.asset_path);
+    if (asset === undefined) {
+      throw new AppError("remote.source_not_bound", {
+        public_details: { reason: "asset_missing", asset_path: previous.asset_path },
+      });
+    }
+    if (previous.kind !== "web") {
+      throw new AppError("remote.rebind_unsupported", {
+        public_details: {
+          reason: "wenku_single_channel",
+          kind: previous.kind,
+          asset_path: previous.asset_path,
+        },
+      });
+    }
+    if (asset.file_type !== "TXT") {
+      throw new AppError("remote.rebind_unsupported", {
+        public_details: {
+          reason: asset.file_type === "EPUB" ? "epub_requires_import" : "asset_not_supported",
+          asset_path: asset.path,
+          file_type: asset.file_type,
+        },
+      });
+    }
+    const previous_ref = parse_novel_ref(previous.url);
+    const previous_workspace = await call_with_credential_refresh(
+      this.refresh_credentials,
+      previous_ref.origin,
+      () => this.client.read_workspace(previous_ref, signal),
+    );
+    const next_workspace = await call_with_credential_refresh(
+      this.refresh_credentials,
+      ref.origin,
+      () => this.client.read_workspace(ref, signal),
+    );
+    const expected_chapters = previous_workspace.chapters.length;
+    const actual_chapters = next_workspace.chapters.length;
+    if (expected_chapters !== actual_chapters) {
+      throw new AppError("remote.chapter_structure_mismatch", {
+        public_details: {
+          reason: "chapter_count_changed",
+          previous_title: previous.title,
+          current_title: next_workspace.title_zh ?? next_workspace.title_jp,
+          expected: expected_chapters,
+          actual: actual_chapters,
+        },
+      });
+    }
+    const download = await call_with_credential_refresh(this.refresh_credentials, ref.origin, () =>
+      this.client.download(ref, signal),
+    );
+    signal?.throwIfAborted();
+    const current_bytes = await this.database.read_asset_content(project_path, asset.path);
+    if (current_bytes === null) {
+      throw new AppError("remote.source_not_bound", {
+        public_details: { reason: "asset_missing", asset_path: asset.path },
+      });
+    }
+    const text_matches = remote_text_lines_match(current_bytes.toString("utf8"), download.text);
+    const binding = build_remote_source_binding({
+      ref,
+      title: download.metadata.title,
+      asset_path: asset.path,
+      remote_hash: download.content_hash,
+      chapter_count: actual_chapters,
+      synced_at: new Date().toISOString(),
+    });
+    return await this.project_lock.run(project_path, async () => {
+      signal?.throwIfAborted();
+      const latest = await this.require_binding(project_path);
+      if (!same_remote_source_identity(previous, latest)) {
+        throw new AppError("remote.binding_changed", {
+          public_details: {
+            previous_url: previous.url,
+            current_url: latest.url,
+            asset_path: previous.asset_path,
+          },
+        });
+      }
+      const latest_assets = await this.database.get_all_asset_records(project_path);
+      const latest_asset = latest_assets.find((candidate) => candidate.path === asset.path);
+      if (latest_asset === undefined || latest_asset.file_type !== "TXT") {
+        throw new AppError("remote.source_not_bound", {
+          public_details: { reason: "asset_changed", asset_path: asset.path },
+        });
+      }
+      await this.writer.bind_remote_source(
+        { binding },
+        options.under_agent === true ? { under_agent: true } : undefined,
+      );
+      try {
+        this.snapshots.clear(project_path);
+      } catch {
+        // 清理失败只会留下与新绑定身份不匹配的旧快照；读取绑定后才会使用快照。
+      }
+      return {
+        changed: true,
+        previous: { url: previous.url, title: previous.title, kind: previous.kind },
+        current: {
+          url: binding.url,
+          title: binding.title,
+          kind: binding.kind,
+          chapter_count: binding.chapter_count,
+        },
+        asset_path: binding.asset_path,
+        text_matches,
+      };
     });
   }
 

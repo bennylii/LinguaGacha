@@ -1,5 +1,10 @@
 import { AppError } from "../../shared/error/app-error";
 import type { ProjectWriteResult } from "../../shared/project-event";
+import {
+  has_text_line_break,
+  split_text_lines_for_items,
+} from "../file/shared/file-format-helpers";
+import { write_chapter_translation_with_retry } from "./chapter-translation-writer";
 import { call_with_credential_refresh } from "./credential-refresh";
 import type {
   NoveliaClient,
@@ -9,12 +14,14 @@ import type {
 } from "./novelia-client";
 import {
   build_chapter_filename,
+  is_empty_translation_line,
   parse_novel_ref,
   REMOTE_NOVEL_MAX_BYTES,
+  same_as_old_translation,
   type RemoteNovelRef,
 } from "./novelia-source";
 import type { NovelSourceService } from "./novel-source-service";
-import type { RemoteSourceBinding } from "./remote-source";
+import { same_remote_source_identity, type RemoteSourceBinding } from "./remote-source";
 
 const CHAPTER_LIST_DEFAULT_LIMIT = 50;
 const CHAPTER_LIST_MAX_LIMIT = 100;
@@ -94,6 +101,28 @@ export interface RemoteChapterReadResult {
   truncated: boolean;
 }
 
+export interface RemoteChapterUploadRequest {
+  chapter_id: string;
+  /** 文库章节所属分卷；网页小说省略。 */
+  volume_id?: string | null;
+  text: string;
+}
+
+export interface RemoteChapterLineUploadRequest extends RemoteChapterUploadRequest {
+  /** 1 起始的段落行号；只替换这一行，其余行沿用站点旧译。 */
+  line: number;
+}
+
+export interface RemoteChapterUploadResult {
+  uploaded: boolean;
+  unchanged?: true;
+  chapter_id: string;
+  volume_id: string | null;
+  title: string;
+  paragraphs: number;
+  line?: number;
+}
+
 /** Agent 工具在自身运行租约内导入暂存文本的窄端口。 */
 export interface RemoteChapterImporter {
   import_source_file_under_agent(
@@ -111,8 +140,8 @@ export interface RemoteChapterServiceOptions {
 }
 
 /**
- * 读取当前绑定作品在站点的章节缓存，并把指定章节的日文原文导入工作台。
- * 只读站点已缓存内容（`sync=false`），不触发站点向上游同步，也不改写工程绑定。
+ * 读取绑定作品在站点的章节缓存，导入指定章节，或按章提交 GPT 译文。
+ * 纯读取默认只取缓存；网页小说的显式同步与上传首次读取会触发站点向上游抓取，文库始终只取缓存。
  */
 export class RemoteChapterService {
   private readonly sources: RemoteChapterServiceOptions["sources"];
@@ -317,13 +346,209 @@ export class RemoteChapterService {
     };
   }
 
+  /**
+   * 用工作台或 Agent 提供的整章文本覆盖站点译文。
+   * 提交前校验行数、空译文，并在写入前复查绑定与章节原文，避免等待期间的目标漂移。
+   */
+  public async upload_chapter(
+    request: RemoteChapterUploadRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteChapterUploadResult> {
+    signal?.throwIfAborted();
+    const chapter_id = request.chapter_id.trim();
+    if (chapter_id === "") {
+      throw new AppError("request.validation_failed", {
+        public_details: { field: "chapter_id" },
+      });
+    }
+    const volume_id = normalize_volume_id(request.volume_id);
+    const { binding, ref, chapter, task } = await this.read_bound_chapter_task(
+      chapter_id,
+      volume_id,
+      { sync: "auto" },
+      signal,
+    );
+    const base = {
+      chapter_id: chapter.chapter_id,
+      volume_id: chapter.volume_id,
+      title: chapter.title,
+    };
+    if (task.paragraph_jp.length === 0) {
+      throw new AppError("remote.chapter_empty", { public_details: base });
+    }
+    signal?.throwIfAborted();
+    const paragraphs_zh = split_text_lines_for_items(request.text);
+    if (paragraphs_zh.length !== task.paragraph_jp.length) {
+      throw new AppError("remote.chapter_paragraph_mismatch", {
+        public_details: {
+          ...base,
+          expected: task.paragraph_jp.length,
+          actual: paragraphs_zh.length,
+        },
+      });
+    }
+    assert_non_empty_translations(task.paragraph_jp, paragraphs_zh, base);
+    if (
+      task.old_paragraph_zh !== null &&
+      same_as_old_translation(paragraphs_zh, task.old_paragraph_zh)
+    ) {
+      return {
+        uploaded: false,
+        unchanged: true,
+        paragraphs: task.paragraph_jp.length,
+        ...base,
+      };
+    }
+    await this.assert_binding_unchanged(binding, base);
+    const latest_task = await this.read_task_for_write(ref, chapter, signal);
+    signal?.throwIfAborted();
+    assert_same_chapter_source(task.paragraph_jp, latest_task.paragraph_jp, base);
+    await write_chapter_translation_with_retry({
+      client: this.client,
+      refresh_credentials: this.refresh_credentials,
+      ref,
+      chapter,
+      glossary_id: latest_task.glossary_id,
+      paragraphs_zh,
+      signal,
+    });
+    return {
+      uploaded: true,
+      paragraphs: task.paragraph_jp.length,
+      ...base,
+    };
+  }
+
+  /**
+   * 整章行数无法与原文对齐时，用站点旧译文补齐其他行后提交整章数组。
+   * 目标行之外的旧译缺失、空译文或章节身份变化都拒绝提交。
+   */
+  public async upload_line(
+    request: RemoteChapterLineUploadRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteChapterUploadResult> {
+    signal?.throwIfAborted();
+    const chapter_id = request.chapter_id.trim();
+    if (chapter_id === "") {
+      throw new AppError("request.validation_failed", {
+        public_details: { field: "chapter_id" },
+      });
+    }
+    if (!Number.isSafeInteger(request.line) || request.line < 1) {
+      throw new AppError("request.validation_failed", {
+        public_details: { field: "line" },
+      });
+    }
+    if (has_text_line_break(request.text)) {
+      throw new AppError("request.validation_failed", {
+        public_details: { field: "text", reason: "line_break" },
+      });
+    }
+    const volume_id = normalize_volume_id(request.volume_id);
+    const { binding, ref, chapter, task } = await this.read_bound_chapter_task(
+      chapter_id,
+      volume_id,
+      { sync: "auto" },
+      signal,
+    );
+    const base = {
+      chapter_id: chapter.chapter_id,
+      volume_id: chapter.volume_id,
+      title: chapter.title,
+      line: request.line,
+    };
+    if (task.paragraph_jp.length === 0) {
+      throw new AppError("remote.chapter_empty", { public_details: base });
+    }
+    signal?.throwIfAborted();
+    if (request.line > task.paragraph_jp.length) {
+      throw new AppError("request.validation_failed", {
+        public_details: {
+          field: "line",
+          expected: task.paragraph_jp.length,
+          actual: request.line,
+        },
+      });
+    }
+    const line_index = request.line - 1;
+    assert_line_context(task.paragraph_jp, task.old_paragraph_zh, line_index, base);
+    assert_target_translation(task.paragraph_jp[line_index]!, request.text, base);
+    if (translation_line_matches(task.old_paragraph_zh![line_index] ?? "", request.text)) {
+      return {
+        uploaded: false,
+        unchanged: true,
+        paragraphs: task.paragraph_jp.length,
+        ...base,
+      };
+    }
+    await this.assert_binding_unchanged(binding, base);
+    const latest_task = await this.read_task_for_write(ref, chapter, signal);
+    signal?.throwIfAborted();
+    assert_same_chapter_source(task.paragraph_jp, latest_task.paragraph_jp, base);
+    assert_line_context(latest_task.paragraph_jp, latest_task.old_paragraph_zh, line_index, base);
+    assert_target_translation(latest_task.paragraph_jp[line_index]!, request.text, base);
+    if (translation_line_matches(latest_task.old_paragraph_zh![line_index] ?? "", request.text)) {
+      return {
+        uploaded: false,
+        unchanged: true,
+        paragraphs: latest_task.paragraph_jp.length,
+        ...base,
+      };
+    }
+    const paragraphs_zh = latest_task.old_paragraph_zh!.map((line, index) =>
+      index === line_index ? request.text : line,
+    );
+    await write_chapter_translation_with_retry({
+      client: this.client,
+      refresh_credentials: this.refresh_credentials,
+      ref,
+      chapter,
+      glossary_id: latest_task.glossary_id,
+      paragraphs_zh,
+      signal,
+    });
+    return {
+      uploaded: true,
+      paragraphs: latest_task.paragraph_jp.length,
+      ...base,
+    };
+  }
+
+  /** 写入前直接刷新章节任务；网站原文变化时不允许沿用等待期间生成的译文。 */
+  private async read_task_for_write(
+    ref: RemoteNovelRef,
+    chapter: RemoteWorkspaceChapter,
+    signal?: AbortSignal,
+  ): Promise<RemoteChapterTask> {
+    return await call_with_credential_refresh(this.refresh_credentials, ref.origin, () =>
+      this.client.read_chapter_task(ref, chapter, { sync: false }, signal),
+    );
+  }
+
+  /** 上传等待期间换源或改绑时拒绝写入，避免把译文提交到旧作品。 */
+  private async assert_binding_unchanged(
+    binding: RemoteSourceBinding,
+    details: { chapter_id: string; volume_id: string | null; title: string },
+  ): Promise<void> {
+    const latest = await this.require_binding();
+    if (same_remote_source_identity(binding, latest)) return;
+    throw new AppError("remote.binding_changed", {
+      public_details: {
+        ...details,
+        previous_url: binding.url,
+        current_url: latest.url,
+      },
+    });
+  }
+
   /** 目录解析与任务读取是导入和纯读取的公共前置；凭据拒绝时先续期再重试一次。 */
   private async read_bound_chapter_task(
     chapter_id: string,
     volume_id: string | null,
-    options: { sync: boolean } = { sync: false },
+    options: { sync: boolean | "auto" } = { sync: false },
     signal?: AbortSignal,
   ): Promise<{
+    binding: RemoteSourceBinding;
     ref: RemoteNovelRef;
     chapter: RemoteWorkspaceChapter;
     task: RemoteChapterTask;
@@ -335,10 +560,11 @@ export class RemoteChapterService {
       this.client.read_workspace(ref, signal),
     );
     const chapter = this.resolve_chapter(workspace, chapter_id, volume_id);
+    const sync = options.sync === "auto" ? ref.kind === "web" : options.sync;
     const task = await call_with_credential_refresh(this.refresh_credentials, ref.origin, () =>
-      this.client.read_chapter_task(ref, chapter, options, signal),
+      this.client.read_chapter_task(ref, chapter, { sync }, signal),
     );
-    return { ref, chapter, task, file_base_title: binding.title };
+    return { binding, ref, chapter, task, file_base_title: binding.title };
   }
 
   /** 章节身份只能来自站点目录；文库同名章节 ID 需要显式分卷消歧。 */
@@ -370,10 +596,121 @@ export class RemoteChapterService {
   }
 }
 
+interface ChapterUploadDetails {
+  chapter_id: string;
+  volume_id: string | null;
+  title: string;
+  line?: number;
+}
+
+function normalize_volume_id(volume_id: string | null | undefined): string | null {
+  const normalized = volume_id?.trim() ?? "";
+  return normalized === "" ? null : normalized;
+}
+
 function build_chapter_not_found(chapter_id: string, volume_id: string | null): AppError {
   return new AppError("remote.chapter_not_found", {
     public_details: { chapter_id, ...(volume_id === null ? {} : { volume_id }) },
   });
+}
+
+/** 原文非空时译文不能为空、纯空白或站点缺失标记。 */
+function assert_non_empty_translations(
+  paragraph_jp: readonly string[],
+  paragraphs_zh: readonly string[],
+  details: ChapterUploadDetails,
+): void {
+  const index = paragraph_jp.findIndex(
+    (source, line_index) =>
+      source.trim() !== "" && is_empty_translation_line(paragraphs_zh[line_index] ?? ""),
+  );
+  if (index >= 0) {
+    throw new AppError("remote.chapter_paragraph_empty", {
+      public_details: { ...details, line: index + 1 },
+    });
+  }
+}
+
+function assert_target_translation(
+  paragraph_jp: string,
+  text: string,
+  details: ChapterUploadDetails,
+): void {
+  if (paragraph_jp.trim() !== "" && is_empty_translation_line(text)) {
+    throw new AppError("remote.chapter_paragraph_empty", { public_details: { ...details } });
+  }
+}
+
+/** 按行补传只信任站点旧译补齐其他行；旧译缺失或长度不一致直接拒绝。 */
+function assert_line_context(
+  paragraph_jp: readonly string[],
+  old_paragraph_zh: readonly string[] | null,
+  target_index: number,
+  details: ChapterUploadDetails,
+): void {
+  const missing_lines = paragraph_jp.flatMap((source, index) =>
+    index !== target_index &&
+    source.trim() !== "" &&
+    (old_paragraph_zh === null || is_empty_translation_line(old_paragraph_zh[index] ?? ""))
+      ? [index + 1]
+      : [],
+  );
+  if (old_paragraph_zh === null || old_paragraph_zh.length !== paragraph_jp.length) {
+    throw new AppError("remote.chapter_line_context_missing", {
+      public_details: {
+        ...details,
+        ...(old_paragraph_zh === null
+          ? { reason: "old_translation_missing" }
+          : {
+              reason: "old_translation_length_mismatch",
+              expected: paragraph_jp.length,
+              actual: old_paragraph_zh.length,
+            }),
+        missing_lines,
+      },
+    });
+  }
+  const missing = paragraph_jp.flatMap((source, index) =>
+    index !== target_index &&
+    source.trim() !== "" &&
+    is_empty_translation_line(old_paragraph_zh[index] ?? "")
+      ? [index + 1]
+      : [],
+  );
+  if (missing.length > 0) {
+    throw new AppError("remote.chapter_line_context_missing", {
+      public_details: { ...details, missing_lines: missing },
+    });
+  }
+}
+
+/** 目标行与旧译一致时无需写站点；空行与缺失标记也按值相等处理。 */
+function translation_line_matches(old_line: string, text: string): boolean {
+  return (
+    old_line === text || (!is_empty_translation_line(old_line) && old_line.trim() === text.trim())
+  );
+}
+
+/** 写入前复查原文；段数或正文变化都视为章节已变。 */
+function assert_same_chapter_source(
+  previous: readonly string[],
+  latest: readonly string[],
+  details: ChapterUploadDetails,
+): void {
+  if (same_ordered_strings(previous, latest)) return;
+  const changed_line = previous.findIndex((line, index) => line !== latest[index]);
+  throw new AppError("remote.chapter_changed", {
+    public_details: {
+      ...details,
+      expected: previous.length,
+      actual: latest.length,
+      ...(changed_line < 0 ? {} : { changed_line: changed_line + 1 }),
+    },
+  });
+}
+
+function same_ordered_strings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 /**

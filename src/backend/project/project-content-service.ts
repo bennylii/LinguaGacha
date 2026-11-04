@@ -111,6 +111,11 @@ export interface RemoteSourceBindRequest {
   binding: RemoteSourceBinding;
 }
 
+/** 换源同样只改远程身份；Agent 写工具复用自己的运行回合提交。 */
+export interface RemoteSourceBindOptions {
+  under_agent?: boolean;
+}
+
 /** Agent 写工具在自己的运行回合内提交时，复用 Agent 写串行而不是要求运行时空闲。 */
 export interface RemoteAssetReplaceOptions {
   under_agent?: boolean;
@@ -474,15 +479,21 @@ export class ProjectContentService {
    * 为已存在的工程补写远程绑定。
    * 只推进 project 修订；资产正文、条目和译文仍由当前工程事实决定。
    */
-  public async bind_remote_source(request: RemoteSourceBindRequest): Promise<ProjectWriteResult> {
+  public async bind_remote_source(
+    request: RemoteSourceBindRequest,
+    options: RemoteSourceBindOptions = {},
+  ): Promise<ProjectWriteResult> {
     const project_path = this.session_state.require_loaded_project_path();
-    return await this.runtime_gate.run_project_write(async () => {
+    const write = async (): Promise<ProjectWriteResult> => {
       return await this.write_store.apply_project_settings_meta({
         projectPath: project_path,
         source: "remote_source_bind",
         meta: { [REMOTE_SOURCE_META_KEY]: request.binding as unknown as JsonValue },
       });
-    });
+    };
+    return options.under_agent === true
+      ? await this.runtime_gate.run_agent_project_write(write)
+      : await this.runtime_gate.run_project_write(write);
   }
 
   /**

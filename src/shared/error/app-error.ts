@@ -214,6 +214,46 @@ export const APP_ERROR_DEFINITIONS = {
     status: 409,
     severity: "expected",
   },
+  "remote.chapter_structure_mismatch": {
+    message: "The remote novel chapter structure does not match the current binding.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.rebind_unsupported": {
+    message: "This project cannot be rebound to another remote novel.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.chapter_paragraph_mismatch": {
+    message: "The uploaded text line count does not match the remote chapter paragraphs.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.chapter_paragraph_empty": {
+    message: "A non-empty remote paragraph has an empty translation.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.chapter_empty": {
+    message: "The remote chapter has no source paragraphs.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.chapter_line_context_missing": {
+    message: "The remote chapter does not provide old translations for the required lines.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.binding_changed": {
+    message: "The remote source binding changed during the operation.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.chapter_changed": {
+    message: "The remote chapter changed during the operation.",
+    status: 409,
+    severity: "expected",
+  },
   "remote.workspace_empty": {
     message: "The remote novel has no readable chapters.",
     status: 400,

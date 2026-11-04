@@ -189,6 +189,16 @@ export class GuiBackendBootstrap {
           services.remote.chapters.read_chapter(request, signal),
         novelChapterSync: (request, signal) =>
           services.remote.chapters.sync_chapter(request, signal),
+        novelSourceRebind: (request, signal) => {
+          signal.throwIfAborted();
+          return services.remote.sources.rebind_existing(request.url, signal, {
+            under_agent: true,
+          });
+        },
+        novelChapterUpload: (request, signal) =>
+          services.remote.chapters.upload_chapter(request, signal),
+        novelChapterLineUpload: (request, signal) =>
+          services.remote.chapters.upload_line(request, signal),
         novelSyncPreview: (signal) => services.remote.sources.preview_sync(signal),
         novelSyncApply: (request, signal) => {
           signal.throwIfAborted();

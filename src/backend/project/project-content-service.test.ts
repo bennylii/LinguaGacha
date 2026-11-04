@@ -3026,6 +3026,41 @@ describe("ProjectContentService", () => {
     }
   });
 
+  it("Agent 写换源复用 Agent 租约，普通写在 Agent 回合内被拒绝", async () => {
+    const { database, service, runtime_gate, lg_path } = await create_service();
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      provider_id: "kakuyomu",
+      novel_id: "654321",
+      url: "https://n.novelia.cc/novel/kakuyomu/654321",
+      title: "新作品",
+      asset_path: "remote-novel.txt",
+      remote_hash: "b".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-22T00:00:00.000Z",
+    };
+    const lease = runtime_gate.begin_runtime("agent");
+    try {
+      await expect(service.bind_remote_source({ binding })).rejects.toMatchObject({
+        code: "runtime.busy",
+      });
+      const result = await service.bind_remote_source({ binding }, { under_agent: true });
+      expect(result).toMatchObject({
+        accepted: true,
+        changes: [{ source: "remote_source_bind", updatedSections: ["project"] }],
+      });
+      expect((await database.get_all_meta(lg_path))[REMOTE_SOURCE_META_KEY]).toMatchObject({
+        title: "新作品",
+        novel_id: "654321",
+      });
+    } finally {
+      runtime_gate.finish_runtime(lease);
+      await database.close();
+    }
+  });
+
   it("同步时站点译文补齐空行，工程已有译文与人工重译优先", async () => {
     const { database, service, lg_path } = await create_service();
     const source = project_path("remote-novel.txt");

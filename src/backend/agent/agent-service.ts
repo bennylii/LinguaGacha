@@ -86,6 +86,18 @@ import {
   type AgentNovelChapterSyncPort,
 } from "./tools/novel-chapter-sync";
 import {
+  create_agent_novel_source_rebind_tool,
+  type AgentNovelSourceRebindPort,
+} from "./tools/novel-source-rebind";
+import {
+  create_agent_novel_chapter_upload_tool,
+  type AgentNovelChapterUploadPort,
+} from "./tools/novel-chapter-upload";
+import {
+  create_agent_novel_chapter_line_upload_tool,
+  type AgentNovelChapterLineUploadPort,
+} from "./tools/novel-chapter-line-upload";
+import {
   create_agent_novel_sync_preview_tool,
   type AgentNovelSyncPreviewPort,
 } from "./tools/novel-sync-preview";
@@ -141,6 +153,9 @@ type AgentServiceOptions = {
   novelChapterImport: AgentNovelChapterImportPort | undefined;
   novelChapterRead: AgentNovelChapterReadPort | undefined;
   novelChapterSync: AgentNovelChapterSyncPort | undefined;
+  novelSourceRebind: AgentNovelSourceRebindPort | undefined;
+  novelChapterUpload: AgentNovelChapterUploadPort | undefined;
+  novelChapterLineUpload: AgentNovelChapterLineUploadPort | undefined;
   novelSyncPreview: AgentNovelSyncPreviewPort | undefined;
   novelSyncApply: AgentNovelSyncApplyPort | undefined;
   workspace: AgentWorkspacePort;
@@ -193,6 +208,9 @@ export class AgentService {
   private readonly novel_chapter_import: AgentNovelChapterImportPort | undefined;
   private readonly novel_chapter_read: AgentNovelChapterReadPort | undefined;
   private readonly novel_chapter_sync: AgentNovelChapterSyncPort | undefined;
+  private readonly novel_source_rebind: AgentNovelSourceRebindPort | undefined;
+  private readonly novel_chapter_upload: AgentNovelChapterUploadPort | undefined;
+  private readonly novel_chapter_line_upload: AgentNovelChapterLineUploadPort | undefined;
   private readonly novel_sync_preview: AgentNovelSyncPreviewPort | undefined;
   private readonly novel_sync_apply: AgentNovelSyncApplyPort | undefined;
   private readonly workspace: AgentWorkspacePort;
@@ -251,6 +269,9 @@ export class AgentService {
     this.novel_chapter_import = options.novelChapterImport;
     this.novel_chapter_read = options.novelChapterRead;
     this.novel_chapter_sync = options.novelChapterSync;
+    this.novel_source_rebind = options.novelSourceRebind;
+    this.novel_chapter_upload = options.novelChapterUpload;
+    this.novel_chapter_line_upload = options.novelChapterLineUpload;
     this.novel_sync_preview = options.novelSyncPreview;
     this.novel_sync_apply = options.novelSyncApply;
     this.workspace = options.workspace;
@@ -1550,6 +1571,41 @@ export class AgentService {
               this.session_state.require_loaded_project_path();
               signal.throwIfAborted();
               return this.novel_chapter_sync!(request, signal);
+            }),
+          ]),
+      ...(this.novel_source_rebind === undefined
+        ? []
+        : [
+            create_agent_novel_source_rebind_tool((request, signal) => {
+              const execution = this.require_execution();
+              this.session_state.require_loaded_project_path();
+              signal.throwIfAborted();
+              // 换源写本地绑定，必须复用当前 Agent 回合的写串行。
+              this.runtime_gate.assert_current_runtime(execution.lease, "agent");
+              return this.novel_source_rebind!(request, signal);
+            }),
+          ]),
+      ...(this.novel_chapter_upload === undefined
+        ? []
+        : [
+            create_agent_novel_chapter_upload_tool((request, signal) => {
+              const execution = this.require_execution();
+              this.session_state.require_loaded_project_path();
+              signal.throwIfAborted();
+              // 站点写入与整本同步相同：先确认当前 Agent 仍持有运行租约。
+              this.runtime_gate.assert_current_runtime(execution.lease, "agent");
+              return this.novel_chapter_upload!(request, signal);
+            }),
+          ]),
+      ...(this.novel_chapter_line_upload === undefined
+        ? []
+        : [
+            create_agent_novel_chapter_line_upload_tool((request, signal) => {
+              const execution = this.require_execution();
+              this.session_state.require_loaded_project_path();
+              signal.throwIfAborted();
+              this.runtime_gate.assert_current_runtime(execution.lease, "agent");
+              return this.novel_chapter_line_upload!(request, signal);
             }),
           ]),
       ...(this.novel_sync_preview === undefined
