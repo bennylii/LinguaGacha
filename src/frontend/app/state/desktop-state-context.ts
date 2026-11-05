@@ -1,12 +1,12 @@
 import { createContext } from "react";
 import type { RouteId } from "@frontend/app/navigation/types";
-import type { ProjectStage } from "@frontend/app/state/desktop-project-change-types";
 import type { createBatchTranslationSnapshotStore } from "@frontend/app/state/batch-translation-snapshot-store";
 import type { BatchTranslationSnapshot } from "@domain/batch-translation";
 import type { createRuntimeActivityStore } from "@frontend/app/state/runtime-activity-store";
 import type { ProjectWriteCommitter } from "@frontend/app/state/desktop-project-write";
 import type { RecentProjectSetting, SettingSnapshot } from "@domain/setting";
 import type { AppLanguage } from "@domain/app-language";
+import type { ProjectLanguageSettings } from "@domain/project-settings";
 import type { RuntimeActivitySnapshot } from "@shared/runtime-activity";
 import type { ProjectChangeSignalSource } from "@frontend/app/state/project-change-signal-store";
 
@@ -17,6 +17,7 @@ export type SettingsSnapshot = SettingSnapshot;
 export type ProjectSnapshot = {
   path: string;
   loaded: boolean;
+  languages: ProjectLanguageSettings | null; // 已加载项目的语言事实，未加载时为 null
 };
 
 export type ProjectSessionStatus = "idle" | "warming" | "ready";
@@ -27,7 +28,6 @@ export type DesktopStateContextValue = {
   settings_snapshot: SettingsSnapshot;
   project_snapshot: ProjectSnapshot;
   project_session_status: ProjectSessionStatus;
-  project_session_stage: ProjectStage | null;
   pending_target_route: RouteId | null;
   is_app_language_updating: boolean;
   set_project_session_status: (status: ProjectSessionStatus) => void;

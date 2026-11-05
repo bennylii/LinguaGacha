@@ -1,7 +1,11 @@
 import type { JsonRecord } from "../domain/json";
 
-/** 翻译、Agent 与接口测试共享同一执行占用。 */
-export type RuntimeActivityOwner = "batch_translation" | "agent" | "model_test";
+/** 翻译、Agent、接口测试与工作区提交共享同一执行占用。 */
+export type RuntimeActivityOwner =
+  | "batch_translation"
+  | "agent"
+  | "model_test"
+  | "remote_workspace";
 
 /** 后端与 renderer 共享的轻量运行占用快照。 */
 export type RuntimeActivitySnapshot = Readonly<

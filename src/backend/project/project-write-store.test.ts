@@ -29,6 +29,37 @@ import {
 } from "./agent-workspace-write";
 
 describe("ProjectWriteStore", () => {
+  it("替换资产时清空其附加原稿清单，保留其他资产的清单", async () => {
+    const { database, project_path, store } = await create_store("additional-files");
+    await database.transaction(project_path, (writer) => {
+      writer.add_asset(project_path, "game.godot", Buffer.from("old"), "GODOT", null);
+      writer.add_asset(project_path, "other.godot", Buffer.from("other"), "GODOT", null);
+      writer.set_meta(project_path, "additional_files", {
+        "game.godot": ["data/a.json"],
+        "other.godot": ["b.txt"],
+      });
+    });
+    await store.replace_project_items_and_files({
+      projectPath: project_path,
+      expectedSectionRevisions: { files: 0 },
+      revisionSections: ["files"],
+      updatedSections: ["files"],
+      source: "project_import_files",
+      assetWrites: [
+        {
+          kind: "update",
+          path: "game.godot",
+          content: Buffer.from("new"),
+          fileType: "GODOT",
+          pdfDocument: null,
+          additionalFiles: [],
+        },
+      ],
+    });
+    expect((await database.get_all_meta(project_path)).additional_files).toEqual({
+      "other.godot": ["b.txt"],
+    });
+  });
   it.each([
     ["game", "game/readme.txt"],
     ["game/readme.txt", "game"],
@@ -770,7 +801,14 @@ describe("ProjectWriteStore", () => {
           {
             kind: "glossary",
             entries: [
-              { entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: false },
+              {
+                entry_id: "hp",
+                src: "HP",
+                dst: "生命值",
+                info: "",
+                evidence: "来源：工程第一章；访问日期：2026-10-29",
+                case_sensitive: false,
+              },
             ],
             enabled: true,
             mode: null,
@@ -785,7 +823,14 @@ describe("ProjectWriteStore", () => {
       changes: [{ updatedSections: ["quality", "prompts"] }],
     });
     expect(await database.get_rules(project_path, "glossary")).toEqual([
-      { entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: false },
+      {
+        entry_id: "hp",
+        src: "HP",
+        dst: "生命值",
+        info: "",
+        evidence: "来源：工程第一章；访问日期：2026-10-29",
+        case_sensitive: false,
+      },
     ]);
     expect(await database.get_rule_text(project_path, "translation_prompt")).toBe("翻译提示词");
     expect(await read_meta(database, project_path)).toMatchObject({
@@ -848,7 +893,7 @@ describe("ProjectWriteStore", () => {
               {
                 line: 2,
                 kind: "glossary",
-                fields: { src: "姫", dst: "公主", info: "", case_sensitive: false },
+                fields: { src: "姫", dst: "公主", info: "", evidence: "", case_sensitive: false },
                 sort: -1,
               },
             ],
@@ -1015,7 +1060,7 @@ describe("ProjectWriteStore", () => {
                 {
                   line: 2,
                   kind: "glossary",
-                  fields: { src: "姫", dst: "公主", info: "", case_sensitive: false },
+                  fields: { src: "姫", dst: "公主", info: "", evidence: "", case_sensitive: false },
                   sort: -1,
                 },
               ],
@@ -1104,7 +1149,7 @@ describe("ProjectWriteStore", () => {
   }> {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `linguagacha-write-${name}-`));
     const project_path = path.join(directory, `${name}.lg`);
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const project_event_handler = options.projectEventHandler ?? vi.fn();
     const published_changes: ProjectCommittedChange[] = [];
     await database.create_project(project_path, name);

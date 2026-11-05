@@ -20,6 +20,8 @@ import {
 } from "react";
 
 import { read_log_detail, type LogDetail, type LogEntry } from "@frontend/app/desktop/desktop-api";
+import type { LogFileRef } from "@shared/log";
+import { log_file_key } from "@frontend/pages/log-window-page/logic";
 import { useI18n, type LocaleKey } from "@frontend/app/locale/locale-context";
 import { useDebouncedValue } from "@frontend/widgets/interactions/use-debounce";
 import { cn } from "@frontend/shadcn/classnames";
@@ -74,13 +76,13 @@ type LogDetailState =
   | { status: "ready"; event_id: string; detail: LogDetail };
 
 /**
- * AppTable 会把 table_class_name 同时挂到表头、浮层和表体，从 viewport 内定位避免误取固定表头
+ * AppTable 会把 table_class_name 同时挂到表头、浮层和表体，从 `.app-table__viewport` 内定位避免误取固定表头
  */
 function scroll_log_table_to_top(): void {
   const table_element = document.querySelector<HTMLElement>(
-    '[data-slot="scroll-area-viewport"] .log-window-page__table',
+    ".app-table__viewport .log-window-page__table",
   );
-  const viewport_element = table_element?.closest('[data-slot="scroll-area-viewport"]');
+  const viewport_element = table_element?.closest(".app-table__viewport");
   if (viewport_element instanceof HTMLElement) {
     viewport_element.scrollTop = 0;
   }
@@ -125,7 +127,7 @@ export function LogWindowPage(): JSX.Element {
       anchor_row_id: null,
     });
     set_detail_state({ status: "idle", event_id: null, detail: null });
-  }, [logs.reset_revision, logs.date]);
+  }, [logs.reset_revision, logs.file]);
 
   const filtered_events = useMemo(() => {
     return filter_log_entries({
@@ -332,7 +334,7 @@ export function LogWindowPage(): JSX.Element {
   function load_older(): void {
     if (logs.loading || !logs.can_load_older) return;
     const first_row = document.querySelector(
-      '[data-slot="scroll-area-viewport"] .log-window-page__table [data-row-index]',
+      ".app-table__viewport .log-window-page__table [data-row-index]",
     );
     const row_index = Number(first_row?.getAttribute("data-row-index") ?? 0);
     set_scroll_anchor((previous) => ({
@@ -484,17 +486,25 @@ export function LogWindowPage(): JSX.Element {
                 {t("log_window_page.action.return_to_top")}
               </AppButton>
               <SearchBarMenuAction
-                value={logs.date}
-                active={logs.date !== null}
+                value={logs.file === null ? null : log_file_key(logs.file)}
+                active={logs.file !== null}
                 button_label={
-                  logs.date === null ? t("log_window_page.history.date") : format_date(logs.date)
+                  logs.file === null
+                    ? t("log_window_page.history.file")
+                    : format_file(logs.file, t("log_window_page.history.current"))
                 }
-                tooltip={t("log_window_page.history.date")}
+                tooltip={t("log_window_page.history.file")}
                 icon={<CalendarDays data-icon="inline-start" />}
-                options={logs.dates.map((date) => ({ value: date, label: format_date(date) }))}
-                on_change={logs.select_date}
+                options={logs.files.map((file) => ({
+                  value: log_file_key(file),
+                  label: format_file(file, t("log_window_page.history.current")),
+                }))}
+                on_change={(value) => {
+                  const next = logs.files.find((file) => log_file_key(file) === value);
+                  if (next !== undefined) logs.select_file(next);
+                }}
                 on_open={() => {
-                  void logs.refresh_dates();
+                  void logs.refresh_files();
                 }}
               />
             </div>
@@ -515,7 +525,7 @@ export function LogWindowPage(): JSX.Element {
                 const viewport = event.target;
                 if (
                   !(viewport instanceof HTMLElement) ||
-                  viewport.dataset.slot !== "scroll-area-viewport" ||
+                  !viewport.classList.contains("app-table__viewport") ||
                   viewport.scrollTop <= 0
                 )
                   return;
@@ -564,7 +574,11 @@ export function LogWindowPage(): JSX.Element {
             </CardContent>
           </Card>
 
-          <aside className="log-window-page__detail" aria-label={t("log_window_page.detail.title")}>
+          <Card
+            render={<aside />}
+            className="log-window-page__detail"
+            aria-label={t("log_window_page.detail.title")}
+          >
             <div className="log-window-page__detail-head">
               <h2>{t("log_window_page.detail.title")}</h2>
               <div className="log-window-page__detail-head-actions">
@@ -650,14 +664,16 @@ export function LogWindowPage(): JSX.Element {
               </div>
             </div>
             {render_detail()}
-          </aside>
+          </Card>
         </section>
       </div>
     </main>
   );
 }
 
-/** 菜单展示年月日，文件标识本身保持原值。 */
-function format_date(date: string): string {
-  return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
+/** 菜单只展示日期与实例标识，不显示工程名。 */
+function format_file(file: LogFileRef, current_label: string): string {
+  const date = `${file.date.slice(0, 4)}-${file.date.slice(4, 6)}-${file.date.slice(6, 8)}`;
+  // 同一天可能有多个实例文件，非当前实例直接显示实例标识以便区分。
+  return `${date} · ${file.current ? current_label : file.instance}`;
 }

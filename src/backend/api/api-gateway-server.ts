@@ -167,7 +167,8 @@ export class ApiGatewayServer {
       request: (method, path, handler) =>
         register_api_request(app, method, path, handler, this.respond_error),
       createEventStreamResponse: () => this.options.eventStream.create_stream_response(),
-      readLogFiles: () => ({ dates: services.logManager.files.list_dates() }),
+      readLogFiles: () =>
+        ({ files: services.logManager.files.list_files() }) as unknown as JsonValue,
       readLogPage: async (body: JsonRecord) =>
         (await services.logManager.files.read_page(
           body as unknown as LogPageRequest,

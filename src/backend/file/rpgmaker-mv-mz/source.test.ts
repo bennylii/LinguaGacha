@@ -15,15 +15,26 @@ it.each(["", "www"])("目录和可执行文件识别同一游戏，仅收集数�
     "js/plugins/menu.js",
     "img/title.png",
   ];
-  for (const file of [...files.map((file) => path.join(prefix, file)), "Game.exe"]) {
+  for (const file of files.map((file) => path.join(prefix, file))) {
     const target = path.join(temp.path, file);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, "");
   }
   const native = new NativeFs();
   const game = (await discover_rpgmaker_source(temp.path, native))!;
+  expect(game).toMatchObject({
+    root: temp.path,
+    data_root: path.join(temp.path, prefix),
+    engine: "mz",
+  });
+  fs.writeFileSync(path.join(temp.path, "Game.exe"), "");
   expect(await discover_rpgmaker_source(path.join(temp.path, "Game.exe"), native)).toEqual(game);
-  expect(collect_rpgmaker_files(game, native).map((file) => file.rel_path)).toEqual(
+  expect(
+    collect_rpgmaker_files(
+      game,
+      files.map((file) => [prefix, file].filter(Boolean).join("/")),
+    ),
+  ).toEqual(
     ["data/nested/Map.json", "data/System.json", "js/plugins.js", "js/plugins/menu.js"].map(
       (file) => [prefix, file].filter(Boolean).join("/"),
     ),

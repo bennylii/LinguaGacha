@@ -1,11 +1,101 @@
-import { expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { expect, it, vi } from "vitest";
+import { NativeFs } from "../../native/native-fs";
 import {
   assert_source_file_paths,
   source_file_output_path,
   SourceFilePathIndex,
   validate_game_path,
   assert_game_path_spellings,
+  collect_existing_files,
+  sort_game_paths,
 } from "./source-file-paths";
+
+it("原稿路径排序保持逐级目录顺序", () => {
+  expect(
+    sort_game_paths(["Data/a.json", "Data/a/z.json", "Data/System.json", "Data/a/A.json"]),
+  ).toEqual(["Data/a/A.json", "Data/a/z.json", "Data/a.json", "Data/System.json"]);
+});
+
+it("已有文件收集保留嵌套枚举顺序、初始文件、缺失目标和原集合", () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-collect-"));
+  fs.mkdirSync(path.join(temp.path, "Data/nested"), { recursive: true });
+  fs.writeFileSync(path.join(temp.path, "Data/a.txt"), "a");
+  fs.writeFileSync(path.join(temp.path, "Data/nested/b.txt"), "b");
+  const native = new NativeFs();
+  const files = new Set(["existing"]);
+  collect_existing_files(temp.path, "Data", files, native);
+  collect_existing_files(temp.path, "missing", files, native);
+  expect([...files]).toEqual(["existing", "Data/a.txt", "Data/nested/b.txt"]);
+  const single = new Set<string>();
+  collect_existing_files(temp.path, "Data/a.txt", single, native);
+  expect([...single]).toEqual(["Data/a.txt"]);
+});
+
+it.each(["before", "during"])("已有文件收集响应取消：%s", (phase) => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-collect-cancel-"));
+  const native = new NativeFs();
+  native.write_file_sync(path.join(temp.path, "Data/nested/a.txt"), "a");
+  const controller = new AbortController();
+  if (phase === "before") controller.abort(new Error("cancel collection"));
+  else {
+    const read = native.read_dirents.bind(native);
+    vi.spyOn(native, "read_dirents").mockImplementation((directory) => {
+      const entries = read(directory);
+      controller.abort(new Error("cancel collection"));
+      return entries;
+    });
+  }
+  const files = new Set<string>();
+  expect(() => collect_existing_files(temp.path, "Data", files, native, controller.signal)).toThrow(
+    "cancel collection",
+  );
+  expect(files.size).toBe(0);
+});
+
+it("入口、祖先、后代和悬空目录链接都拒绝收集", () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-collect-link-"));
+  fs.mkdirSync(path.join(temp.path, "Data"));
+  fs.mkdirSync(path.join(temp.path, "outside"));
+  fs.symlinkSync(path.join(temp.path, "outside"), path.join(temp.path, "Data/link"), "junction");
+  const native = new NativeFs();
+  for (const name of ["Data", "Data/link", "Data/link/missing"]) {
+    expect(() => collect_existing_files(temp.path, name, new Set(), native)).toThrow("Unsafe");
+  }
+  fs.rmdirSync(path.join(temp.path, "outside"));
+  expect(() => collect_existing_files(temp.path, "Data/link", new Set(), native)).toThrow("Unsafe");
+});
+
+it("枚举后替换的目录链接及访问失败继续向调用者报错", () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-collect-race-"));
+  fs.mkdirSync(path.join(temp.path, "Data/nested"), { recursive: true });
+  fs.mkdirSync(path.join(temp.path, "outside"));
+  const native = new NativeFs();
+  const read = native.read_dirents.bind(native);
+  const enumeration = vi.spyOn(native, "read_dirents").mockImplementationOnce((directory) => {
+    const entries = read(directory);
+    fs.rmdirSync(path.join(temp.path, "Data/nested"));
+    fs.symlinkSync(
+      path.join(temp.path, "outside"),
+      path.join(temp.path, "Data/nested"),
+      "junction",
+    );
+    return entries;
+  });
+  expect(() => collect_existing_files(temp.path, "Data", new Set(), native)).toThrow("Unsafe");
+  enumeration.mockImplementation(() => {
+    throw new Error("access denied");
+  });
+  expect(() => collect_existing_files(temp.path, "Data", new Set(), native)).toThrow(
+    "access denied",
+  );
+  vi.spyOn(native, "lstat").mockImplementation(() => {
+    throw new Error("stat denied");
+  });
+  expect(() => collect_existing_files(temp.path, "Data", new Set(), native)).toThrow("stat denied");
+});
 
 it.each([
   "backup_lg/a.json",
@@ -30,9 +120,17 @@ it("游戏成员的父目录拼写必须一致", () => {
 
 it.each([
   ["我的游戏.zip", "RPGMAKER_MV_MZ", "我的游戏"],
+  ["我的游戏.godot", "GODOT", "我的游戏"],
+  ["game.rpgmaker", "RPGMAKER_MV_MZ", "game"],
+  ["game.rpgmaker", "RPGMAKER_RGSS", "game"],
+  ["game.wolfrpg", "WOLFRPG", "game"],
+  ["game.zip.godot", "GODOT", "game.zip"],
+  ["game.zip", "GODOT", "game"],
+  ["game.zip", "WOLFRPG", "game"],
   ["game.zip.zip", "RPGMAKER_MV_MZ", "game.zip"],
   ["folder\\game.zip.zip", "RPGMAKER_MV_MZ", "folder/game.zip"],
   ["game.zip", "TXT", "game.zip"],
+  ["game.godot", "TXT", "game.godot"],
   ["game.zip", "RPGMAKER_RGSS", "game"],
 ])("译文输出路径只由资产身份和类型决定：%s", (file, type, expected) => {
   expect(source_file_output_path(file, type)).toBe(expected);
@@ -44,6 +142,26 @@ it.each(["game", ".zip", "folder/.zip", "../game.zip", "game:stream.zip", "game.
     expect(() => source_file_output_path(file, "RPGMAKER_MV_MZ")).toThrow();
   },
 );
+
+it.each([
+  ["game.rpgmaker", "GODOT"],
+  ["game.godot", "RPGMAKER_MV_MZ"],
+  ["game.wolfrpg", "RPGMAKER_RGSS"],
+  ["game.godot", "WOLFRPG"],
+  [".godot", "GODOT"],
+  ["folder/.rpgmaker", "RPGMAKER_RGSS"],
+])("拒绝不匹配的游戏后缀和空名称：%s (%s)", (file, type) => {
+  expect(() => source_file_output_path(file, type)).toThrow(
+    expect.objectContaining({ code: "request.validation_failed" }),
+  );
+});
+
+it("新旧后缀的不同资产不能共享输出目录，也不能借同名替换豁免冲突", () => {
+  const index = new SourceFilePathIndex();
+  index.add("game.zip", "GODOT");
+  expect(index.find_conflict("game.godot", "GODOT", true)).toBe("game");
+  expect(() => index.add("game.godot", "GODOT")).toThrow();
+});
 
 it.each(["game/readme.txt", "GAME", "game.zip/child.txt"])(
   "资产路径和译文输出路径都拒绝冲突：%s",

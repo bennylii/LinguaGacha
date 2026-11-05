@@ -1,0 +1,123 @@
+import { GameDirectoryOperations } from "../shared/game/game-directory-operations";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { expect, it } from "vitest";
+import {
+  compiled_nodes,
+  create_renpy_fixture,
+  dictionary,
+  object,
+  opcode,
+  tuple,
+  import_metadata,
+} from "../../../test/renpy-fixture";
+import { GameFormat, read_game_container } from "../shared/game/format";
+import { read_renpy_metadata } from "./item";
+import { pickle_string } from "./pickle";
+import { read_renpy_projections } from "./readable";
+import { create_renpy_adapter } from "./renpy-format";
+import { collect_renpy_files, discover_renpy_source } from "./source";
+
+type Projection = {
+  strings: {
+    key: string;
+    text: string;
+    usage: string;
+    write_mode: string;
+    line: number | null;
+    source_line: number | null;
+  }[];
+};
+
+/** 第 3 行起的 Python 块与同在第 7 行的两句对白（三引号对白拆分），行号来自编译数据。 */
+function lines_fixture(): Buffer {
+  const identity = (serial: number) =>
+    tuple(pickle_string("game/lines.rpy"), opcode(0x4b, 1), opcode(0x4b, serial));
+  const code = object(
+    "PyCode",
+    tuple(
+      opcode(0x4b, 1),
+      pickle_string("\nx = f'{n}'\ny = Text('Hi')"),
+      tuple(pickle_string("game/lines.rpy"), opcode(0x4b, 3)),
+      pickle_string("exec"),
+    ),
+  );
+  return compiled_nodes([
+    object("Python", dictionary({ name: identity(1), linenumber: opcode(0x4b, 3), code })),
+    object(
+      "Say",
+      dictionary({
+        name: identity(2),
+        linenumber: opcode(0x4b, 7),
+        who: pickle_string("e"),
+        what: pickle_string("Hello"),
+      }),
+    ),
+    object(
+      "Say",
+      dictionary({
+        name: identity(3),
+        linenumber: opcode(0x4b, 7),
+        who: pickle_string("e"),
+        what: pickle_string("World"),
+      }),
+    ),
+  ]);
+}
+
+it("可读视图按原行号还原脚本，字符串的视图行与原稿行分开给出，键与条目一致", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-renpy-readable-"));
+  const native = create_renpy_fixture(temp.path);
+  const game = (await discover_renpy_source(temp.path, native))!;
+  const data = collect_renpy_files(game, native);
+  const members = new Map([...data, ["game/lines.rpyc", lines_fixture()]]);
+  const container = await new GameFormat(
+    new GameDirectoryOperations(),
+    create_renpy_adapter(),
+    native,
+  ).create_container(
+    members,
+    "demo.renpy",
+    [...members.keys()].join("\n"),
+    undefined,
+    await import_metadata(game, data, native),
+  );
+  const { input } = await read_game_container(container, "demo.renpy", true);
+  const outputs = new Map<string, string>();
+  for await (const [name, bytes] of read_renpy_projections(input))
+    outputs.set(name, Buffer.from(bytes).toString());
+  const projection = (name: string) =>
+    JSON.parse(outputs.get(name + ".reference.json")!) as Projection;
+
+  for (const name of input.keys()) expect(outputs.has(name)).toBe(false);
+
+  const script = outputs.get("game/lines.rpyc.reference.rpy")!.split("\n");
+  expect(script.slice(2, 8)).toEqual([
+    "python:",
+    "    x = f'{n}'",
+    "    y = Text('Hi')",
+    "",
+    'e "Hello"',
+    'e "World"',
+  ]);
+  const strings = projection("game/lines.rpyc").strings;
+  expect(
+    strings.map(({ text, write_mode, line, source_line }) => [text, write_mode, line, source_line]),
+  ).toEqual([
+    ["f'{n}'", "source", 4, 4],
+    ["Hi", "text", 5, 5],
+    ["Hello", "text", 7, 7],
+    ["World", "text", 8, 7],
+  ]);
+
+  const read = (await create_renpy_adapter().read_asset(input)).find(
+    (entry) => entry.name === "game/script.rpyc",
+  );
+  if (!read?.ok) throw new Error("Expected Ren’Py script items");
+  expect(
+    projection("game/script.rpyc")
+      .strings.map((entry) => entry.key)
+      .sort(),
+  ).toEqual(read.read.items.map((item) => read_renpy_metadata(item.extra_field).key).sort());
+});

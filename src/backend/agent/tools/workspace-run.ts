@@ -4,6 +4,7 @@ import type { ToolRegistration } from "@earendil-works/pi-durable";
 
 import { define_agent_tool, agent_tool_result } from "../tool-definition";
 import { AGENT_WORKSPACE_CONTRACT } from "./contract";
+import { AGENT_WORKSPACE_PATHS } from "../workspace/paths";
 import {
   AGENT_WORKSPACE_RUN_ROOT,
   AGENT_WORKSPACE_RUNTIME_POLICY,
@@ -27,8 +28,9 @@ export function create_agent_workspace_run_tool(options: {
       "- 每次调用启动独立 Node.js 进程，跨调用的数据通过文件交接。",
       `- 每次执行的脚本与输出由宿主自动保存到 \`${AGENT_WORKSPACE_RUN_ROOT}/\`。`,
       "- 当前工作目录（`cwd`）是工作区根目录，文件相对路径从这里解析，脚本内的相对 `import` 从脚本文件所在目录解析。",
-      `- 预装包：${app_package.workspacePackages.join("、")}，通过标准 import 使用。`,
+      `- 预装包：${app_package.workspaceRuntimePackages.agent.join("、")}，通过标准 import 使用。`,
       "  - `@lg/workspace/item-contexts` 提供 `queryItemContexts`，用于取得条目的邻近语境。",
+      "  - `@lg/workspace/term-search` 提供 `searchTerms`，用于检索条目和术语表中的已有译法。",
       "  - `@lg/text` 提供与应用共用的字面匹配能力。",
       "  - `@lg/pdf` 提供与正式输出共用的文档模板。",
       "- 包版本、类型和详细 API 可从 `node_modules` 中读取。依赖由应用管理，禁止自行安装或下载依赖。",
@@ -60,6 +62,7 @@ export function create_agent_workspace_run_tool(options: {
       "### 工作区数据",
       "",
       "- `sources/<file_path>`：工程原稿，只读。",
+      `- \`${AGENT_WORKSPACE_PATHS.sourceIssues}\` 是 \`sources\` 的准备过程遇到的异常项目记录，只读，文件为空表示没有异常，结论依赖原稿完整时先读取该文件。`,
       "- `datasets` 都是只读快照，修改写入对应的 `changes` 后由 `workspace_apply` 提交。",
       ...Object.entries(AGENT_WORKSPACE_CONTRACT.datasets).map(([name, dataset]) => {
         const operations = Object.keys(AGENT_WORKSPACE_CONTRACT.changes[name] ?? {});

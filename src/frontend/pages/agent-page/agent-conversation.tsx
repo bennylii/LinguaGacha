@@ -31,12 +31,13 @@ import { api_fetch } from "@frontend/app/desktop/desktop-api";
 import { useAppNavigation } from "@frontend/app/navigation/navigation-context";
 import { AppConfirmDialog } from "@frontend/widgets/app-alert-dialog";
 import { AppButton } from "@frontend/widgets/app-button";
-import { resolve_shortcut_platform } from "@frontend/widgets/interactions/keyboard-shortcuts";
+import { get_shortcut_aria_keys } from "@frontend/widgets/interactions/keyboard-shortcuts";
 import { ShortcutTooltipRow } from "@frontend/widgets/interactions/shortcut-kbd";
 import { useActionShortcut } from "@frontend/widgets/interactions/use-action-shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@frontend/shadcn/tooltip";
 import {
   useAgentControls,
+  useAgentChatId,
   useAgentEntry,
   useAgentInput,
   useAgentQueue,
@@ -51,7 +52,7 @@ import { AgentInputQueue } from "./agent-input-queue";
 import { type AgentMentionInstruction } from "./agent-mention";
 import { AgentTaskStatus } from "./agent-task-status";
 import { AgentTimeline } from "./agent-timeline";
-import { useAgentFollowLatest } from "./agent-scroll";
+import { useAgentFollowLatest, is_near_scroll_top } from "./agent-scroll";
 import { useAgentInputTransition } from "./use-agent-input-transition";
 import "./agent-page.css";
 
@@ -73,7 +74,7 @@ const AGENT_TASK_SUGGESTIONS = [
     Icon: BookOpenText,
   },
   {
-    skillName: "translation",
+    skillName: "proofreading",
     suggestionKey: "agent_page.empty.suggestions.review_translation",
     Icon: ScanText,
   },
@@ -82,6 +83,15 @@ const AGENT_TASK_SUGGESTIONS = [
 type PendingThinkingOffAction =
   | { kind: "send"; message: AgentMessageInput }
   | { kind: "select_model"; change: ModelSelectionInput };
+/** 更早页前插时记录视口首条消息，按元素位移恢复阅读位置。 */
+type AgentPrependAnchor = {
+  element: HTMLElement | null;
+  top: number | null;
+  scrollHeight: number;
+  scrollTop: number;
+};
+
+const AGENT_SCROLL_ENTRY_SELECTOR = ".agent-message-frame, .agent-process-entry";
 
 /** 会话事实由跨路由 Chat Store 提供，页面组合交互入口并持有原位编辑状态。 */
 export function AgentConversation({ active = true }: { active?: boolean }): JSX.Element {
@@ -89,6 +99,7 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
 
   const timeline = useAgentTimeline();
   const controls = useAgentControls();
+  const chat_id = useAgentChatId();
   const { inputQueue } = useAgentQueue();
   const { skills } = useAgentSkills();
   const input = useAgentInput();
@@ -112,6 +123,9 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
     handle_scroll: handle_conversation_scroll,
   } = useAgentFollowLatest(true);
   const [follow_reset_revision, set_follow_reset_revision] = useState(0);
+  const loading_earlier_ref = useRef(false); // 防止滚动与按钮在同一页请求上重复触发
+  const prepend_anchor_ref = useRef<AgentPrependAnchor | null>(null);
+  const first_fill_chat_ref = useRef<string | null>(null); // 每个会话最多自动补一页
   const [fork_round_id, set_fork_round_id] = useState<string | null>(null); // 弹窗绑定轮次身份，提交时由后端重新校验
   const [reset_dialog_open, set_reset_dialog_open] = useState(false);
   const [pending_thinking_off_action, set_pending_thinking_off_action] =
@@ -127,15 +141,42 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
     }
   }, [active]);
 
+  /** 滚动与按钮共用同一页请求，记录前插锚点供布局阶段恢复。 */
+  const load_earlier = useCallback(
+    async (target: HTMLElement): Promise<void> => {
+      if (loading_earlier_ref.current || !timeline.hasEarlier) return;
+      loading_earlier_ref.current = true;
+      const element = read_visible_entry(target);
+      prepend_anchor_ref.current = {
+        element,
+        top: element?.getBoundingClientRect().top ?? null,
+        scrollHeight: target.scrollHeight,
+        scrollTop: target.scrollTop,
+      };
+      try {
+        await agent_actions.loadEarlier();
+      } finally {
+        loading_earlier_ref.current = false;
+      }
+    },
+    [agent_actions, timeline.hasEarlier],
+  );
+
   /** 页面级快捷键与按钮共享同一条跟随切换入口。 */
   const toggle_follow_latest = useCallback((): void => {
     if (follow_latest) {
       deactivate_conversation_follow();
       return;
     }
+    agent_actions.trimTimeline();
     set_follow_reset_revision((revision) => revision + 1);
     activate_conversation_follow(conversation_ref.current);
-  }, [activate_conversation_follow, deactivate_conversation_follow, follow_latest]);
+  }, [
+    activate_conversation_follow,
+    agent_actions,
+    deactivate_conversation_follow,
+    follow_latest,
+  ]);
 
   useActionShortcut({
     action: "follow_latest",
@@ -195,6 +236,36 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
     follow_conversation_content(conversation);
     return () => observer.disconnect();
   }, [active, follow_conversation_content]);
+
+  // 前插更早页后按阅读锚点位移恢复位置；底部并发追加不参与前插高度。
+  useLayoutEffect(() => {
+    const conversation = conversation_ref.current;
+    const anchor = prepend_anchor_ref.current;
+    if (conversation === null || anchor === null) return;
+    prepend_anchor_ref.current = null;
+    const restore = (): void => {
+      const element = anchor.element;
+      if (element !== null && element.isConnected && anchor.top !== null) {
+        const delta = element.getBoundingClientRect().top - anchor.top;
+        if (delta !== 0) conversation.scrollTop += delta;
+        return;
+      }
+      conversation.scrollTop = conversation.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+    };
+    restore();
+    const frame = requestAnimationFrame(restore);
+    return () => cancelAnimationFrame(frame);
+  }, [timeline.nextCursor]);
+
+  // 首屏窗口填不满时最多自动补一页，避免空荡的初始画面。
+  useEffect(() => {
+    const conversation = conversation_ref.current;
+    if (!active || conversation === null || !timeline.hasEarlier) return;
+    if (conversation.scrollHeight > conversation.clientHeight) return;
+    if (first_fill_chat_ref.current === chat_id) return;
+    first_fill_chat_ref.current = chat_id;
+    void load_earlier(conversation);
+  }, [active, chat_id, load_earlier, timeline.entryIds.length, timeline.hasEarlier]);
 
   /** 命令失败只投影为页面 Toast，不写回共享会话状态。 */
   const show_command_error = useCallback(
@@ -361,7 +432,7 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
         input.replace_history(target.message.text, message.text);
         return;
       }
-      await agent_actions.reviseLatestRound(target.entryId, message);
+      await agent_actions.reviseRound(target.entryId, message);
       if (target.role === "user") {
         input.replace_history(target.message.text, message.text);
       }
@@ -451,6 +522,11 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
     });
   }, [agent_actions, show_command_error]);
 
+  /** 取消自动续跑等待复用停止入口，等待期间没有正在执行的轮次。 */
+  const cancel_auto_resume = useCallback((): void => {
+    void stop();
+  }, [stop]);
+
   /** 时间线批注写入普通 Composer 草稿，由用户继续编辑和发送。 */
   const add_response_annotation = useCallback(
     (annotation: Parameters<AgentComposerHandle["add_response_annotation"]>[0]): void => {
@@ -496,9 +572,6 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
   ]);
 
   const follow_latest_label = t("agent_page.action.follow_latest");
-  // 可访问性属性使用标准键名。Tooltip 继续显示用户熟悉的平台符号。
-  const follow_latest_aria_shortcut =
-    resolve_shortcut_platform() === "mac" ? "Meta+E" : "Control+E";
   const follow_latest_status = t("app.tooltip.value", {
     TITLE: follow_latest_label,
     VALUE: t(follow_latest ? "app.state.enabled" : "app.state.disabled"),
@@ -514,7 +587,7 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
             variant="outline"
             aria-label={follow_latest_label}
             aria-pressed={follow_latest}
-            aria-keyshortcuts={follow_latest_aria_shortcut}
+            aria-keyshortcuts={get_shortcut_aria_keys("follow_latest")}
             onClick={toggle_follow_latest}
           >
             <ArrowDownToLine aria-hidden="true" />
@@ -542,7 +615,11 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
         aria-label={t("agent_page.title")}
         data-following={follow_latest || undefined}
         onScroll={(event) => {
-          if (active) handle_conversation_scroll(event.currentTarget);
+          if (!active) return;
+          const target = event.currentTarget;
+          handle_conversation_scroll(target);
+          // 跟随状态也可能被一次拖到顶部，此时本帧的 follow_latest 尚未更新。
+          if (is_near_scroll_top(target)) void load_earlier(target);
         }}
       >
         <div ref={conversation_content_ref} className="agent-page__conversation-content">
@@ -608,6 +685,9 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
               on_compact={compact_context}
               follow_reset_revision={follow_reset_revision}
               on_continue={continue_latest_round}
+              auto_resume={controls.autoResume}
+              on_cancel_auto_resume={cancel_auto_resume}
+              auto_continue={controls.autoContinue}
               on_edit={start_edit}
               render_entry_editor={render_entry_editor}
               on_add_annotation={add_response_annotation}
@@ -766,4 +846,16 @@ export function AgentConversation({ active = true }: { active?: boolean }): JSX.
       />
     </div>
   );
+}
+
+/** 读取视口首条内容条目作为前插历史的阅读位置锚点。轮次头位于前插点之上，跳过它。 */
+function read_visible_entry(target: HTMLElement): HTMLElement | null {
+  const boundary = target.getBoundingClientRect().top;
+  let first_visible: HTMLElement | null = null;
+  for (const entry of target.querySelectorAll<HTMLElement>(AGENT_SCROLL_ENTRY_SELECTOR)) {
+    if (entry.getBoundingClientRect().bottom <= boundary) continue;
+    first_visible ??= entry;
+    if (!entry.hasAttribute("data-round-header")) return entry;
+  }
+  return first_visible;
 }

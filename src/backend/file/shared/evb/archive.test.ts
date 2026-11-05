@@ -5,6 +5,61 @@ import { expect, it } from "vitest";
 import { NativeFs } from "../../../../native/native-fs";
 import { evb_fixture } from "../../../../test/evb-fixture";
 import { read_evb, extract_evb_member } from "./archive";
+import { BINARY_IO_CHUNK_BYTES } from "../binary";
+
+it("非 EVB 的 PE 节布局留给后续引擎识别，EVB 标志仍触发完整校验", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-evb-identity-"));
+  const bytes = evb_fixture(new Map([["data/System.json", Buffer.from("{}")]]));
+  const marker = bytes.indexOf(Buffer.from(".enigma1"));
+  expect(marker).toBeGreaterThan(0);
+  bytes.writeUInt32LE(0xffffffff, marker + 16);
+  const source = path.join(temp.path, "game.exe"),
+    native = new NativeFs();
+  fs.writeFileSync(source, bytes);
+  const invalid = await native.open_file(source, "r");
+  try {
+    await expect(read_evb(invalid)).rejects.toThrow("Truncated PE section");
+  } finally {
+    await invalid.close();
+  }
+  Buffer.from("pck\0\0\0\0\0").copy(bytes, marker);
+  fs.writeFileSync(source, bytes);
+  const other = await native.open_file(source, "r");
+  try {
+    expect(await read_evb(other)).toBeNull();
+  } finally {
+    await other.close();
+  }
+});
+
+it.each(["7_80", "10_70"] as const)("EVB %s 的目录和载荷跨读取窗口保持完整", async (variant) => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-evb-window-"));
+  const files = new Map(
+    Array.from({ length: 6000 }, (_, i): [string, Buffer] => [
+      `${String(i).padStart(4, "0")}-${"name".repeat(16)}`,
+      Buffer.from("x"),
+    ]),
+  );
+  files.set(
+    "large.bin",
+    Buffer.alloc(BINARY_IO_CHUNK_BYTES + 17).fill(
+      Buffer.from(Array.from({ length: 251 }, (_, i) => i)),
+    ),
+  );
+  const source = path.join(temp.path, "packed.exe");
+  fs.writeFileSync(source, evb_fixture(files, false, variant));
+  const native = new NativeFs(),
+    handle = await native.open_file(source, "r");
+  try {
+    const archive = (await read_evb(handle))!;
+    expect(archive.members.map((member) => member.name)).toEqual([...files.keys()]);
+    const output = path.join(temp.path, "large.bin");
+    await extract_evb_member(handle, archive.members.at(-1)!, output, native);
+    expect(fs.readFileSync(output).equals(files.get("large.bin")!)).toBe(true);
+  } finally {
+    await handle.close();
+  }
+});
 
 it.each([
   [false, false],
@@ -28,7 +83,7 @@ it.each([
     for (const member of archive.members) {
       const target = path.join(temp.path, "out", member.name);
       await extract_evb_member(handle, member, target, native);
-      expect(fs.readFileSync(target)).toEqual(files.get(member.name));
+      expect(fs.readFileSync(target).equals(files.get(member.name)!), member.name).toBe(true);
     }
   } finally {
     await handle.close();

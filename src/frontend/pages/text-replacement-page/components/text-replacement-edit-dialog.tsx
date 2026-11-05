@@ -2,16 +2,14 @@ import { type JSX, useEffect, useRef } from "react";
 import { CaseSensitive, Regex } from "lucide-react";
 
 import { useI18n } from "@frontend/app/locale/locale-context";
-import { useActionShortcut } from "@frontend/widgets/interactions/use-action-shortcut";
+import { Card } from "@frontend/shadcn/card";
 import type {
   TextReplacementDialogMode,
   TextReplacementEntryDraft,
 } from "@frontend/pages/text-replacement-page/types";
-import { AppButton } from "@frontend/widgets/app-button";
 import { BooleanSegmentedToggle } from "@frontend/widgets/boolean-segmented-toggle";
 import { AppEditor, type AppEditorHandle } from "@frontend/widgets/app-editor/app-editor";
 import { AppPageDialog } from "@frontend/widgets/app-page-dialog";
-import { ShortcutKbd } from "@frontend/widgets/interactions/shortcut-kbd";
 
 type TextReplacementEditDialogProps = {
   open: boolean;
@@ -34,55 +32,32 @@ export function TextReplacementEditDialog(props: TextReplacementEditDialogProps)
   const disabled = props.readonly || props.saving;
   const title = props.mode === "create" ? t("app.action.create") : t("app.action.edit");
 
-  useActionShortcut({
-    action: "save",
-    enabled: props.open && !disabled,
-    on_trigger: () => {
-      if (props.invalid) editor_ref.current?.focus();
-      void props.on_save();
-    },
-  });
-
   return (
     <AppPageDialog
       open={props.open}
       title={title}
       size="viewport"
-      dismissBehavior={props.saving ? "blocked" : "escape-only"}
+      dismissBehavior="escape-only"
+      submitting={props.saving}
       onClose={props.on_close}
       bodyClassName="overflow-hidden p-0"
-      footer={
-        <>
-          <AppButton
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={props.saving}
-            onClick={() => {
-              void props.on_close();
-            }}
-          >
-            {t("app.action.cancel")}
-            <ShortcutKbd action="cancel" />
-          </AppButton>
-          <AppButton
-            type="button"
-            size="sm"
-            disabled={disabled}
-            onClick={() => {
-              if (props.invalid) editor_ref.current?.focus();
-              void props.on_save();
-            }}
-          >
-            {t("app.action.save")}
-            <ShortcutKbd action="save" className="bg-background/18 text-primary-foreground" />
-          </AppButton>
-        </>
-      }
+      primaryAction={{
+        label: t("app.action.save"),
+        shortcut: "save",
+        disabled: props.readonly,
+        onSelect: () => {
+          if (props.invalid) editor_ref.current?.focus();
+          return props.on_save();
+        },
+      }}
     >
       <div className="text-replacement-page__dialog-scroll">
         <div className="text-replacement-page__dialog-form">
-          <div className="text-replacement-page__dialog-main-panel">
+          <Card
+            variant="group"
+            render={<div />}
+            className="text-replacement-page__dialog-main-panel"
+          >
             <div className="text-replacement-page__dialog-main-panel-content">
               <div className="text-replacement-page__dialog-section">
                 <span className="text-replacement-page__dialog-section-title font-medium">
@@ -118,10 +93,14 @@ export function TextReplacementEditDialog(props: TextReplacementEditDialogProps)
                 />
               </div>
             </div>
-          </div>
+          </Card>
 
           <div className="text-replacement-page__dialog-rule-grid">
-            <div className="text-replacement-page__dialog-rule-item">
+            <Card
+              variant="group"
+              render={<div />}
+              className="text-replacement-page__dialog-rule-item"
+            >
               <div className="text-replacement-page__dialog-rule-copy">
                 <span className="text-replacement-page__rule-badge-wrap" aria-hidden="true">
                   <span
@@ -145,9 +124,13 @@ export function TextReplacementEditDialog(props: TextReplacementEditDialogProps)
                   });
                 }}
               />
-            </div>
+            </Card>
 
-            <div className="text-replacement-page__dialog-rule-item">
+            <Card
+              variant="group"
+              render={<div />}
+              className="text-replacement-page__dialog-rule-item"
+            >
               <div className="text-replacement-page__dialog-rule-copy">
                 <span className="text-replacement-page__rule-badge-wrap" aria-hidden="true">
                   <span
@@ -171,7 +154,7 @@ export function TextReplacementEditDialog(props: TextReplacementEditDialogProps)
                   });
                 }}
               />
-            </div>
+            </Card>
           </div>
         </div>
       </div>

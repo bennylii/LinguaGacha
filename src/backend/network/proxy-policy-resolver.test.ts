@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { NetworkProxyPolicy } from "../../domain/setting";
 import { create_proxy_policy_resolver } from "./proxy-policy-resolver";
-import { parse_system_proxy_route } from "./system-proxy-http-client";
+import { parse_proxy_route } from "./proxy-http-client";
 
 describe("create_proxy_policy_resolver", () => {
   it("直连模式给出 DIRECT 且不询问宿主", async () => {
@@ -25,7 +25,7 @@ describe("create_proxy_policy_resolver", () => {
 
     expect(rules).toBe("PROXY 10.0.0.5:1080");
     expect(host).not.toHaveBeenCalled();
-    expect(parse_system_proxy_route(rules)).toEqual({
+    expect(parse_proxy_route(rules)).toEqual({
       kind: "proxy",
       uri: "http://10.0.0.5:1080/",
     });

@@ -1,14 +1,11 @@
-import { read_wolf_metadata } from "../file/wolfrpg/item";
-import { read_rgss_metadata } from "../file/rpgmaker-rgss/item";
-import { read_rpgmaker_metadata } from "../file/rpgmaker-mv-mz/item";
+import { GAME_ENGINES } from "../file/shared/game/engines";
+import { is_game_file_type } from "../../shared/project-source-formats";
 import type { PDFDocumentRecord } from "../../shared/pdf";
-import type { AppSettingService } from "../app/app-setting-service";
 import type { ComputeWorkerClient } from "../worker/compute-worker-client";
 import type { CacheReadPort } from "./cache-types";
 import * as AppErrors from "../../shared/error";
 import { type ProjectItemPublicRecord, normalize_item_name_field } from "../../domain/item";
-import { read_json_record, type JsonValue } from "../../domain/json";
-import { normalize_setting_snapshot } from "../../domain/setting";
+import { read_json_record } from "../../domain/json";
 import type {
   ProofreadingContextQuery,
   ProofreadingFilterPanelQuery,
@@ -66,7 +63,6 @@ export type ProofreadingCacheResult<TData> = {
 /** 校对查询共用当前工程缓存，质量评估按会话、依赖修订和文本处理配置同步。 */
 export class ProofreadingCache {
   private readonly cache: CacheReadPort; // 完整条目与质量同步输入共用当前工程事实。
-  private readonly app_setting_service: AppSettingService; // 语言缺省值来自当前应用设置
   private readonly worker_client: ComputeWorkerClient; // 质量评估在 worker 中执行
   private readonly reader: ReturnType<typeof createProofreadingReader>; // 持有校对索引与 GUI 列表视图运行态
   private readonly read_pages: (projectPath: string) => Promise<PDFDocumentRecord[]>; // 只在页面身份未命中时补读数据库事实。
@@ -78,30 +74,25 @@ export class ProofreadingCache {
   private sync_promises = new Map<string, Promise<ProofreadingSyncState>>(); // 合并同身份并发同步
 
   /**
-   * 注入共享缓存、设置、worker 与页面只读入口；本类只维护查询运行态。
+   * 条目与页面事实由注入的只读入口提供。
    */
   public constructor(options: {
     cache: CacheReadPort;
-    appSettingService: AppSettingService;
     workerClient: ComputeWorkerClient;
     reader: ReturnType<typeof createProofreadingReader>;
     readPages: (projectPath: string) => Promise<PDFDocumentRecord[]>;
   }) {
     this.cache = options.cache;
-    this.app_setting_service = options.appSettingService;
     this.worker_client = options.workerClient;
     this.reader = options.reader;
     this.read_pages = options.readPages;
   }
 
   /**
-   * 确保指定语言身份完成全量同步并返回当前 revision。
+   * 确保当前项目语言身份完成全量同步并返回当前 revision。
    */
-  public async sync(input: {
-    sourceLanguage?: JsonValue;
-    targetLanguage?: JsonValue;
-  }): Promise<ProofreadingCacheResult<ProofreadingSyncState>> {
-    const identity = this.build_identity(input);
+  public async sync(): Promise<ProofreadingCacheResult<ProofreadingSyncState>> {
+    const identity = this.build_identity();
     const syncState = await this.ensure_synced(identity);
     return this.with_identity(identity, syncState, syncState.revisions);
   }
@@ -196,7 +187,7 @@ export class ProofreadingCache {
   }
 
   /**
-   * 清理指定项目的校对评估运行态；未传项目时清掉当前身份。
+   * 按指定项目清理评估运行态，缺省时清理当前身份。
    */
   public clearProject(projectPath?: string): void {
     if (
@@ -274,13 +265,13 @@ export class ProofreadingCache {
    * 查询前确保当前项目身份已完成同步。
    */
   private async query_current<TData>(read: () => TData): Promise<ProofreadingCacheResult<TData>> {
-    const identity = this.build_identity({});
+    const identity = this.build_identity();
     const sync_state = await this.ensure_synced(identity);
     return this.with_identity(identity, read(), sync_state.revisions);
   }
 
   /**
-   * 同一身份复用进行中的 Promise；未命中时经 worker 和列表读取器完整重建。
+   * 同一身份复用进行中的 `Promise`。新身份经 worker 和列表读取器重建。
    */
   private async ensure_synced(identity: ProofreadingCacheIdentity): Promise<ProofreadingSyncState> {
     const session_key = JSON.stringify([identity.key.projectPath, identity.key.sessionEpoch]);
@@ -313,10 +304,7 @@ export class ProofreadingCache {
           this.sync_promises.get(identity.keyString) !== promise ||
           current.projectPath !== identity.key.projectPath ||
           current.epoch !== identity.key.sessionEpoch ||
-          this.build_identity({
-            sourceLanguage: identity.key.processingConfig.source_language,
-            targetLanguage: identity.key.processingConfig.target_language,
-          }).keyString !== identity.keyString
+          this.build_identity().keyString !== identity.keyString
         ) {
           throw new AppErrors.AppError("request.validation_failed", {
             diagnostic_context: { reason: "stale_proofreading_sync" },
@@ -375,20 +363,16 @@ export class ProofreadingCache {
   }
 
   /** 用会话身份、依赖修订和文本处理配置构造同步身份。 */
-  private build_identity(input: {
-    sourceLanguage?: JsonValue;
-    targetLanguage?: JsonValue;
-  }): ProofreadingCacheIdentity {
+  private build_identity(): ProofreadingCacheIdentity {
     const sectionRevisions = this.cache.readSectionRevisions();
     const snapshot = this.cache.snapshot();
     if (snapshot.projectPath === "") {
       throw new AppErrors.AppError("project.not_loaded");
     }
-    const settings = normalize_setting_snapshot(this.app_setting_service.read_setting());
+    const languages = this.cache.languages.readBlock();
     const processingConfig = normalize_text_processing_config({
-      source_language: String(input.sourceLanguage ?? settings.source_language),
-      target_language: String(input.targetLanguage ?? settings.target_language),
-      clean_ruby: settings.clean_ruby,
+      source_language: languages.source_language,
+      target_language: languages.target_language,
     });
     const revisions = {
       items: Number(sectionRevisions.items ?? 0),
@@ -476,12 +460,8 @@ export class ProofreadingCache {
 
   /** 格式定位信息只在校对入口解释，普通格式与缺少定位的内容归入无内部路径分组。 */
   private read_internal_file_path(item: ProjectItemPublicRecord): string | null {
-    if (item.file_type === "WOLFRPG")
-      return read_wolf_metadata(item.extra_field).internal_file_path;
-    if (item.file_type === "RPGMAKER_RGSS")
-      return read_rgss_metadata(item.extra_field).internal_file_path;
-    if (item.file_type === "RPGMAKER_MV_MZ")
-      return read_rpgmaker_metadata(item.extra_field).internal_file_path;
+    if (is_game_file_type(item.file_type))
+      return GAME_ENGINES[item.file_type].read_metadata(item.extra_field).internal_file_path;
     const extra = read_json_record(item["extra_field"]);
     const value =
       item["file_type"] === "TRANS"

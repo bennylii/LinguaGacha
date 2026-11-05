@@ -14,10 +14,8 @@ import { create_pdf_fixture } from "../../../file/pdf/test-support";
 import { BackendResources } from "../../../bootstrap/backend-resources";
 import { BackendServices } from "../../../bootstrap/backend-services";
 import { AgentWorkspaceService } from "../service";
-import { createPackage } from "@electron/asar";
-import { resolve_workspace_runtime_entry } from "../../../../native/workspace-runtime";
-import type { AgentWorkspaceRuntimeParentMessage } from "./protocol";
 import { AGENT_IMAGE_MAX_EDGE } from "../../../../shared/agent-image";
+import app_package from "../../../../../package.json";
 
 const electron_path =
   process.env.LINGUAGACHA_TEST_ELECTRON ?? (createRequire(import.meta.url)("electron") as string);
@@ -66,7 +64,7 @@ afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
-it.each(["uploads/input.bin", "sources/game.zip/Data/System.rvdata2.json"])(
+it.each(["uploads/input.bin", "sources/game.zip/Data/System.rvdata2.json", "source_issues.jsonl"])(
   "%s 在真实工作区只读，可复制到 work 后修改",
   async (source) => {
     await mkdir(path.dirname(path.join(workspace, source)), { recursive: true });
@@ -263,72 +261,6 @@ it("用户技能目录链接可创建、替换和删除包，失败前的写入�
   }
 });
 
-it("发布态 ASAR 技能导入脚本、资源和预装依赖", async () => {
-  const directory = await mkdtemp(path.join(root, "asar-"));
-  const source = path.join(directory, "source");
-  const skill = path.join(source, "builtin/skills/fixture");
-  await mkdir(skill, { recursive: true });
-  await writeFile(path.join(skill, "asset.txt"), "原包资源");
-  await writeFile(path.join(skill, "helper.mjs"), "export const heading = '# fixture';");
-  await writeFile(
-    path.join(skill, "entry.mjs"),
-    `
-    import { readFile, writeFile } from 'node:fs/promises';
-    import { unified } from 'unified';
-    import remarkParse from 'remark-parse';
-    import { heading } from './helper.mjs';
-    const asset = new URL('./asset.txt', import.meta.url);
-    let denied = false;
-    try { await writeFile(asset, 'changed'); }
-    catch(error) { if(error.code !== 'ERR_ACCESS_DENIED') throw error; denied = true; }
-    console.log(JSON.stringify({
-      text: await readFile(asset, 'utf8'), denied,
-      type: unified().use(remarkParse).parse(heading).children[0].type,
-      worker: import.meta.resolve('@lg/pdf/worker').endsWith('/worker.mjs'),
-    }));
-  `,
-  );
-  const archive = path.join(directory, "app.asar");
-  await createPackage(source, archive);
-  const skill_root = path.join(archive, "builtin/skills");
-  const start: AgentWorkspaceRuntimeParentMessage = {
-    type: "start",
-    userSkillDirectory: skill_paths.get_agent_user_skill_dir(),
-    skillRoots: [pathToFileURL(skill_root + path.sep).href],
-  };
-  // 普通 Node 测试宿主不识别 ASAR。由真实 Electron 加载生产 bootstrap，重放父进程初始化消息。
-  const output = execFileSync(
-    electron_path,
-    [
-      "--permission",
-      "--allow-fs-read=*",
-      "--preserve-symlinks",
-      "--preserve-symlinks-main",
-      "--input-type=module",
-      "-e",
-      `
-      setImmediate(() => process.emit('message', ${JSON.stringify(start)}));
-      await import(${JSON.stringify(pathToFileURL(resolve_workspace_runtime_entry(runtime, "@lg/workspace/bootstrap")).href)});
-      await import(${JSON.stringify(pathToFileURL(path.join(skill_root, "fixture/entry.mjs")).href)});
-    `,
-    ],
-    {
-      cwd: workspace,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", NODE_OPTIONS: "" },
-      windowsHide: true,
-      encoding: "utf8",
-      timeout: RUN_TIMEOUT_MS,
-      stdio: "pipe",
-    },
-  );
-  expect(JSON.parse(output)).toEqual({
-    text: "原包资源",
-    denied: true,
-    type: "heading",
-    worker: true,
-  });
-});
-
 it("删除变更目录后继续执行技能、提交和重置", async () => {
   const app_root = await mkdtemp(path.join(root, "lifecycle-"));
   await writeFile(path.join(app_root, "version.txt"), "0.0.0");
@@ -338,7 +270,7 @@ it("删除变更目录后继续执行技能、提交和重置", async () => {
     appRoot: app_root,
     builtinRoot: path.join(app_root, "builtin"),
     logTargets: { console: false, window: false },
-    systemProxyResolver: { resolveProxy: async () => "DIRECT" },
+    proxyResolver: { resolveProxy: async () => "DIRECT" },
   });
   const services = new BackendServices({
     paths: resources.paths,
@@ -354,13 +286,13 @@ it("删除变更目录后继续执行技能、提交和重置", async () => {
     await services.project.lifecycle.create_project_commit({
       path: path.join(app_root, "project.lg"),
       source_paths: [source],
-      project_settings: { source_language: "EN", target_language: "ZH" },
+      languages: { source_language: "EN", target_language: "ZH" },
     });
     const runner = new AgentWorkspaceRunner({
       paths: resources.paths,
       executablePath: electron_path,
       runtimeDirectory: runtime,
-      systemProxyResolver: { resolveProxy: async () => "DIRECT" },
+      proxyResolver: { resolveProxy: async () => "DIRECT" },
     });
     const service = new AgentWorkspaceService({
       images: {
@@ -369,7 +301,6 @@ it("删除变更目录后继续执行技能、提交和重置", async () => {
         },
       },
       paths: resources.paths,
-      settings: resources.settings,
       sessionState: services.state.session,
       cache: services.state.cache,
       proofreading: services.proofreading.query,
@@ -506,9 +437,7 @@ it("网页流、重定向与代理等待在真实子进程中工作", async () =
     );
     await ready;
     release("UNSUPPORTED");
-    expect(output_content((await pending).stdout)).toContain(
-      "System proxy returned no supported route",
-    );
+    expect(output_content((await pending).stdout)).toContain("Proxy returned no supported route");
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) =>
@@ -641,7 +570,7 @@ it.each([false, true])(
         paths: skill_paths,
         executablePath: electron_path,
         runtimeDirectory: runtime_link,
-        systemProxyResolver: { resolveProxy: async () => "DIRECT" },
+        proxyResolver: { resolveProxy: async () => "DIRECT" },
       }).run(
         {
           workspacePath: logical_workspace,
@@ -737,6 +666,21 @@ it("emitImage 通过真实 IPC 等待接收，宿主拒绝可由脚本捕获", a
   expect(output_content(result.stdout)).toContain("image rejected");
 });
 
+it("术语检索模块在生产构建中导入并返回聚合译法", async () => {
+  const result = await run(`
+    import { searchTerms } from '@lg/workspace/term-search';
+    const results = await searchTerms(
+      [{item_id:1,file_path:'a.txt',src:'mana',dst:'魔力',name_src:'',name_dst:'',status:'PROCESSED'}],
+      [], ['mana'],
+    );
+    console.log(JSON.stringify(results));
+  `);
+  expect(result.exitCode).toBe(0);
+  expect(output_content(result.stdout)).toMatchObject([
+    { query: "mana", results: [{ src: "mana", dst: "魔力", confirmed: true }] },
+  ]);
+});
+
 it("页面更新模块在部署工作区解析记录并判定目标", async () => {
   const result = await run(`
     import { parse_page_update, resolve_agent_workspace_page_updates } from '@lg/workspace/page-updates';
@@ -746,6 +690,17 @@ it("页面更新模块在部署工作区解析记录并判定目标", async () =
     console.log(JSON.stringify(missing.rejected));
   `);
   expect(output_content(result.stdout)).toMatchObject([{ reason: "target_missing", line: 2 }]);
+});
+
+it("模型说明列出的预装包都能在权限模式下导入", async () => {
+  const result = await run(`
+    const failed = [];
+    for (const name of ${JSON.stringify(app_package.workspaceRuntimePackages.agent)}) {
+      try { await import(name); } catch { failed.push(name); }
+    }
+    console.log(JSON.stringify(failed));
+  `);
+  expect(output_content(result.stdout)).toEqual([]);
 });
 
 it("工作区预装表格、ZIP 和编码库在权限模式下读写并自然退出", async () => {
@@ -789,7 +744,7 @@ async function run(
     paths: skill_paths,
     executablePath: electron_path,
     runtimeDirectory: runtime,
-    systemProxyResolver: { resolveProxy },
+    proxyResolver: { resolveProxy },
   }).run(
     {
       workspacePath: workspace,

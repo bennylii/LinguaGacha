@@ -1,8 +1,16 @@
+import { create_renpy_fixture } from "../../test/renpy-fixture";
+import { wolf_files } from "../../test/wolf-fixture";
+import { encode } from "./rpgmaker-rgss/marshal";
+import { ruby_array } from "../../test/rgss-fixture";
+import { create_godot_fixture, godot_pack_fixture } from "../../test/godot-fixture";
+import { read_game_container } from "./shared/game/format";
+import { NativeFs } from "../../native/native-fs";
+import { GameDirectoryOperations } from "./shared/game/game-directory-operations";
 import { create_pdf_execution, create_pdf_fixture } from "./pdf/test-support";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { FileFormatService } from "./file-format-service";
 import { SourceFileParsePipeline } from "./source-file-parse-pipeline";
@@ -13,14 +21,102 @@ import { create_item } from "../../domain/item";
 /** 固定解析配置，避免读取本机设置。 */
 function create_format_service(): FileFormatService {
   return new FileFormatService(
+    new GameDirectoryOperations(),
     {
       target_language: "ZH",
-      deduplication_in_bilingual: true,
-      write_translated_name_fields_to_file: true,
     },
     create_pdf_execution(),
   );
 }
+
+it("MV/MZ 配置解析失败仍保留原稿和其他有效条目", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-source-config-failure-"));
+  const native = new NativeFs();
+  native.write_file_sync(path.join(temp.path, "data/System.json"), "{");
+  native.write_file_sync(path.join(temp.path, "data/Good.json"), '{"text":"可靠原文"}');
+  native.write_file_sync(path.join(temp.path, "js/rmmz_core.js"), "");
+  const service = new FileFormatService(
+    new GameDirectoryOperations(),
+    { target_language: "ZH" },
+    async () => null,
+    native,
+  );
+  const result = await new SourceFileParsePipeline(service).parse_import_commands(
+    await service.collect_source_file_entries([temp.path]),
+  );
+  expect(result.failures).toEqual([]);
+  expect(result.directory_changes).toEqual([]);
+  expect(result.file_drafts).toHaveLength(1);
+  expect(result.file_drafts[0]!.parsed_items.some((item) => item.src === "可靠原文")).toBe(true);
+  const container = await read_game_container(result.file_drafts[0]!.content, "game.rpgmaker");
+  expect(await container.members.get("data/System.json")!.async("string")).toBe("{");
+});
+
+it.each(["RPGMAKER_MV_MZ", "RPGMAKER_RGSS", "WOLFRPG", "GODOT", "RENPY"])(
+  "%s 按范围保存附加原稿，解析只消费翻译成员",
+  async (engine) => {
+    using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-additional-"));
+    const native = new NativeFs();
+    const root = path.join(temp.path, "game");
+    const write = (name: string, bytes: string | Uint8Array) =>
+      native.write_file_sync(path.join(root, name), bytes);
+    if (engine === "RPGMAKER_MV_MZ") {
+      write("www/data/System.json", "{}");
+      write("www/data/Custom.json", '{"text":"正式条目"}');
+      write("www/js/rmmz_core.js", "");
+    } else if (engine === "RPGMAKER_RGSS") {
+      write("Game.ini", "[Game]\nScripts=Data/Scripts.rvdata2");
+      write("Data/System.rvdata2", encode(ruby_array([])));
+      write("Data/Scripts.rvdata2", encode(ruby_array([])));
+    } else if (engine === "WOLFRPG") {
+      for (const [name, bytes] of wolf_files()) write(name, bytes);
+    } else if (engine === "GODOT") {
+      write("game.pck", godot_pack_fixture(create_godot_fixture()));
+    } else create_renpy_fixture(root);
+    const prefix = engine === "RPGMAKER_MV_MZ" ? "www/" : engine === "RENPY" ? "game/" : "";
+    const extra = new Map([
+      [prefix + "custom/empty.TXT", Buffer.alloc(0)],
+      [prefix + "custom/broken.json", Buffer.from("{")],
+      [prefix + "custom/bytes.csv", Buffer.from([0xff, 0x80, 0])],
+      [prefix + "custom/table.tsv", Buffer.from("a\tb")],
+      [prefix + "custom/scenario.ks", Buffer.from("[label]\n原稿")],
+    ]);
+    for (const [name, bytes] of extra) write(name, bytes);
+    write("backup_lg/ignored.json", "{}");
+    write("backup_lg_20261025_120000/ignored.txt", "ignored");
+    if (engine === "RPGMAKER_MV_MZ") write("outside.json", "{}");
+    if (engine === "RENPY") {
+      write("outside.json", "{}");
+      write("game/cache/ignored.json", "{}");
+      write("game/saves/ignored.txt", "ignored");
+    }
+    if (engine === "GODOT") write(".godot/ignored.json", "{}");
+    const service = new FileFormatService(
+      new GameDirectoryOperations(),
+      { target_language: "ZH" },
+      create_pdf_execution(),
+      native,
+    );
+    const entries = await service.collect_source_file_entries([root]);
+    const draft = await new SourceFileParsePipeline(service).build_project_draft(entries);
+    expect(draft.failures).toEqual([]);
+    expect(draft.warnings).toEqual([]);
+    expect(draft.files).toHaveLength(1);
+    const file = draft.files[0]!;
+    expect(file.file_type).toBe(engine);
+    expect(new Set(file.additional_files)).toEqual(new Set(extra.keys()));
+    const container = await read_game_container(
+      file.content,
+      file.rel_path,
+      engine === "RENPY",
+      file.additional_files,
+    );
+    for (const [name, bytes] of extra)
+      expect(await container.additional.get(name)!.async("nodebuffer")).toEqual(bytes);
+    if (engine === "RPGMAKER_MV_MZ")
+      expect(draft.items.some((item) => item.src === "正式条目")).toBe(true);
+  },
+);
 
 describe("SourceFileParsePipeline", () => {
   it("字幕工程重开后保持文件身份和正文位置，零条目文件参与导出", async () => {
@@ -54,13 +150,16 @@ describe("SourceFileParsePipeline", () => {
       "ASS",
       "VTT",
     ];
-    const pipeline = new SourceFileParsePipeline(create_format_service());
-    const draft = await pipeline.build_project_draft(source_paths);
-    expect(draft.failed_files).toEqual([]);
+    const service = create_format_service();
+    const pipeline = new SourceFileParsePipeline(service);
+    const draft = await pipeline.build_project_draft(
+      service.assign_source_file_paths(await service.collect_source_file_entries(source_paths)),
+    );
+    expect(draft.failures).toEqual([]);
     expect(draft.files.map((file) => file.file_type)).toEqual(expected_types);
     expect(draft.items.every((item) => item["src"] !== "")).toBe(true);
 
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const project_path = path.join(temp_dir.path, "project.lg");
     try {
       await database.create_project(project_path, "文件类型", (database) => {
@@ -108,7 +207,7 @@ describe("SourceFileParsePipeline", () => {
     }
   });
 
-  it("新建工程草稿跳过不支持格式，并保留支持格式解析失败明细", async () => {
+  it("新建工程草稿保留解析失败的可靠原稿及失败明细", async () => {
     using temp_dir = fs.mkdtempDisposableSync(
       path.join(os.tmpdir(), "linguagacha-source-file-pipeline-"),
     );
@@ -118,16 +217,29 @@ describe("SourceFileParsePipeline", () => {
     fs.writeFileSync(source_file, "原文", "utf-8");
     fs.writeFileSync(broken_json, "{", "utf-8");
     fs.writeFileSync(ignored_file, "noise", "utf-8");
-    const pipeline = new SourceFileParsePipeline(create_format_service());
+    const service = create_format_service();
+    const pipeline = new SourceFileParsePipeline(service);
 
-    const draft = await pipeline.build_project_draft([source_file, broken_json, ignored_file]);
+    const draft = await pipeline.build_project_draft(
+      service.assign_source_file_paths(
+        await service.collect_source_file_entries([source_file, broken_json, ignored_file]),
+      ),
+    );
 
     expect(draft.files.map(({ content: _content, ...file }) => file)).toEqual([
       {
         rel_path: "script.txt",
+        additional_files: [],
         pdf_document: null,
         file_type: "TXT",
         sort_index: 0,
+      },
+      {
+        rel_path: "broken.json",
+        additional_files: [],
+        pdf_document: null,
+        file_type: "NONE",
+        sort_index: 1,
       },
     ]);
     expect(draft.items).toEqual([
@@ -138,14 +250,8 @@ describe("SourceFileParsePipeline", () => {
         file_type: "TXT",
       }),
     ]);
-    expect(draft.failed_files).toEqual([
-      {
-        source_path: broken_json,
-        rel_path: "broken.json",
-        filename: "broken.json",
-        code: "file.parse_failed",
-        message: expect.any(String),
-      },
+    expect(draft.failures).toEqual([
+      { source_path: broken_json, rel_path: "broken.json", error: expect.any(Error) },
     ]);
   });
 
@@ -155,7 +261,8 @@ describe("SourceFileParsePipeline", () => {
     );
     const source_file = path.join(temp_dir.path, "script.txt");
     fs.writeFileSync(source_file, "原文", "utf-8");
-    const pipeline = new SourceFileParsePipeline(create_format_service());
+    const service = create_format_service();
+    const pipeline = new SourceFileParsePipeline(service);
 
     const result = await pipeline.parse_import_commands([
       {
@@ -166,10 +273,9 @@ describe("SourceFileParsePipeline", () => {
       },
     ]);
 
-    expect(result.failed_files).toEqual([]);
+    expect(result.failures).toEqual([]);
     expect(result.file_drafts).toEqual([
       expect.objectContaining({
-        source_path: source_file,
         rel_path: "nested/target.txt",
         file_type: "TXT",
         parsed_items: [
@@ -200,24 +306,25 @@ it("多个带后缀同名游戏混合导入，入口去重并按原目录名导�
     fs.writeFileSync(path.join(root, "Game.exe"), "");
   }
   fs.writeFileSync(path.join(temp.path, "readme.txt"), "说明");
-  const service = new FileFormatService({ target_language: "ZH" }, async () => null);
+  const service = new FileFormatService(
+    new GameDirectoryOperations(),
+    { target_language: "ZH" },
+    async () => null,
+  );
   const inputs = [
     path.join(roots[0]!, "data/System.json"),
     temp.path,
     ...roots,
     path.join(roots[0]!, "Game.exe"),
   ];
-  const draft = await new SourceFileParsePipeline(service).build_project_draft(inputs);
-  expect(draft.failed_files).toEqual([]);
-  expect(
-    (await service.collect_source_file_entries(inputs))
-      .filter((entry) => entry.file_type === "RPGMAKER_MV_MZ")
-      .map((entry) => entry.rel_path),
-  ).toEqual([`${name}.zip`, `${name}.zip`]);
+  const draft = await new SourceFileParsePipeline(service).build_project_draft(
+    service.assign_source_file_paths(await service.collect_source_file_entries(inputs)),
+  );
+  expect(draft.failures).toEqual([]);
   const second_game = draft.files[1]!.rel_path;
-  expect(second_game.slice(name.length)).toMatch(/^_\d{8}_\d{6}\.zip$/u);
+  expect(second_game.slice(name.length)).toMatch(/^_\d{8}_\d{6}\.rpgmaker$/u);
   expect(draft.files.map((file) => [file.rel_path, file.file_type])).toEqual([
-    [`${name}.zip`, "RPGMAKER_MV_MZ"],
+    [`${name}.rpgmaker`, "RPGMAKER_MV_MZ"],
     [second_game, "RPGMAKER_MV_MZ"],
     [path.join(path.basename(temp.path), "readme.txt"), "TXT"],
   ]);
@@ -226,7 +333,7 @@ it("多个带后缀同名游戏混合导入，入口去重并按原目录名导�
       .filter((item) => item.file_type === "RPGMAKER_MV_MZ")
       .map((item) => [item.file_path, item.row]),
   ).toEqual([
-    [`${name}.zip`, 0],
+    [`${name}.rpgmaker`, 0],
     [second_game, 0],
   ]);
   for (const item of draft.items)
@@ -243,7 +350,73 @@ it("多个带后缀同名游戏混合导入，入口去重并按原目录名导�
   });
   expect(
     JSON.parse(
-      fs.readFileSync(path.join(output, second_game.slice(0, -4), "www/data/System.json"), "utf8"),
+      fs.readFileSync(
+        path.join(output, path.basename(second_game, ".rpgmaker"), "www/data/System.json"),
+        "utf8",
+      ),
     ),
   ).toEqual({ currencyUnit: "游戏1译" });
+});
+
+it.each(["before", "during"])("取消发生在解析 %s 时向上传播，不交付零条目草稿", async (phase) => {
+  const service = create_format_service();
+  const controller = new AbortController();
+  const reason = new Error("cancel parse");
+  const parse =
+    phase === "during"
+      ? vi.spyOn(service, "parse_asset").mockImplementationOnce(async () => {
+          controller.abort(reason);
+          throw reason;
+        })
+      : undefined;
+  if (phase === "before") controller.abort(reason);
+  try {
+    await expect(
+      new SourceFileParsePipeline(service).parse_asset_draft(
+        {
+          source_path: "source.txt",
+          rel_path: "saved.txt",
+          file_type: "TXT",
+          content: Buffer.from("原文"),
+          additional_files: [],
+        },
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+  } finally {
+    parse?.mockRestore();
+  }
+});
+
+it.each([true, false])("准备阶段已解析时直接消费结果，读取失败仍保留可靠原稿：%s", async (ok) => {
+  const content = Buffer.from("reliable original");
+  const error = new Error("joint analysis failed");
+  const item = create_item({ file_type: "RENPY", file_path: "game.renpy", row: 0, src: "原文" });
+  const parse_asset = vi.fn();
+  const service = {
+    prepare_source: async () => ({
+      content,
+      additional_files: [],
+      directory_changed: false,
+      diagnostics: [],
+      read: ok
+        ? {
+            ok: true,
+            result: { kind: "items", file_type: "RENPY", items: [item] },
+          }
+        : { ok: false, error },
+    }),
+    parse_asset,
+  } as unknown as FileFormatService;
+  const result = await new SourceFileParsePipeline(service).parse_import_commands([
+    {
+      source: { kind: "failure", error: new Error("unused") },
+      source_path: "game",
+      rel_path: "game.renpy",
+      file_type: "RENPY",
+    },
+  ]);
+  expect(parse_asset).not.toHaveBeenCalled();
+  expect(result.file_drafts).toMatchObject([{ content, parsed_items: ok ? [item] : [] }]);
+  expect(result.failures.map((failure) => failure.error)).toEqual(ok ? [] : [error]);
 });

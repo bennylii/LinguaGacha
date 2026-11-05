@@ -1,13 +1,13 @@
 import { ja_jp_game_font_page } from "./game-font-page";
+import { ja_jp_translation_transfer_page } from "./translation-transfer-page";
 import { ja_jp_toolbox_page } from "./toolbox-page";
 import { ja_jp_skills_page } from "./skills-page";
 import { ja_jp_agent_page } from "./agent-page";
 import { ja_jp_agent_runtime } from "./agent-runtime";
 import { ja_jp_app } from "./app";
-import { ja_jp_basic_settings_page } from "./basic-settings-page";
+import { ja_jp_function_settings_page } from "./function-settings-page";
 import { ja_jp_batch_translation } from "./batch-translation";
 import { ja_jp_custom_prompt_page } from "./custom-prompt-page";
-import { ja_jp_expert_settings_page } from "./expert-settings-page";
 import { ja_jp_glossary_page } from "./glossary-page";
 import { ja_jp_laboratory_page } from "./laboratory-page";
 import { ja_jp_log_window_page } from "./log-window-page";
@@ -18,6 +18,7 @@ import { ja_jp_preset_editor } from "./preset-editor";
 import { ja_jp_project_page } from "./project-page";
 import { ja_jp_proofreading_page } from "./proofreading-page";
 import { ja_jp_quality_rule_editor } from "./quality-rule-editor";
+import { ja_jp_remote_page } from "./remote-page";
 import { ja_jp_task_progress } from "./task-progress";
 import { ja_jp_text_preserve_page } from "./text-preserve-page";
 import { ja_jp_text_replacement_page } from "./text-replacement-page";
@@ -30,14 +31,14 @@ export const ja_jp_messages = {
   agent_page: ja_jp_agent_page,
   agent_runtime: ja_jp_agent_runtime,
   app: ja_jp_app,
-  basic_settings_page: ja_jp_basic_settings_page,
+  function_settings_page: ja_jp_function_settings_page,
   batch_translation: ja_jp_batch_translation,
   custom_prompt_page: ja_jp_custom_prompt_page,
-  expert_settings_page: ja_jp_expert_settings_page,
   glossary_page: ja_jp_glossary_page,
   laboratory_page: ja_jp_laboratory_page,
   toolbox_page: ja_jp_toolbox_page,
   game_font_page: ja_jp_game_font_page,
+  translation_transfer_page: ja_jp_translation_transfer_page,
   log_window_page: ja_jp_log_window_page,
   model_page: ja_jp_model_page,
   post_translation_replacement_page: ja_jp_post_translation_replacement_page,
@@ -46,6 +47,7 @@ export const ja_jp_messages = {
   project_page: ja_jp_project_page,
   proofreading_page: ja_jp_proofreading_page,
   quality_rule_editor: ja_jp_quality_rule_editor,
+  remote_page: ja_jp_remote_page,
   task_progress: ja_jp_task_progress,
   text_preserve_page: ja_jp_text_preserve_page,
   text_replacement_page: ja_jp_text_replacement_page,

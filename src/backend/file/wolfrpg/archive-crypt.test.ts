@@ -1,20 +1,38 @@
 import { createHash } from "node:crypto";
 import { aes_ctr } from "./crypt";
 import { expect, it } from "vitest";
-import { wolf_crypt_vectors } from "../../../test/wolf-crypt-vectors";
-import { wolf_vector } from "../../../test/wolf-crypt-fixture";
-import { aes_keys, derive_archive_key, generate_key, type WolfKeyType } from "./archive-crypt";
+import { wolf_vectors, wolf_vector } from "../../../test/wolf-vectors";
+import {
+  aes_keys,
+  classify_wolf_archive,
+  derive_archive_key,
+  generate_key,
+  type WolfKeyType,
+} from "./archive-crypt";
 
-it.each(wolf_crypt_vectors.keys)("$type 密钥派生匹配独立参考字节", async ({ type, input, key }) => {
-  expect(await derive_archive_key(wolf_vector(input), type as WolfKeyType)).toEqual(
-    Buffer.from(key, "hex"),
-  );
+it.each([
+  [6, 0],
+  [8, 65535],
+])("DXArchive %i crypt=%i 的不支持头部被拒绝", (dx_version, marker) => {
+  const header = Buffer.alloc(64);
+  header.writeUInt16LE(0x5844);
+  header.writeUInt16LE(dx_version, 2);
+  header.writeUInt16LE(marker, 46);
+  expect(() => classify_wolf_archive(header)).toThrow("Unsupported WOLF archive: crypt=" + marker);
+});
+
+it.each(wolf_vectors.keys)("$type 密钥派生匹配独立参考字节", async ({ type, input, key }) => {
+  expect(
+    (await derive_archive_key(wolf_vector(input), type as WolfKeyType)).equals(
+      Buffer.from(key, "hex"),
+    ),
+  ).toBe(true);
   await expect(
     derive_archive_key(wolf_vector(input).subarray(0, 20), type as WolfKeyType),
   ).rejects.toThrow();
 });
 
-it.each(wolf_crypt_vectors.archiveKeys)(
+it.each(wolf_vectors.archiveKeys)(
   "$version 的 tail、内层流和 AES 参数匹配独立向量",
   ({ version, key, output }) => {
     const bytes = Buffer.from(key, "hex"),
@@ -22,8 +40,10 @@ it.each(wolf_crypt_vectors.archiveKeys)(
       pw = Uint8Array.from({ length: 15 }, (_, i) => i + 1);
     const aes = aes_keys(pw, version, tail);
     expect(
-      Buffer.concat([generate_key(pw, false, version, undefined, tail), aes.key, aes.iv]),
-    ).toEqual(wolf_vector(output));
+      Buffer.concat([generate_key(pw, false, version, undefined, tail), aes.key, aes.iv]).equals(
+        wolf_vector(output),
+      ),
+    ).toBe(true);
   },
 );
 

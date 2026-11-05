@@ -4,7 +4,72 @@ import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { NativeFs } from "../../native/native-fs";
 import { evb_fixture } from "../../test/evb-fixture";
+import { godot_pack_fixture, godot_project_fixture } from "../../test/godot-fixture";
+import { rgss_archive_fixture } from "../../test/rgss-archive-fixture";
+import { wolf_files } from "../../test/wolf-fixture";
 import { discover_source, discover_sources } from "./source-discovery";
+
+it.each([
+  ["GODOT", ".godot"],
+  ["RPGMAKER_MV_MZ", ".rpgmaker"],
+  ["RPGMAKER_RGSS", ".rpgmaker"],
+  ["WOLFRPG", ".wolfrpg"],
+])("%s 来源按游戏根目录名生成 %s 资产", async (file_type, extension) => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-source-extension-"));
+  const native = new NativeFs();
+  const root = path.join(temp.path, "我的游戏.zip");
+  if (file_type === "GODOT")
+    native.write_file_sync(
+      path.join(root, "game.pck"),
+      godot_pack_fixture(new Map([["project.binary", godot_project_fixture()]])),
+    );
+  else if (file_type === "RPGMAKER_MV_MZ") {
+    native.write_file_sync(path.join(root, "data/System.json"), "{}");
+    native.write_file_sync(path.join(root, "js/rmmz_core.js"), "// engine");
+  } else if (file_type === "RPGMAKER_RGSS") {
+    native.write_file_sync(path.join(root, "Game.ini"), "[Game]\nScripts=Data/Scripts.rvdata2");
+    native.write_file_sync(path.join(root, "Game.rgss3a"), rgss_archive_fixture(3, new Map()));
+  } else
+    for (const [name, bytes] of wolf_files()) native.write_file_sync(path.join(root, name), bytes);
+  expect(await discover_source(root, native)).toMatchObject({
+    rel_path: "我的游戏.zip" + extension,
+    file_type,
+    source: { kind: "game", file_type },
+  });
+  if (file_type === "GODOT" || file_type === "RPGMAKER_RGSS") {
+    const files = file_type === "GODOT" ? ["game.pck"] : ["Game.ini", "Game.rgss3a"];
+    for (const name of files) {
+      const input = path.join(root, name);
+      expect((await discover_source(input, native)).source).toEqual({
+        kind: "file",
+        format: undefined,
+      });
+      expect(await discover_sources([input], native)).toEqual([]);
+    }
+  }
+  const exe = path.join(root, "Game.EXE");
+  native.write_file_sync(exe, "");
+  expect(await discover_sources([root, exe], native)).toMatchObject([
+    { file_type, source: { kind: "game", file_type } },
+  ]);
+});
+
+it("多个 EVB 入口要求明确选择，同根冲突输入明确失败", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-source-evb-"));
+  const native = new NativeFs();
+  const bytes = evb_fixture(
+    new Map([
+      ["data/System.json", Buffer.from("{}")],
+      ["js/rmmz_core.js", Buffer.from("// fixture")],
+    ]),
+  );
+  const source = path.join(temp.path, "Selected.exe"),
+    second = path.join(temp.path, "Other.exe");
+  for (const file of [source, second]) native.write_file_sync(file, bytes);
+  await expect(discover_sources([temp.path], native)).rejects.toThrow("Multiple EVB");
+  await expect(discover_sources([source, second], native)).rejects.toThrow("Conflicting game");
+  expect((await discover_sources([source], native))[0]!.source_path).toBe(source);
+});
 
 it.each(["backup_lg", ".tmp"])(
   "管理目录 %s 扫描时排除，显式选择内部路径报告错误且保留兄弟来源",
@@ -71,7 +136,8 @@ it("目录识别失败不会去重掉显式选择的正常散装入口", async (
   const selected = path.join(temp.path, "unpacked.exe");
   fs.writeFileSync(selected, "");
   const entries = await discover_sources([temp.path, selected], new NativeFs());
-  expect(entries.map((entry) => entry.source.kind)).toEqual(["failure", "mv_mz"]);
+  expect(entries.map((entry) => entry.source.kind)).toEqual(["failure", "game"]);
+  expect(entries[0]!.rel_path).toBe(path.basename(temp.path));
   expect(entries[1]!.source_path).toBe(selected);
 });
 

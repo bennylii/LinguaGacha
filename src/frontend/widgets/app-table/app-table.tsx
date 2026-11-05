@@ -27,7 +27,6 @@ import {
   AppContextMenuItem,
   AppContextMenuSeparator,
 } from "@frontend/widgets/app-context-menu";
-import { ScrollArea } from "@frontend/shadcn/scroll-area";
 import { Table, TableBody, TableHeader, TableRow } from "@frontend/shadcn/table";
 import "@frontend/widgets/app-table/app-table.css";
 import { move_ordered_ids } from "@frontend/widgets/interactions/reorder";
@@ -73,18 +72,8 @@ type SelectionBoxState = {
 // 区分普通键盘滚动和 session 恢复滚动的对齐策略。
 type AppTableScrollAlignment = "nearest" | "start";
 
-// 通用 data 标记由表格统一解释，页面不再复制点击与框选的排除选择器。
-const APP_TABLE_IGNORE_BOX_SELECTION_SELECTOR = [
-  '[data-app-table-ignore-box-select="true"]',
-  '[data-slot="scroll-area-scrollbar"]',
-  '[data-slot="scroll-area-thumb"]',
-  '[data-slot="scroll-area-corner"]',
-].join(", ");
-
-/** 行内控件和滚动条由自身处理指针输入，避免同时开始框选。 */
-function should_ignore_app_table_box_selection(target_element: HTMLElement): boolean {
-  return target_element.closest(APP_TABLE_IGNORE_BOX_SELECTION_SELECTOR) !== null;
-}
+// 通用 data 标记由表格统一解释，页面不再复制框选的排除选择器。
+const APP_TABLE_IGNORE_BOX_SELECTION_SELECTOR = '[data-app-table-ignore-box-select="true"]';
 
 type AppTableVisibleRange = {
   start: number;
@@ -314,8 +303,9 @@ export function AppTable<Row>(props: AppTableProps<Row>): JSX.Element {
   const layout_commit_id_ref = useRef(0);
   // 表格虚拟计算的唯一行高来源，CSS 变量和虚拟定位共用它。
   const row_height = row_height_prop ?? APP_TABLE_DEFAULT_ROW_HEIGHT;
-  const [viewport_element, set_viewport_element] = useState<HTMLElement | null>(null);
+  const [viewport_element, set_viewport_element] = useState<HTMLElement | null>(null); // 表体滚动容器，由回调 ref 写入。
   const [viewport_height, set_viewport_height] = useState(row_height);
+  const [scrollbar_width, set_scrollbar_width] = useState(0); // 表体滚动条实际宽度，表头据此留出同宽右侧空白。
   const [drag_overlay_width, set_drag_overlay_width] = useState<number | null>(null);
   const source_row_model = useMemo(
     () => create_array_row_model(rows, get_row_id),
@@ -527,19 +517,6 @@ export function AppTable<Row>(props: AppTableProps<Row>): JSX.Element {
   useEffect(() => {
     const table_scroll_host_element = table_scroll_host_ref.current;
     if (table_scroll_host_element === null) {
-      set_viewport_element(null);
-      return;
-    }
-
-    const next_viewport_element = table_scroll_host_element.querySelector<HTMLElement>(
-      '[data-slot="scroll-area-viewport"]',
-    );
-    set_viewport_element(next_viewport_element);
-  }, [row_count]);
-
-  useEffect(() => {
-    const table_scroll_host_element = table_scroll_host_ref.current;
-    if (table_scroll_host_element === null) {
       set_viewport_height(row_height);
       return;
     }
@@ -561,6 +538,26 @@ export function AppTable<Row>(props: AppTableProps<Row>): JSX.Element {
       resize_observer.disconnect();
     };
   }, [row_count, row_height]);
+
+  useEffect(() => {
+    if (viewport_element === null) {
+      return;
+    }
+
+    // 滚动条按需出现时会挤占 viewport 的 content box，观察它即可感知滚动条增减。
+    const update_scrollbar_width = (): void => {
+      set_scrollbar_width(viewport_element.offsetWidth - viewport_element.clientWidth);
+    };
+
+    update_scrollbar_width();
+
+    const resize_observer = new ResizeObserver(update_scrollbar_width);
+    resize_observer.observe(viewport_element);
+
+    return () => {
+      resize_observer.disconnect();
+    };
+  }, [viewport_element]);
 
   const virtualizer = useVirtualizer<HTMLElement, HTMLTableRowElement>({
     count: row_count,
@@ -1170,7 +1167,17 @@ export function AppTable<Row>(props: AppTableProps<Row>): JSX.Element {
         return;
       }
 
-      if (should_ignore_app_table_box_selection(event.target)) {
+      // 行内控件自行处理指针输入，不启动框选。
+      if (event.target.closest(APP_TABLE_IGNORE_BOX_SELECTION_SELECTOR) !== null) {
+        return;
+      }
+
+      // 原生滚动条不是 DOM 节点，点在滚动条槽位时 target 是 viewport 本身，只能按几何位置排除。
+      if (
+        viewport_element !== null &&
+        event.clientX >=
+          viewport_element.getBoundingClientRect().left + viewport_element.clientWidth
+      ) {
         return;
       }
 
@@ -1200,6 +1207,7 @@ export function AppTable<Row>(props: AppTableProps<Row>): JSX.Element {
       box_selection_enabled,
       focus_table_scroll_host,
       selection_state,
+      viewport_element,
     ],
   );
 
@@ -1672,6 +1680,7 @@ export function AppTable<Row>(props: AppTableProps<Row>): JSX.Element {
     );
   const root_style = {
     "--app-table-row-height": `${row_height.toString()}px`,
+    "--app-table-scrollbar-width": `${scrollbar_width.toString()}px`,
   } as CSSProperties;
 
   return (
@@ -1684,7 +1693,7 @@ export function AppTable<Row>(props: AppTableProps<Row>): JSX.Element {
         onKeyDown={handle_table_keydown}
         onPointerDownCapture={handle_box_selection_start}
       >
-        <ScrollArea className="app-table__scroll">
+        <div ref={set_viewport_element} className="app-table__viewport">
           <DragDropProvider
             {...SORTABLE_PROVIDER_OPTIONS}
             {...reorder.events}
@@ -1756,7 +1765,7 @@ export function AppTable<Row>(props: AppTableProps<Row>): JSX.Element {
             {/* 本地顺序已在松手时接管展示，无需叠加回落动画。 */}
             <DragOverlay dropAnimation={null}>{overlay}</DragOverlay>
           </DragDropProvider>
-        </ScrollArea>
+        </div>
         {selection_box_active ? (
           <div ref={selection_box_element_ref} className="app-table__selection-box" />
         ) : null}

@@ -80,7 +80,9 @@ const quality_notes = [
 ];
 /** 参考资料随工作区提供给模型，说明提交副作用和跨记录关系。 */
 const reference_notes: Readonly<Record<string, readonly string[]>> = {
-  project_meta: ["工程元数据描述当前快照的语言、完整数量和文件顺序。"],
+  project_meta: [
+    "工程元数据描述当前快照的语言、完整数量和文件顺序。`glossary_enabled` 表示术语表是否参与翻译；向未启用的术语表写入条目不会自动启用它。",
+  ],
   items: [
     "`warnings` 按 `item_id` 关联条目，保存快照加载时的校对证据。正文与姓名属于同一个条目。",
     "`item_extra` 原样保存条目的 `extra_field`，内部形状和含义由来源格式决定。",

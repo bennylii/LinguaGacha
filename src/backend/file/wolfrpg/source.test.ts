@@ -1,3 +1,4 @@
+import { GameDirectoryOperations } from "../shared/game/game-directory-operations";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,8 +8,7 @@ import { wolf_files } from "../../../test/wolf-fixture";
 import { wolf_archive_fixture } from "../../../test/wolf-archive-fixture";
 import { FileFormatService } from "../file-format-service";
 import { discover_wolf_source, wolf_source_root } from "./source";
-import { wolf_crypt_vectors } from "../../../test/wolf-crypt-vectors";
-import { wolf_vector } from "../../../test/wolf-crypt-fixture";
+import { wolf_vectors, wolf_vector } from "../../../test/wolf-vectors";
 
 it("替代扩展名按头区分密钥、归档与普通素材，布局按主名映射", async () => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-wolf-source-types-"));
@@ -17,7 +17,7 @@ it("替代扩展名按头区分密钥、归档与普通素材，布局按主名�
     native.write_file_sync(path.join(temp.path, name), bytes);
   native.write_file_sync(
     path.join(temp.path, "Data/List.pak"),
-    wolf_vector(wolf_crypt_vectors.keys[1]!.input),
+    wolf_vector(wolf_vectors.keys[1]!.input),
   );
   native.write_file_sync(path.join(temp.path, "Data/ordinary.bin"), "ordinary image data");
   native.write_file_sync(
@@ -25,6 +25,8 @@ it("替代扩展名按头区分密钥、归档与普通素材，布局按主名�
     await wolf_archive_fixture(new Map()),
   );
   let game = await discover_wolf_source(path.join(temp.path, "Data"), native);
+  native.write_file_sync(path.join(temp.path, "Game.EXE"), "launcher");
+  expect(await discover_wolf_source(path.join(temp.path, "Game.EXE"), native)).toEqual(game);
   expect(game?.key_files.map((key) => key.type)).toEqual(["A1"]);
   expect(game?.archives.map((archive) => archive.output_prefix)).toEqual(["Data/Picture"]);
   native.write_file_sync(
@@ -59,7 +61,12 @@ it("名为 Data 的游戏根目录仍可识别，单独归档不能成为工程�
     path.join(root, "Data/Picture.wolf"),
     await wolf_archive_fixture(new Map()),
   );
-  const service = new FileFormatService({ target_language: "ZH" }, async () => null, native);
+  const service = new FileFormatService(
+    new GameDirectoryOperations(),
+    { target_language: "ZH" },
+    async () => null,
+    native,
+  );
   const entries = await service.collect_source_file_entries([root, path.join(root, "Data")]);
   expect(entries).toHaveLength(1);
   expect(entries[0]!.file_type).toBe("WOLFRPG");
@@ -67,19 +74,31 @@ it("名为 Data 的游戏根目录仍可识别，单独归档不能成为工程�
     [],
   );
 });
-it("坏游戏边界阻止普通文件递归导入，根归档与分目录归档冲突在准备前失败", async () => {
+it("坏游戏边界阻止普通文件递归导入，根归档与有效分包按稳定顺序选择", async () => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-wolf-source-"));
   const native = new NativeFs(),
     root = path.join(temp.path, "game"),
-    service = new FileFormatService({ target_language: "ZH" }, async () => null, native);
+    service = new FileFormatService(
+      new GameDirectoryOperations(),
+      { target_language: "ZH" },
+      async () => null,
+      native,
+    );
   native.write_file_sync(path.join(root, "Data/BasicData.wolf"), Buffer.alloc(64));
   native.write_file_sync(path.join(root, "notes.txt"), "must not become an ordinary source");
   const entries = await service.collect_source_file_entries([temp.path]);
   expect(entries).toHaveLength(1);
   expect(entries[0]!.source.kind).toBe("failure");
   native.write_file_sync(path.join(root, "Data.wolf"), await wolf_archive_fixture(new Map()));
-  await expect(service.collect_source_file_entries([root])).rejects.toThrow(
-    "Conflicting WOLF data archives",
+  expect((await service.collect_source_file_entries([root]))[0]?.source.kind).toBe("failure");
+  native.write_file_sync(
+    path.join(root, "Data/BasicData.wolf"),
+    await wolf_archive_fixture(new Map()),
   );
+  const game = await discover_wolf_source(root, native);
+  expect(game?.archives.map((archive) => archive.output_prefix)).toEqual([
+    "Data",
+    "Data/BasicData",
+  ]);
   expect(fs.existsSync(path.join(root, "backup_lg"))).toBe(false);
 });

@@ -69,16 +69,75 @@ describe("useGameFontPageState", () => {
     toast.push_error_toast.mockReset();
   });
 
+  it("拖入 OTF 时立即拒绝，大小写 TTF 仍进入后端内容检查", async () => {
+    await act(async () => state.drop_path("font_path", "E:/font.otf"));
+    expect(state.paths.font_path).toBeNull();
+    expect(toast.push_error_toast).toHaveBeenCalledOnce();
+    expect(api_fetch).not.toHaveBeenCalled();
+    await act(async () => state.drop_path("font_path", "E:/font.TtF"));
+    await act(async () => state.drop_path("game_path", GAME_PATH));
+    expect(api_fetch).toHaveBeenCalledWith(INSPECT, {
+      font_path: "E:/font.TtF",
+      game_path: GAME_PATH,
+    });
+  });
+
+  it("选择器返回不支持的扩展名后仍可重新选择", async () => {
+    vi.mocked(window.desktopApp.pickGameFontFilePath).mockResolvedValueOnce({
+      canceled: false,
+      paths: ["E:/font.otf"],
+    });
+    await act(async () => state.pick_font_file());
+    expect(state.input_locked).toBe(false);
+    expect(state.paths.font_path).toBeNull();
+    await select_both();
+    expect(state.can_apply).toBe(true);
+  });
+
   /** 字体经对话框、游戏经拖入进入同一路径入口，并完成一次检查。 */
   async function select_both(): Promise<void> {
     await act(async () => state.pick_font_file());
     await act(async () => state.drop_path("game_path", GAME_PATH));
   }
 
+  it.each([false, true])("字体排序取消=%s，确认顺序传入修改请求", async (cancel) => {
+    const game_root = "E:/game",
+      orders = [{ game_root, ordered_pcks: ["patch.pck", "base.pck"] }];
+    vi.mocked(api_fetch).mockResolvedValueOnce({
+      godot_packs: [{ game_root, game_name: "game", external_pcks: ["base.pck", "patch.pck"] }],
+    });
+    await select_both();
+    await act(async () => {
+      void state.request_apply();
+    });
+    expect(state.godot_pack_order.dialog_props.games).toHaveLength(1);
+    expect(state.confirm_open).toBe(false);
+    await act(async () => state.godot_pack_order.finish(cancel ? null : orders));
+    if (cancel) {
+      expect(state.can_apply).toBe(true);
+      expect(api_fetch).toHaveBeenCalledTimes(1);
+    } else {
+      expect(state.confirm_open).toBe(true);
+      await act(async () => state.confirm_apply());
+      expect(api_fetch).toHaveBeenLastCalledWith(
+        "/api/toolbox/game-font/apply",
+        expect.objectContaining({ godot_pack_orders: orders }),
+      );
+      await act(async () => state.request_apply());
+      expect(state.godot_pack_order.dialog_props.games).toHaveLength(0);
+      expect(state.confirm_open).toBe(true);
+      await act(async () => state.confirm_apply());
+      expect(api_fetch).toHaveBeenLastCalledWith(
+        "/api/toolbox/game-font/apply",
+        expect.objectContaining({ godot_pack_orders: [{ game_root, ordered_pcks: [] }] }),
+      );
+    }
+  });
+
   it("确认期间锁定输入，取消确认后保留执行资格", async () => {
     await select_both();
     const paths = { font_path: FONT_PATH, game_path: GAME_PATH };
-    act(() => state.request_apply());
+    await act(async () => state.request_apply());
     expect(state.confirm_open).toBe(true);
     expect(state.input_locked).toBe(true);
     await act(async () => state.drop_path("game_path", "E:/ignored"));
@@ -111,7 +170,7 @@ describe("useGameFontPageState", () => {
     await act(async () => state.clear_path("font_path"));
     expect(state.paths.font_path).toBeNull();
     expect(state.can_apply).toBe(false);
-    act(() => state.request_apply());
+    await act(async () => state.request_apply());
     expect(state.confirm_open).toBe(false);
   });
 
@@ -141,10 +200,10 @@ describe("useGameFontPageState", () => {
 
     await act(async () => state.drop_path("game_path", GAME_PATH));
     vi.mocked(api_fetch).mockRejectedValueOnce(new Error("Write failed"));
-    act(() => state.request_apply());
+    await act(async () => state.request_apply());
     await act(async () => state.confirm_apply());
     expect(toast.push_error_toast).toHaveBeenLastCalledWith(
-      "game_font_page.feedback.apply_failed",
+      "app.feedback.operation_failed",
       expect.any(Error),
     );
     expect(state.can_apply).toBe(true);

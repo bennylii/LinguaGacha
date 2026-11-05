@@ -37,8 +37,9 @@ describe("LogDetailView", () => {
           <LocaleProvider locale="zh-CN">
             <LogDetailView
               detail={{
-                id: "log-1",
+                id: "20260913:1234:1",
                 date: "20260913",
+                instance: "1234",
                 revision: "rev",
                 line: 1,
                 created_at: "2026-09-13T00:00:01.000Z",

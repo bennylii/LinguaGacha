@@ -9,6 +9,7 @@ import type {
   AgentChatActions,
   AgentSkillsSlice,
   AgentTimelineSlice,
+  AgentTimelineStatusSlice,
 } from "./agent-chat-store";
 
 export type { AgentCommand, AgentTransportState } from "./agent-chat-store";
@@ -36,6 +37,16 @@ export function useAgentTokenSpeed(): AgentTokenSpeedSnapshot {
 export function useAgentTimeline(): AgentTimelineSlice {
   const store = use_agent_store();
   return useSyncExternalStore(store.subscribe_timeline, store.get_timeline, store.get_timeline);
+}
+
+/** 更早历史入口只订阅自己的加载与错误状态。 */
+export function useAgentTimelineStatus(): AgentTimelineStatusSlice {
+  const store = use_agent_store();
+  return useSyncExternalStore(
+    store.subscribe_timeline_status,
+    store.get_timeline_status,
+    store.get_timeline_status,
+  );
 }
 
 /** 单个条目只在自己的内容变化或被快照移除时更新。 */

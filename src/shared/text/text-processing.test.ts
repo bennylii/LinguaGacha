@@ -4,18 +4,16 @@ import { describe, expect, it } from "vitest";
 import { read_text_processing_config, read_text_quality_snapshot } from "./text-processing";
 
 describe("text worker snapshots", () => {
-  it("只投影文本处理需要的设置字段", () => {
+  it("只投影文本处理字段，并保留非默认项目语言", () => {
     expect(
       read_text_processing_config({
-        source_language: "JA",
-        target_language: "ZH",
-        clean_ruby: false,
+        source_language: "EN",
+        target_language: "DE",
         unrelated: "ignored",
       }),
     ).toEqual({
-      source_language: "JA",
-      target_language: "ZH",
-      clean_ruby: false,
+      source_language: "EN",
+      target_language: "DE",
     });
   });
 
@@ -67,7 +65,7 @@ describe("text worker snapshots", () => {
     expect(snapshot).toEqual({
       glossary_enable: true,
       glossary_entries: [
-        { entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: false },
+        { entry_id: "hp", src: "HP", dst: "生命值", info: "", evidence: "", case_sensitive: false },
       ],
       text_preserve_mode: "custom",
       text_preserve_entries: [{ entry_id: "italic", src: "<i>", info: "" }],

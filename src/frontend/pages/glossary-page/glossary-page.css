@@ -58,12 +58,7 @@
 }
 
 .glossary-page__dialog-main-panel {
-  display: flex;
   min-height: 0;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--ui-radius-card);
-  background: color-mix(in srgb, var(--muted) 58%, var(--popover));
 }
 
 .glossary-page__dialog-main-panel-content {
@@ -83,7 +78,7 @@
   gap: 10px;
 }
 
-.glossary-page__dialog-section--description {
+.glossary-page__dialog-section--info {
   grid-column: 1 / -1;
 }
 
@@ -104,13 +99,10 @@
 }
 
 .glossary-page__dialog-rule-item {
-  display: flex;
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--ui-radius-card);
-  background: color-mix(in srgb, var(--muted) 58%, var(--popover));
   padding: 12px;
 }
 
@@ -156,8 +148,8 @@
 .glossary-page__table-source-cell,
 .glossary-page__table-translation-head,
 .glossary-page__table-translation-cell,
-.glossary-page__table-description-head,
-.glossary-page__table-description-cell {
+.glossary-page__table-info-head,
+.glossary-page__table-info-cell {
   text-align: left;
 }
 

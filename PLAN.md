@@ -1,0 +1,80 @@
+# 计划：共享轻量派生索引（降 Agent 大工程常驻内存）
+
+> 任务材料，非长期工程文档。设计意图见 [AGENT_RUNTIME](docs/AGENT_RUNTIME.md#常驻内存与瞬时峰值的边界)。
+> 本文记录目标、已验证结论、分阶段改动清单与验收，随实施推进更新，完成后删除。
+
+## 目标
+
+让工程条目（本样本 917793 条）在内存中只保留一份主数据，各子系统不再各自展开一套全量对象索引，降低随条目数线性增长的后-end worker 常驻基线。收益随工程规模线性，普通规模工程应保留现有对象路径。
+
+不做：不改 SQLite 表结构、不引入新运行时/语言、不动模型上下文压缩与时间线分页契约、不重写已证伪的 stage 0/1 / A1 方向。
+
+## 已坐实的事实（本轮只读取证 + 分阶段埋点 + 原型）
+
+- 常驻基线由「同一批 92 万条目被工程缓存、同步输入、校对运行态各建一套对象索引」主导；`src`/`dst` 正文是同一份不可变引用，正文只占约 85–102 MB，多的是对象头与派生字段。
+- 冷启动首次 `query_warnings` 触发校对全量同步，是 +419 MB 瞬时分配与约 2m44s 等待的一次性成本，GC 后回落；增量同步路径已生效，不重复触发。
+- 时间线只访问最新窗口，与工程条目缓存无关；压缩/分页/工具预览都不释放工程缓存。
+- 换语言或引入 Arrow/SAB 等新技术对「N 个对象 × 多套表示」无本质收益；列式/共享派生索引是成熟已存方案（共享索引、按数据源组织索引、不可变快照 + 原子换索引、按窗口取数据）。
+
+## 已完成的原型验证（表示层风险已排除）
+
+| 验证 | 结果 |
+|---|---|
+| 全量 917793 行「列式 + materialize」与完整对象逐字段 `deepEqual` | mismatches 0 |
+| 常驻堆（分进程） | 对象 396 MB → 列式 218 MB（−178 MB / −45%，枚举列再化可到约 149 MB） |
+| 全量 materialize 扫描 | 21–56 ms，组装产物为临时值、不常驻 |
+| 产品真实查询 17 组（列表/筛选/搜索/排序/窗口/警告/上下文/筛选面板），两种输入逐结果相等 | 2 万 / 10 万 / 30 万行均 PASS，mismatches 0 |
+| 查询非平凡性 | 不同谓词命中数不同，非全部短路 |
+
+原型脚本位于系统临时目录（`lg-ab-equivalence2.mjs`、`lg-ab-query.mjs`、`tmp/p1-equivalence.mts` 已删），不进仓库。
+
+结论：按身份惰性组装行喂给既有纯逻辑，判定语义不变；产品改造的回归重点在增量写入、修订一致性与字段访问路径，而非重写筛选/判定。
+
+## 分阶段改动（每阶段独立验证、可回滚）
+
+### P0 — 主数据单一来源
+- `ItemCache` 改列式：`item_id` / `row_number` 用 `Uint32Array`，status / file_idx / outcome 用 `Uint8Array`，`src` / `dst` / `name` / `file_path` / `extra_field` / `tag` 各一份数组；`item_id → 行号` O(1) 索引；`read_item(index)` 惰性组装公开记录。
+- 保留 `readItems()` 契约给现有消费者并标注 O(N)；`replace` / `applyChange` 改为更新列与索引。
+- 按工程规模分流：小工程保留现有对象路径，避免列式复杂度伤及常见场景。
+- 验收：`item-cache.test.ts`、`cache-manager.test.ts`；新增「新旧 `readItems()` 逐条相等 + 按 id 随机读相等」对照测试；`typecheck` / `lint` / `check`。
+
+### P1 — 校对 state 轻量化（最大收益，依赖 P0）
+- `ProofreadingReaderState.item_by_id` 改为「`item_id → 轻量派生记录`（status、warning 码、outcome、排序键、row_number、internal_file_path）」；`src` / `dst` / `name` / `file_path` 不再存。
+- `natural_row_ids` 用 `Uint32Array` 行索引；`resolve_proofreading_rows` / `read_row` / `build_window_rows` / `create_proofreading_client_item` / `read_context_items` 等改为按身份取正文（复用已验证的 materialize 接缝，判定逻辑不动）。
+- 验收：`proofreading-reader.test.ts` 全量；筛选 / 搜索 / 排序 / 窗口 / 上下文 / 警告摘要 / 筛选面板逐项等价；新增「列式 state 与对象 state 跑同一查询逐结果相等」行为测试。
+
+### P2 — 一致性与免深拷贝（P1 硬约束）
+- 派生索引绑定已提交修订快照；工程写入走新索引 + 原子切换，旧索引在在途查询结束后回收；沿用 `read_freshness` / `stale_proofreading_sync` 语义，防止派生事实读到混合世代正文。
+- `build_sync_input` 按列 / 分批构建，`ComputeWorkerClient` 用 Transferable `ArrayBuffer` 免 `structuredClone` 深拷贝（顺带削冷启动瞬时尖峰与等待）。
+- 验收：修订漂移 / 中途失败 / 迟到结果 / 取消的补偿测试；真机分阶段埋点复测 `query_warnings` 段增量。
+
+### P3 — 其余消费者迁移
+- `project-summary` / `batch-translation-project-store` / `quality-rule-statistics` 去掉各自 `readItems()` / `structuredClone` 全量副本，改按窗口 / 流式读主数据。
+
+### P4 — 真机验收
+- 同一份 494 MB / 92 万条 `.lg`，分角色采样（MAIN / 脚本子进程），对比加载 idle 与 `workspace_run` 期间内存；受影响测试与静态检查全过；真实 `.lg` 走查翻页、详情、修订、分叉、计数。
+
+## 边界与风险
+
+- 涉及 `cache/`、`shared/proofreading/`、`backend/worker/`、`project/`、`batch-translation/` 多模块；`row.item.src` 读取点十余处。
+- 列式前提是消费方按列 / 按身份访问；逐行 Proxy facade 会抵消收益（已存方案反例）。
+- 一致性是硬约束：不可变快照 + 原子换索引。
+- 兼容旧 `.lg`：不改存储表结构。
+- 原型未覆盖：增量写入 / 原子换索引 / 跨 worker 传输 / PDF 页面行 —— 这些是 P2 与 P1 集成测试重点。
+
+## 当前状态
+
+- 分支 `feat/agent-proofreading-auto-resume`；docs 与 PLAN 结论已推送 fork。
+- 保留成果（未接运行时，零风险）：`ItemColumnStore` 独立组件（`23a415ec`）与对照测试、`from_records` 按身份去重修复（`f0c6b7c2`）、增量等价原型结论、双表示等价的产品级验证方法。
+- **P0 双表示接入已回滚**（`3c6b5ce7` → `df1c3c7c`）：`ItemCache` 回到纯对象 Map，双表示与 parity 测试移除。
+- **真机收益实测（P0 列式版）**：列式路径确认生效（917793 行 ≥ 阈值），但 idle MAIN 588 vs 595 MB（噪声内）、ws_run 峰值 3115 vs 2751/3033 MB（持平）。P0 对常驻与峰值均无可见收益。
+- **P0′ 前提已证伪**：装入期 `get_all_items` 的 92 万 `{id,data}` 行 + parse 对象是**瞬时、可完全 GC**（显式 GC 后 heap 917→292 MB），流式化只能削加载尖峰、降不了 idle 稳态。
+- **分阶段埋点闭环（决定性，22:01 诊断构建，验完已删）**：校对 sync 链路 rss 轨迹 —— `before_build_input` 727 → `after_build_input(upsert=917793)` 874（+147）→ `after_postMessage` 1089（+215 外部克隆）→ `worker:after_evaluate` **2800（评估 66 秒，rss +1665、heap 仅 +88）** → `worker_returned` 3051 → `after_sync_state` 1856（GC 回落）。**2GB 峰值的主因是 `evaluateProofreadingSlice` 逐条评估过程产生的大对象分配/延迟回收（工作集涨、JS 堆涨得少），不是全量对象索引、不是装入数组、不是 `ItemCache` 表示。** 这条链路所有阶段均在 in_process 计算 worker（同一 pid），按进程分角色不会拆开。
+- 安装目录当前为诊断构建；下一步替换回与 HEAD 一致的干净构建。
+
+## 下一步（按分阶段埋点重排优先级）
+
+1. **评估过程分片 / 及时释放**：`evaluateProofreadingSlice` 对 92 万条一次性 `map` 评估改为分片（每片数千条、片间可 GC），或把评估产物改成流式回传。直接命中已坐实的 +1665 MB 主因；优先做只读原型验证「分片后 rss 峰值」。
+2. **免深拷贝 + 轻量 state**（次要）：`build_sync_input` 分批 + Transferable 免 postMessage 克隆（+215）、父进程 `state` 按身份轻量派生（+129 heap）。各约百 MB 级，收益远小于第 1 项。
+3. **常驻基线**（另一目标）：多套全量对象索引合并为一份主数据 + 轻量派生索引（`ItemColumnStore` 已备）。只在超大工程有意义，与瞬时峰值是不同问题。
+4. 任何一步落地都按 P4 分角色/分阶段真机采样验证，不再凭原型外推。

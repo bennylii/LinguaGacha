@@ -1,8 +1,19 @@
+import { resolve_app_resources } from "../native/app-resources";
 import { resolve_workspace_runtime_directory } from "../native/workspace-runtime";
+import { configure_app_proxy } from "../native/app-proxy";
+import { create_shutdown_trace } from "../native/shutdown-trace";
 import { app, BrowserWindow, session, shell } from "electron";
+import { spawn } from "node:child_process";
 import path from "node:path";
+import process from "node:process";
 
 import * as AppErrors from "../shared/error";
+import {
+  APP_QUIT_WATCHDOG_MS,
+  SHUTDOWN_STAGE_TIMEOUT_MS,
+  WORKER_STOP_TIMEOUT_MS,
+} from "../shared/shutdown-timing";
+import { is_timeout_error, with_timeout } from "../shared/utils/timeout";
 import { create_pdf_host } from "../native/pdf-host";
 import { prepare_agent_image } from "../native/agent-image-host";
 import type { BackendRuntimeReady } from "../shared/backend-runtime";
@@ -16,6 +27,7 @@ import {
   create_main_window,
 } from "./shell/desktop-window-host";
 import { type LogWindowHost } from "./shell/log-window-host";
+import { create_remote_login_window_host } from "./shell/remote-login-window-host";
 import { install_main_fatal_error_handler } from "./shell/main-fatal-error-handler";
 import { try_show_native_error_dialog } from "./shell/native-error-dialog";
 import {
@@ -28,12 +40,13 @@ import { BackendRuntimeClient } from "./runtime/backend-runtime-client";
 export interface GuiEntryOptions {
   desktopBundleDir: string; // 产品入口解析出的桌面 bundle 根目录
   backendRuntimeWorkerEntryUrl: URL;
+  initialProjectPath?: string | null; // 新窗口由 --project 预加载的工程
 }
 
 const PROXY_BYPASS_RULES = "localhost,127.0.0.1,[::1]"; // 本机回环固定直连，与后端路由保持一致
 
 /**
- * 启动 Electron GUI 入口；模块导入本身不注册 Electron 事件，便于顶层 index 分发 CLI。
+ * 启动 Electron GUI 入口。模块导入本身不注册 Electron 事件，便于顶层 index 分发 CLI。
  */
 export function run_gui_entry(options: GuiEntryOptions): void {
   const desktop_bundle_dir = options.desktopBundleDir;
@@ -63,41 +76,56 @@ export function run_gui_entry(options: GuiEntryOptions): void {
   }
 
   const app_root = app.isPackaged ? path.dirname(process.execPath) : process.cwd();
-  const builtin_root = path.join(app.getAppPath(), "builtin"); // app.asar 内当前版本只读资产根
+  const app_resources = resolve_app_resources({
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    projectRoot: app.getAppPath(),
+  });
   const workspace_runtime_directory = resolve_workspace_runtime_directory({
     packaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     projectRoot: process.cwd(),
   });
-  const pdf_host = create_pdf_host({
-    stylesPath: path.join(
-      app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), "build/resources"),
-      "pdf-print.css",
-    ),
-    fontsDirectory: path.join(
-      app.getAppPath(),
-      app.isPackaged ? "build/dist/fonts" : "public/fonts",
-    ),
-  });
+  const pdf_host = create_pdf_host(app_resources);
+  const remote_login_window_host = create_remote_login_window_host();
   const backend_runtime = new BackendRuntimeClient({
     workerEntryUrl: options.backendRuntimeWorkerEntryUrl,
     appRoot: app_root,
-    builtinRoot: builtin_root,
+    builtinRoot: app_resources.builtinRoot,
     workspaceRuntimeDirectory: workspace_runtime_directory,
     pdfHost: pdf_host,
     imageHost: prepare_agent_image,
+    remoteAuthHost: remote_login_window_host,
     resolveProxy: (url) => session.defaultSession.resolveProxy(url),
     openDirectory: open_directory,
     pickSavePath: async (default_name) => {
       const result = await pick_save_path(win, null, default_name, []);
       return result.canceled ? null : (result.paths[0] ?? null);
     },
+    focusWindow: async () => {
+      const target = win;
+      if (target === null || target.isDestroyed()) return;
+      if (target.isMinimized()) target.restore();
+      target.show();
+      target.focus();
+    },
+    openProjectWindow: async (project_path) => {
+      // 开发态 process.execPath 是 Electron 可执行文件，必须显式带上应用目录。
+      const args = process.defaultApp
+        ? [app.getAppPath(), "--project", project_path]
+        : ["--project", project_path];
+      const child = spawn(process.execPath, args, {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    },
     onUnexpectedExit: (error) => {
       try_show_native_error_dialog("LinguaGacha 后端异常退出", error.message);
       void quit_app_after_backend_shutdown(1);
     },
   });
-  // 窗口诊断失败不能形成新的 unhandled rejection；fatal 路径另行等待并兜底 stderr。
+  // 窗口诊断失败不能形成新的 unhandled rejection。fatal 路径另行等待并兜底 stderr。
   const record_host_diagnostic: BackendRuntimeClient["recordHostDiagnostic"] = async (args) => {
     try {
       await backend_runtime.recordHostDiagnostic(args);
@@ -139,6 +167,31 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     }
 
     return backend_ready;
+  }
+
+  /**
+   * 新窗口在 renderer 首次读取快照前打开 --project，避免首屏先显示工程主页。
+   * 打开失败仍继续启动；工程主页会保留可见的错误入口。
+   */
+  async function open_initial_project(api_base_url: string): Promise<void> {
+    const project_path = options.initialProjectPath?.trim() ?? "";
+    if (project_path === "") return;
+    try {
+      const response = await fetch(`${api_base_url}/api/session/project/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: project_path }),
+      });
+      if (!response.ok)
+        throw new Error(`Initial project open failed: ${response.status.toString()}.`);
+    } catch (error) {
+      await record_host_diagnostic({
+        level: "warning",
+        messageKey: "app.diagnostic.lifecycle.app_start_failed",
+        error,
+        context: { reason: "initial_project_open_failed", project_path },
+      });
+    }
   }
 
   /**
@@ -200,6 +253,8 @@ export function run_gui_entry(options: GuiEntryOptions): void {
 
   /**
    * 退出前先关闭 Backend，确保 Gateway、ProjectDatabase 和日志系统按顺序收尾。
+   * 退出链路任何一段都可能因日志索引互锁或会话收尾永久不结算，因此整段都有总时限，
+   * 到点后强制结束进程，让卡死至少留下追踪并结束，而不是停在无限等待。
    */
   function quit_app_after_backend_shutdown(
     exit_code: number,
@@ -208,20 +263,50 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     if (shutdown_promise !== null) return shutdown_promise;
     // 先保存 Promise 再清理，关闭窗口触发的重入请求共用同一次退出。
     shutdown_promise = Promise.resolve().then(async () => {
+      const trace = create_shutdown_trace({ directory: backend_ready?.logDir ?? null, scope: "main" });
+      const started_at = Date.now();
+      trace("quit.begin", { exit_code });
+      const watchdog = setTimeout(() => {
+        trace("quit.watchdog_expired", { elapsed_ms: Date.now() - started_at });
+        process.stderr.write(
+          `[shutdown] quit watchdog expired after ${String(APP_QUIT_WATCHDOG_MS)} ms\n`,
+        );
+        app.exit(exit_code);
+      }, APP_QUIT_WATCHDOG_MS);
+      let timed_out = false;
       try {
         try {
-          await backend_runtime.stop();
+          const backend_shutdown = backend_runtime.stop();
+          backend_shutdown.catch(() => undefined); // 超时分支下面仍会终止 worker，先把拒绝就地消费
+          await with_timeout("backend_runtime.stop", backend_shutdown, WORKER_STOP_TIMEOUT_MS);
+          trace("backend_stopped", { elapsed_ms: Date.now() - started_at });
         } finally {
-          await pdf_host.dispose();
+          await with_timeout("pdf_host.dispose", pdf_host.dispose(), SHUTDOWN_STAGE_TIMEOUT_MS);
+          await with_timeout(
+            "remote_login_window_host.dispose",
+            remote_login_window_host.dispose(),
+            SHUTDOWN_STAGE_TIMEOUT_MS,
+          );
         }
         await launch_update?.();
       } catch (error) {
         exit_code = 1;
-        try_show_native_error_dialog(
-          "LinguaGacha 退出失败 / Shutdown failed",
-          error instanceof Error ? error.message : String(error),
-        );
+        timed_out = is_timeout_error(error);
+        trace("quit.failed", {
+          elapsed_ms: Date.now() - started_at,
+          timed_out,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        // 退出卡死时再弹同步原生框会连带阻塞事件循环与看门狗，此时只留追踪后强制退出。
+        if (!timed_out) {
+          try_show_native_error_dialog(
+            "LinguaGacha 退出失败 / Shutdown failed",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       } finally {
+        clearTimeout(watchdog);
+        trace("quit.exit", { exit_code, elapsed_ms: Date.now() - started_at });
         app.exit(exit_code);
       }
     });
@@ -234,7 +319,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
     getBackendRuntimeClient: () => backend_runtime,
   });
 
-  // 所有窗口关闭时进入应用退出；日志窗口也要一起收掉，避免诊断窗口单独存活。
+  // 所有窗口关闭时进入应用退出。日志窗口也要一起收掉，避免诊断窗口单独存活。
   app.on("window-all-closed", () => {
     win = null;
     log_window_host?.close();
@@ -250,6 +335,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
   // Electron ready 后才能启动 Backend 和创建窗口，保证 app API 与原生资源都已可用。
   app.whenReady().then(async () => {
     try {
+      await configure_app_proxy();
       const backend_start_result = await backend_runtime.start();
       backend_ready = backend_start_result;
       // 后端出站请求已按设置逐次解析；此处让 Chromium 自身（更新检查与下载）使用同一设置。
@@ -271,6 +357,7 @@ export function run_gui_entry(options: GuiEntryOptions): void {
         recordHostDiagnostic: record_host_diagnostic,
       });
       register_runtime_ipc_handlers();
+      await open_initial_project(backend_start_result.apiBaseUrl);
       // Backend、更新器和 IPC 完整就绪后才允许 macOS Dock 恢复窗口。
       app.on("activate", () => {
         if (shutdown_promise === null && (win === null || win.isDestroyed())) {

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectDatabase } from "../database/database-operations";
 import { LogManager } from "../log/log-manager";
 import * as migrations from "../migration/startup-migrations";
-import { SystemProxyHttpClient } from "../network/system-proxy-http-client";
+import { ProxyHttpClient } from "../network/proxy-http-client";
 import { BackendResources } from "./backend-resources";
 
 let app_root = "";
@@ -32,6 +32,10 @@ describe("BackendResources", () => {
     const resources = await BackendResources.start(create_options());
 
     expect(resources.metadata.read_version()).toBe("1.2.3");
+    const project_path = path.join(app_root, "version.lg");
+    fs.writeFileSync(path.join(app_root, "version.txt"), "9.0.0");
+    await resources.database.create_project(project_path, "version");
+    expect((await resources.database.get_all_meta(project_path)).target_app_version).toBe("1.2.3");
     expect(globalThis.fetch).not.toBe(original_fetch);
     expect(fs.existsSync(legacy_skills)).toBe(false);
     expect(
@@ -48,7 +52,7 @@ describe("BackendResources", () => {
     const resolve_proxy = vi.fn(async () => "PROXY 127.0.0.1:7890");
     const resources = await BackendResources.start({
       ...create_options(),
-      systemProxyResolver: { resolveProxy: resolve_proxy },
+      proxyResolver: { resolveProxy: resolve_proxy },
     });
 
     try {
@@ -78,7 +82,7 @@ describe("BackendResources", () => {
   it("启动迁移失败时阻止后续初始化并释放启动资源", async () => {
     const failure = new Error("startup migration failed");
     vi.spyOn(migrations, "run_startup_migrations").mockRejectedValueOnce(failure);
-    const install = vi.spyOn(SystemProxyHttpClient.prototype, "install_as_global_fetch");
+    const install = vi.spyOn(ProxyHttpClient.prototype, "install_as_global_fetch");
     const database_close = vi.spyOn(ProjectDatabase.prototype, "close");
     const log_shutdown = vi.spyOn(LogManager.prototype, "shutdown");
 
@@ -90,12 +94,10 @@ describe("BackendResources", () => {
 
   it("启动后段失败时释放 transport、数据库和日志", async () => {
     const failure = new Error("transport install failed");
-    vi.spyOn(SystemProxyHttpClient.prototype, "install_as_global_fetch").mockImplementationOnce(
-      () => {
-        throw failure;
-      },
-    );
-    const transport_dispose = vi.spyOn(SystemProxyHttpClient.prototype, "dispose");
+    vi.spyOn(ProxyHttpClient.prototype, "install_as_global_fetch").mockImplementationOnce(() => {
+      throw failure;
+    });
+    const transport_dispose = vi.spyOn(ProxyHttpClient.prototype, "dispose");
     const database_close = vi.spyOn(ProjectDatabase.prototype, "close");
     const log_shutdown = vi.spyOn(LogManager.prototype, "shutdown");
 
@@ -113,6 +115,6 @@ function create_options() {
     appRoot: app_root,
     builtinRoot: path.resolve(process.cwd(), "builtin"),
     logTargets: { console: false, window: false },
-    systemProxyResolver: { resolveProxy: async () => "DIRECT" },
+    proxyResolver: { resolveProxy: async () => "DIRECT" },
   };
 }

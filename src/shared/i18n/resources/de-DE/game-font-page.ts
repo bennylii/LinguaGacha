@@ -8,7 +8,7 @@ export const de_de_game_font_page = {
     font_file: {
       title: "Schriftdatei",
       description: "Klicken oder Schriftdatei hierher ziehen",
-      hint: "Unterstützt TTF und OTF",
+      hint: "Unterstützt TTF",
     },
   },
   action: {
@@ -16,11 +16,7 @@ export const de_de_game_font_page = {
     pick_directory: "Spielordner wählen",
     start: "Ändern",
   },
-  confirm: { description: "Spielschrift ändern …?" },
   feedback: {
     inspect_failed: "Erkennung fehlgeschlagen …",
-    apply_failed: "Ändern fehlgeschlagen …",
-    applying: "Spielschrift wird geändert …",
-    apply_success: "Spielschrift geändert …",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_game_font_page>;

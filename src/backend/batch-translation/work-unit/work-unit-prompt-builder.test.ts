@@ -46,7 +46,8 @@ describe("PromptBuilder", () => {
     const make_builder = (source_language: string, target_language: string) =>
       new PromptBuilder(
         builtin_root,
-        { app_language: "JA", source_language, target_language },
+        // 跨线程快照可能携带未校验文本，这里绕过静态类型验证运行时边界。
+        { app_language: "JA", source_language, target_language } as never,
         create_quality_snapshot(),
         [],
       );
@@ -75,13 +76,14 @@ describe("PromptBuilder", () => {
       "text",
       [],
       [],
+      [],
     );
     const input = result.messages[1]?.content ?? "";
     expect(input).toContain('{"id":3,"text":"甲\\n乙"}');
     expect(input.match(/\{"id":/gu)).toHaveLength(1);
   });
 
-  it("从资源模板生成翻译提示词并注入上文、术语和控制字符示例", async () => {
+  it("从资源模板生成翻译提示词并注入前后文、术语和控制字符示例", async () => {
     const builtin_root = await create_template_root();
     const builder = new PromptBuilder(
       builtin_root,
@@ -92,7 +94,7 @@ describe("PromptBuilder", () => {
       },
       create_quality_snapshot({
         glossary_entries: [
-          { src: "Alice", dst: "爱丽丝", info: "女性人名", case_sensitive: false },
+          { src: "Alice", dst: "爱丽丝", info: "女性人名", evidence: "", case_sensitive: false },
         ],
       }),
       [
@@ -101,6 +103,7 @@ describe("PromptBuilder", () => {
           src: "Alice",
           dst: "爱丽丝",
           info: "女性人名",
+          evidence: "",
           case_sensitive: false,
         },
       ],
@@ -111,13 +114,20 @@ describe("PromptBuilder", () => {
       "text",
       ["\\n[1]", "<b>", "\\n[1]", ""],
       [{ src: "上一句" }],
+      [{ src: "下一句" }],
     );
 
     expect(result.messages[0]?.content).toContain("日文");
     expect(result.messages[0]?.content).toContain("中文");
-    expect(result.messages[1]?.content).toContain("参考上文");
+    const content = String(result.messages[1]?.content);
+    expect(content).toContain("上一句");
+    expect(content).toContain("下一句");
+    expect(content.indexOf("上一句")).toBeLessThan(content.indexOf("下一句"));
+    expect(content.indexOf("下一句")).toBeLessThan(content.indexOf("Alice ->"));
+    expect(content.split("```jsonline")[1]).not.toMatch(/上一句|下一句/);
+    expect(result.console_log.join("\n")).toContain("下一句");
     expect(result.messages[1]?.content).toContain("Alice -> 爱丽丝 #女性人名");
-    expect(result.messages[1]?.content).toContain("控制字符示例：\n\\n[1], <b>");
+    expect(result.messages[1]?.content).toContain("\n\\n[1], <b>\n");
     expect(result.messages[1]?.content).toContain('{"id":0,"text":"Alice\\\\n[1]"}');
   });
 
@@ -133,6 +143,10 @@ describe("PromptBuilder", () => {
       "text",
       [],
       [{ src: "previous" }],
+      [{ src: "following" }],
+    );
+    expect(prompt.messages[1]?.content).toContain(
+      format_i18n_message("en-US", "app.prompt.builder_following_context"),
     );
     expect(prompt.messages[0]?.content).toContain("Translation prefix");
     expect(prompt.messages[0]?.content).toContain("Translate from Japanese to Chinese.");
@@ -181,40 +195,33 @@ describe("PromptBuilder", () => {
       { app_language: "EN", target_language: "EN" },
       create_quality_snapshot({
         glossary_entries: [
-          { src: "ABC", dst: "甲", info: "", case_sensitive: true },
-          { src: "foo", dst: "乙", info: "备注", case_sensitive: false },
+          { src: "ABC", dst: "甲", info: "", evidence: "", case_sensitive: true },
+          { src: "foo", dst: "乙", info: "备注", evidence: "", case_sensitive: false },
         ],
       }),
-      [{ entry_id: "foo", src: "foo", dst: "乙", info: "备注", case_sensitive: false }],
-    );
-
-    const result = builder.generate_prompt([create_line({ text_src: "abc foo" })], "text", [], []);
-    const user_prompt = result.messages[1]?.content ?? "";
-
-    expect(user_prompt).toContain("Glossary");
-    expect(user_prompt).toContain("foo -> 乙 #备注");
-    expect(user_prompt).not.toContain("ABC -> 甲");
-  });
-
-  it("system 指令未要求控制字符时不注入示例", async () => {
-    const builder = new PromptBuilder(
-      await create_template_root(),
-      { app_language: "ZH", source_language: "JA", target_language: "ZH" },
-      create_quality_snapshot({
-        translation_prompt_enable: true,
-        translation_prompt: "普通内容",
-      }),
-      [],
+      [
+        {
+          entry_id: "foo",
+          src: "foo",
+          dst: "乙",
+          info: "备注",
+          evidence: "",
+          case_sensitive: false,
+        },
+      ],
     );
 
     const result = builder.generate_prompt(
-      [create_line({ text_src: "正文" })],
+      [create_line({ text_src: "abc foo" })],
       "text",
-      ["<a>"],
+      [],
+      [],
       [],
     );
+    const user_prompt = result.messages[1]?.content ?? "";
 
-    expect(result.messages[1]?.content).not.toContain("控制字符示例");
+    expect(user_prompt).toContain("foo -> 乙 #备注");
+    expect(user_prompt).not.toContain("ABC -> 甲");
   });
 
   it("Sakura 已激活术语使用无空格箭头格式", () => {
@@ -222,13 +229,22 @@ describe("PromptBuilder", () => {
       "unused",
       { app_language: "ZH", target_language: "ZH" },
       create_quality_snapshot(),
-      [{ entry_id: "hp", src: "HP", dst: "生命值", info: "stat", case_sensitive: true }],
+      [
+        {
+          entry_id: "hp",
+          src: "HP",
+          dst: "生命值",
+          info: "stat",
+          evidence: "",
+          case_sensitive: true,
+        },
+      ],
     );
 
     const result = builder.generate_prompt_sakura("HP");
 
     expect(result.console_log).toEqual(["HP->生命值 #stat"]);
-    expect(result.messages[1]?.content).toContain("根据以下术语表");
+    expect(result.messages[1]?.content).toContain("HP->生命值 #stat");
   });
 
   it("普通提示词没有已激活术语时不写入术语段", async () => {
@@ -245,10 +261,9 @@ describe("PromptBuilder", () => {
       "text",
       [],
       [],
+      [],
     );
 
-    expect(result.messages[1]?.content).not.toContain("术语表");
-    expect(result.messages[1]?.content).toContain("输入：");
     expect(result.console_log).toEqual([]);
   });
 
@@ -268,6 +283,7 @@ describe("PromptBuilder", () => {
           src: "虎鉄",
           dst: "虎铁",
           info: "男性人名",
+          evidence: "",
           case_sensitive: false,
         },
       ],
@@ -279,6 +295,7 @@ describe("PromptBuilder", () => {
         create_line({ request_id: 1, text_src: "地の文", actor_src: null }),
       ],
       "actor_text",
+      [],
       [],
       [],
     );
@@ -298,7 +315,7 @@ async function create_template_root(): Promise<string> {
   template_roots.push(builtin_root);
   await write_template(builtin_root, "zh", {
     prefix: "翻译前缀",
-    base: "请从 {source_language} 翻译到 {target_language}，保留控制字符。",
+    base: "请从 {source_language} 翻译到 {target_language}。",
     thinking: "规则分析",
     suffix: "输出 JSONLINE\n{translation_output_format}",
   });

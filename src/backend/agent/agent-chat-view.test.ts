@@ -14,8 +14,66 @@ import type {
   SubmissionRecord,
 } from "@earendil-works/pi-durable";
 import { expect, it } from "vitest";
-import { AgentChatDoc, AGENT_INPUT_ENTRY_KIND } from "./agent-chat-data";
-import { AgentChatView } from "./agent-chat-view";
+import { AgentChatDoc, AGENT_INPUT_ENTRY_KIND, read_agent_input } from "./agent-chat-data";
+import { AgentChatView, slim_entry_record } from "./agent-chat-view";
+
+/** 读取记录里首个工具结果文本块，供瘦化断言使用。 */
+function tool_result_text(record: EntryRecord | undefined): string {
+  const message = record?.model?.find((item) => item.role === "toolResult");
+  if (message === undefined || message.role !== "toolResult") throw new Error("no tool result");
+  const part = message.content.find((item) => item.type === "text");
+  return part?.type === "text" ? part.text : "";
+}
+
+it("瘦化记录裁短工具正文并保留输入结构，提交订阅也只存瘦化值", () => {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  const input: EntryRecord = {
+    id: 1 as EntryId,
+    conversationId,
+    kind: AGENT_INPUT_ENTRY_KIND,
+    data: {
+      roundId: "round-1",
+      message: { text: "任务", attachments: [] },
+      delivery: "round",
+      queuedId: null,
+    },
+  };
+  const result: EntryRecord = {
+    id: 2 as EntryId,
+    conversationId,
+    kind: "test",
+    model: [
+      {
+        role: "toolResult",
+        toolCallId: "call",
+        toolName: "query",
+        content: [{ type: "text", text: "x".repeat(3000) }],
+        isError: false,
+        timestamp: 3,
+      },
+    ],
+  };
+  const slim = slim_entry_record(result);
+  const text = tool_result_text(slim);
+  expect(Buffer.byteLength(text, "utf8")).toBeLessThan(3000);
+  expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(2048); // 多留一个码点供投影识别截断
+  // 输入结构未受影响，计数/分叉/修订仍可只读结构字段。
+  expect(read_agent_input(slim_entry_record(input), undefined, state)).toMatchObject({
+    roundId: "round-1",
+    delivery: "round",
+  });
+
+  const view = new AgentChatView();
+  view.observe({
+    seq: 1 as Seq,
+    changes: [
+      { type: "entry", value: input },
+      { type: "entry", value: result },
+    ],
+  });
+  expect(Buffer.byteLength(tool_result_text(view.records.get(2)), "utf8")).toBeLessThan(3000);
+});
 
 it("压缩起始时间可随独立文档提交补入，任务终态与恢复沿用同一时间", () => {
   const conversationId = 1 as ConversationId;
@@ -373,3 +431,303 @@ it("摘要阶段取消保留起点，选择阶段取消隐藏，失败保留诊�
   view.reset([], new Map(), [failed], {}, state);
   expect(view.entries[0]).toMatchObject({ status: "error", createdAt: null });
 });
+
+it("timeline_window 按内容条目分页并额外附带轮次头", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 3 },
+    { id: "round-2", content: 3 },
+    { id: "round-3", content: 2 },
+  ]);
+
+  const window = view.timeline_window(null, 4);
+
+  // 4 条内容条目落在第 2、3 轮，轮次头额外附带且不占页预算。
+  expect(window.entries.map((entry) => entry.id)).toEqual([
+    "assistant:entry:7",
+    "assistant:entry:8",
+    "assistant:entry:10",
+    "assistant:entry:11",
+  ]);
+  expect(window.headers.map((entry) => entry.id)).toEqual(["round-2", "round-3"]);
+  expect(window.rounds).toEqual([
+    { id: "round-2", hasEarlier: true },
+    { id: "round-3", hasEarlier: false },
+  ]);
+  expect(window).toMatchObject({ hasEarlier: true, nextCursor: "assistant:entry:7" });
+});
+
+it("timeline_window 用游标继续向前读取并收敛到最早一页", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 3 },
+    { id: "round-2", content: 3 },
+    { id: "round-3", content: 2 },
+  ]);
+
+  const middle = view.timeline_window("assistant:entry:7", 4);
+  expect(middle.entries.map((entry) => entry.id)).toEqual([
+    "assistant:entry:2",
+    "assistant:entry:3",
+    "assistant:entry:4",
+    "assistant:entry:6",
+  ]);
+  expect(middle.headers.map((entry) => entry.id)).toEqual(["round-1", "round-2"]);
+  expect(middle.rounds).toEqual([
+    { id: "round-1", hasEarlier: false },
+    { id: "round-2", hasEarlier: false },
+  ]);
+  expect(middle).toMatchObject({ hasEarlier: true, nextCursor: "assistant:entry:2" });
+
+  const first = view.timeline_window(middle.nextCursor, 4);
+  expect(first.entries).toEqual([]);
+  expect(first.headers.map((entry) => entry.id)).toEqual(["round-1"]);
+  expect(first.rounds).toEqual([{ id: "round-1", hasEarlier: false }]);
+  expect(first).toMatchObject({ hasEarlier: false, nextCursor: null });
+});
+
+it("timeline_window 允许轮次头加加载更早的部分轮次", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 3 },
+    { id: "round-2", content: 3 },
+    { id: "round-3", content: 2 },
+  ]);
+
+  const window = view.timeline_window(null, 1);
+
+  expect(window.entries.map((entry) => entry.id)).toEqual(["assistant:entry:11"]);
+  expect(window.headers.map((entry) => entry.id)).toEqual(["round-3"]);
+  expect(window.rounds).toEqual([{ id: "round-3", hasEarlier: true }]);
+  expect(window).toMatchObject({ hasEarlier: true, nextCursor: "assistant:entry:11" });
+});
+
+it("压缩条目按任务身份归属历史轮次，不被最新轮次覆盖", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 2, compaction: true },
+    { id: "round-2", content: 2 },
+  ]);
+
+  const compaction = view.entries.find((entry) => entry.kind === "context_compaction");
+  expect(compaction?.roundId).toBe("round-1");
+});
+
+it("历史页按压缩条目真实轮次分页，不把最新轮次标记为更早", () => {
+  const { view } = timeline_fixture([
+    { id: "round-1", content: 1, compaction: true },
+    { id: "round-2", content: 1 },
+    { id: "round-3", content: 1 },
+  ]);
+
+  const latest = view.timeline_window(null, 1);
+  expect(latest.rounds).toEqual([{ id: "round-3", hasEarlier: false }]);
+
+  const middle = view.timeline_window(latest.nextCursor, 1);
+  const earliest = view.timeline_window(middle.nextCursor, 1);
+  // 含历史压缩的页面只带自己的轮次头，不会把最新轮次头带回来。
+  expect(earliest.entries.map((entry) => entry.id)).toEqual(["compaction:3"]);
+  expect(earliest.rounds).toEqual([
+    { id: "round-1", hasEarlier: true },
+    { id: "round-2", hasEarlier: false },
+  ]);
+});
+
+it("压缩任务晚于后续轮次完成时仍归属创建时的轮次", () => {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  state.rounds["round-1"] = {
+    status: "success",
+    checkpoint: 0 as EntryId,
+    endedAt: 10,
+    averageTokensPerSecond: null,
+    failure: null,
+  };
+  state.rounds["round-2"] = { ...state.rounds["round-1"] };
+  const input = (id: number, roundId: string): EntryRecord => ({
+    id: id as EntryId,
+    conversationId,
+    kind: AGENT_INPUT_ENTRY_KIND,
+    data: {
+      roundId,
+      message: { text: roundId, attachments: [] },
+      delivery: "round",
+      queuedId: null,
+    },
+  });
+  const answer = (id: number): EntryRecord => ({
+    id: id as EntryId,
+    conversationId,
+    kind: "test",
+    model: [fauxAssistantMessage(`answer-${id}`, { timestamp: id })],
+  });
+  const running = {
+    id: 2 as TaskId<JsonValue>,
+    conversationId,
+    kind: "pi.compaction",
+    version: 1,
+    input: { reason: "manual" },
+    background: false,
+    abortRequested: false,
+    state: { status: "running", checkpoint: null },
+  } satisfies TaskRecord<JsonValue, JsonValue, JsonValue>;
+  const view = new AgentChatView();
+  view.observe({
+    seq: 1 as Seq,
+    changes: [
+      ...([input(1, "round-1"), answer(4), input(5, "round-2"), answer(6)] as EntryRecord[]).map(
+        (value) => ({ type: "entry" as const, value }),
+      ),
+      { type: "task", value: running },
+    ],
+  });
+  view.refresh(conversationId, state);
+  const timed = { ...state, compactionStartedAt: { 2: 1000 } };
+  view.refresh(conversationId, timed);
+  expect(view.entries.find((entry) => entry.kind === "context_compaction")?.roundId).toBe(
+    "round-1",
+  );
+  const completed = {
+    ...running,
+    state: { status: "terminal", outcome: { status: "completed", result: { entryId: 3 } } },
+  } satisfies TaskRecord<JsonValue, JsonValue, JsonValue>;
+  view.observe({ seq: 2 as Seq, changes: [{ type: "task", value: completed }] });
+  view.refresh(conversationId, timed);
+  expect(view.entries.find((entry) => entry.kind === "context_compaction")?.roundId).toBe(
+    "round-1",
+  );
+});
+
+it("timeline_window 拒绝失效游标与非法页大小", () => {
+  const { view } = timeline_fixture([{ id: "round-1", content: 1 }]);
+
+  expect(() => view.timeline_window("missing", 4)).toThrow("agent_timeline_cursor_expired");
+  expect(() => view.timeline_window(null, 0)).toThrow("Agent timeline page size is invalid.");
+});
+
+it("常驻记录与投影都只保留工具输出预览，完整输出按条目身份按需读回", async () => {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  state.rounds.round = {
+    status: "success",
+    checkpoint: 0 as EntryId,
+    endedAt: 10,
+    averageTokensPerSecond: null,
+    failure: null,
+  };
+  const records: EntryRecord[] = [
+    {
+      id: 1 as EntryId,
+      conversationId,
+      kind: AGENT_INPUT_ENTRY_KIND,
+      data: {
+        roundId: "round",
+        message: { text: "查询", attachments: [] },
+        delivery: "round",
+        queuedId: null,
+      },
+    },
+    {
+      id: 2 as EntryId,
+      conversationId,
+      kind: "test",
+      model: [
+        fauxAssistantMessage([fauxToolCall("query", { value: 1 }, { id: "call" })], {
+          timestamp: 2,
+        }),
+      ],
+    },
+    {
+      id: 3 as EntryId,
+      conversationId,
+      kind: "test",
+      model: [
+        {
+          role: "toolResult",
+          toolCallId: "call",
+          toolName: "query",
+          content: [{ type: "text", text: "x".repeat(3000) }],
+          isError: false,
+          timestamp: 3,
+        },
+      ],
+    },
+  ];
+  const view = new AgentChatView();
+  // 生产路径由 restore_records / observe 存入瘦化记录；完整正文只由 reader 提供。
+  for (const record of records) view.records.set(record.id, slim_entry_record(record));
+  view.set_full_record_reader(async (id) => records.find((record) => record.id === id));
+  view.reset(records.map(slim_entry_record), new Map(), [], {}, state);
+
+  const tool_id = "tool:2:call";
+  const projection = view.entries.find((entry) => entry.kind === "tool_call");
+  const preview = view
+    .timeline_window(null, 40)
+    .entries.find((entry) => entry.kind === "tool_call");
+
+  // 常驻 rows、分页窗口与瘦化记录都不持有完整正文。
+  expect(projection).toMatchObject({ output: ["x".repeat(2048)], outputTruncated: true });
+  expect(preview).toMatchObject({ output: ["x".repeat(2048)], outputTruncated: true });
+  expect(Buffer.byteLength(tool_result_text(view.records.get(3)), "utf8")).toBeLessThan(3000);
+  // 详情弹窗按身份读回完整输出，且清除截断标记。
+  await expect(view.read_full_entry(tool_id)).resolves.toMatchObject({
+    output: ["x".repeat(3000)],
+    outputTruncated: false,
+  });
+  await expect(view.read_full_entry("missing")).resolves.toBeUndefined();
+});
+
+/** 构造按记录身份排序的轮次历史，轮次头后接指定数量的助手内容。 */
+function timeline_fixture(rounds: Array<{ id: string; content: number; compaction?: boolean }>): {
+  view: AgentChatView;
+  state: ReturnType<typeof AgentChatDoc.definition.initial>;
+} {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  const records: EntryRecord[] = [];
+  const tasks: TaskRecord<JsonValue, JsonValue, JsonValue>[] = [];
+  let next_id = 1;
+  for (const round of rounds) {
+    records.push({
+      id: next_id++ as EntryId,
+      conversationId,
+      kind: AGENT_INPUT_ENTRY_KIND,
+      data: {
+        roundId: round.id,
+        message: { text: round.id, attachments: [] },
+        delivery: "round",
+        queuedId: null,
+      },
+    });
+    state.rounds[round.id] = {
+      status: "success",
+      checkpoint: 0 as EntryId,
+      endedAt: 10,
+      averageTokensPerSecond: null,
+      failure: null,
+    };
+    for (let index = 0; index < round.content; index++) {
+      const id = next_id++;
+      records.push({
+        id: id as EntryId,
+        conversationId,
+        kind: "test",
+        model: [fauxAssistantMessage(`${round.id}-${index}`, { timestamp: id })],
+      });
+    }
+    // 压缩任务与条目共用身份序列，因此能落在该轮次内容之间。
+    if (round.compaction === true) {
+      const id = next_id++;
+      tasks.push({
+        id: id as TaskId<JsonValue>,
+        conversationId,
+        kind: "pi.compaction",
+        version: 1,
+        input: { reason: "manual" },
+        background: false,
+        abortRequested: false,
+        state: { status: "terminal", outcome: { status: "completed", result: { entryId: 3 } } },
+      });
+      state.compactionStartedAt[id] = id;
+    }
+  }
+  const view = new AgentChatView();
+  view.reset(records, new Map(), tasks, {}, state);
+  return { view, state };
+}

@@ -5,6 +5,7 @@ export const zh_cn_glossary_page = {
   },
   fields: {
     translation: "译文",
-    description: "描述",
+    info: "说明",
+    evidence: "查证证据（不进入翻译提示词）",
   },
 } as const;

@@ -2,6 +2,11 @@ import type { zh_cn_app } from "../zh-CN/app";
 import type { LocaleMessageSchema } from "../../types";
 
 export const ja_jp_app = {
+  godot_pack_order: {
+    title: "リソースパックの優先順位",
+    description: "後のリソースパックが、前のパック内の同名リソースを上書きします",
+  },
+  game_backup_warning: "操作の前にゲームフォルダ全体をバックアップすることをおすすめします …!",
   media: {
     zoom_out: "縮小",
     zoom_in: "拡大",
@@ -60,6 +65,7 @@ export const ja_jp_app = {
     select_folder: "フォルダーを選択",
   },
   feedback: {
+    activate_link: "リンクを処理できませんでした …",
     load_failed: "読み込みに失敗しました …",
     refresh_failed: "更新に失敗しました …",
     query_failed: "検索に失敗しました …",
@@ -71,6 +77,8 @@ export const ja_jp_app = {
     export_failed: "エクスポートに失敗しました …",
     copy_failed: "コピーに失敗しました …",
     read_failed: "読み取りに失敗しました …",
+    operation_running: "操作を実行中 …",
+    operation_success: "操作に成功しました …",
     operation_failed: "操作に失敗しました …",
     content_unavailable: "内容を表示できません",
     save_failed: "保存に失敗しました …",
@@ -82,7 +90,6 @@ export const ja_jp_app = {
     no_valid_data: "有効なデータがありません",
     update_failed: "更新できませんでした …",
     project_settings_aligned: "現在の設定に合わせてプロジェクト設定を更新しました",
-    project_cache_loading: "プロジェクトのキャッシュを更新中 …",
   },
   error_boundary: {
     eyebrow: "Renderer Runtime",
@@ -103,7 +110,7 @@ export const ja_jp_app = {
     duplicate_description: "重複するルールが {COUNT} 件あります。処理方法を選択してください …",
   },
   update: {
-    confirm_description: "LinguaGacha v{VERSION} が見つかりました。更新をダウンロードしますか …?",
+    action: "更新",
     restart_confirm: "再起動して更新",
     launching: "処理中 …",
   },
@@ -182,6 +189,22 @@ export const ja_jp_app = {
     language: "言語",
     logs: "ログ",
   },
+  project_switcher: {
+    create: "新規プロジェクト",
+    label: "プロジェクトウィンドウを切り替え",
+    current: "現在のプロジェクト",
+    no_project: "プロジェクトホーム",
+    instances: "実行中のウィンドウ",
+    no_instances: "他のウィンドウはありません",
+    loading: "ウィンドウを読み込み中 …",
+    recent: "最近のプロジェクト",
+    empty_recent: "最近のプロジェクトはありません",
+    open_current: "このウィンドウで開く",
+    open_new: "新しいウィンドウで開く",
+    load_failed: "ウィンドウ一覧の読み込みに失敗しました …",
+    focus_failed: "ウィンドウの切り替えに失敗しました …",
+    open_failed: "プロジェクトウィンドウを開けませんでした …",
+  },
   profile: {
     status: "Ciallo～(∠・ω< )⌒✮",
     status_tooltip: "GitHub のプロジェクトページを開く",
@@ -190,10 +213,11 @@ export const ja_jp_app = {
   },
   prompt: {
     source: "原文",
-    builder_control_character_samples: "制御文字の例：",
-    builder_glossary_header: "用語集 <原語> -> <訳語> #<用語情報>:",
-    builder_input: "入力：",
-    builder_preceding_context: "前の文脈：",
+    builder_control_character_samples: "制御文字の例（そのまま保持）：",
+    builder_glossary_header: "用語集（文脈と用語説明に応じて採用）<原語> -> <訳語> #<用語説明>:",
+    builder_input: "入力（項目ごとに翻訳し、項目内の改行を保持）：",
+    builder_preceding_context: "前の文脈（参照のみ）：",
+    builder_following_context: "後の文脈（参照のみ）：",
   },
   translation_generation: {
     action: "訳文を出力",
@@ -202,7 +226,7 @@ export const ja_jp_app = {
       checking: "校正の警告を確認中 …",
       check_failed: "校正の警告を読み込めませんでした。現在の訳文は引き続き出力できます …",
       warning_description:
-        "校正の警告が {COUNT} 件あります。AGENT で自動校正してから訳文を出力することをおすすめします。このまま続けますか …?",
+        "校正の警告が {COUNT} 件検出されました。警告は必ずしも誤りを示すものではありませんが、先に AGENT で少なくとも 1 回は自動校正することをおすすめします。このまま訳文を出力しますか …?",
       retry_check: "再確認",
       continue_generate: "出力を続ける",
     },
@@ -223,7 +247,7 @@ export const ja_jp_app = {
     json_files: "JSON ファイル (*.json)",
     excel_files: "Excel ファイル (*.xlsx)",
     supported_txt_files: "対応ファイル (*.txt)",
-    font_files: "フォントファイル (*.ttf *.otf)",
+    font_files: "フォントファイル (*.ttf)",
     executable_files: "実行ファイル (*.exe)",
   },
   diagnostic: {

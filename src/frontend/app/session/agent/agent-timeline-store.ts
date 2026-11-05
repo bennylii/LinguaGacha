@@ -1,4 +1,4 @@
-import type { AgentEntry } from "@shared/agent";
+import type { AgentEntry, AgentTimelinePage, AgentTimelineSnapshot } from "@shared/agent";
 
 type Listener = () => void;
 export type AgentTimelineSlice = Readonly<{
@@ -6,10 +6,24 @@ export type AgentTimelineSlice = Readonly<{
   roundIds: readonly string[];
   latestRoundId: string | null;
   latestCompactionId: string | null; // 最近追加的压缩身份，供界面定位恢复入口。
+  hasEarlier: boolean;
+  nextCursor: string | null;
+  roundHasEarlier: ReadonlyMap<string, boolean>;
   workspaceApplyRunning: boolean;
   compacting: boolean;
 }>;
 const EMPTY_IDS: readonly string[] = [];
+const EMPTY_ROUNDS: ReadonlyMap<string, boolean> = new Map();
+
+/** 轮次头是可见任务单元；自动继续与普通发送一样开始新轮次。 */
+function is_round_header(
+  entry: AgentEntry,
+): entry is Extract<AgentEntry, { kind: "user_message"; delivery: "round" | "auto_continue" }> {
+  return (
+    entry.kind === "user_message" &&
+    (entry.delivery === "round" || entry.delivery === "auto_continue")
+  );
+}
 
 /** 条目内容和显示结构分别订阅。组件读到的条目和 ID 数组始终是不可变快照。 */
 export class AgentTimelineStore {
@@ -26,6 +40,9 @@ export class AgentTimelineStore {
     roundIds: [],
     latestRoundId: null,
     latestCompactionId: null,
+    hasEarlier: false,
+    nextCursor: null,
+    roundHasEarlier: EMPTY_ROUNDS,
     workspaceApplyRunning: false,
     compacting: false,
   };
@@ -66,8 +83,8 @@ export class AgentTimelineStore {
     };
   }
 
-  /** 完整快照使消失的条目也通知原订阅者，避免详情或编辑器持有旧对象。 */
-  public replace(entries: readonly AgentEntry[]): void {
+  /** 完整窗口使消失的条目也通知原订阅者，避免详情或编辑器持有旧对象。 */
+  public replace(entries: readonly AgentEntry[], timeline?: AgentTimelineSnapshot): void {
     for (const id of this.entries.keys()) this.changed.add(id);
     this.entries.clear();
     this.rounds.clear();
@@ -78,6 +95,11 @@ export class AgentTimelineStore {
       roundIds: [],
       latestRoundId: null,
       latestCompactionId: null,
+      hasEarlier: timeline?.hasEarlier ?? false,
+      nextCursor: timeline?.nextCursor ?? null,
+      roundHasEarlier: new Map(
+        (timeline?.rounds ?? []).map((round) => [round.id, round.hasEarlier]),
+      ),
       workspaceApplyRunning: false,
       compacting: false,
     };
@@ -85,14 +107,99 @@ export class AgentTimelineStore {
     this.update(entries);
   }
 
-  /** 应用批次中的条目，追加身份时同步维护轮次索引。 */
+  /** 前插更早一页，轮次头只补一次，已加载轮次继续向头部合并。 */
+  public prepend_page(page: AgentTimelinePage): void {
+    const added_entries: string[] = [];
+    const page_rounds: string[] = [];
+    for (const header of page.headers) {
+      if (!this.entries.has(header.id)) {
+        this.entries.set(header.id, header);
+        this.changed.add(header.id);
+      }
+      if (!this.rounds.has(header.id)) {
+        this.rounds.set(header.id, EMPTY_IDS);
+        page_rounds.push(header.id);
+      }
+    }
+    const by_round = new Map<string, AgentEntry[]>();
+    for (const entry of page.entries) {
+      const round_id = this.resolve_round(entry);
+      if (round_id === null) continue;
+      const list = by_round.get(round_id) ?? [];
+      list.push(entry);
+      by_round.set(round_id, list);
+      if (!this.entries.has(entry.id)) {
+        this.entries.set(entry.id, entry);
+        this.changed.add(entry.id);
+      }
+    }
+    for (const [round_id, additions] of by_round) {
+      this.rounds.set(round_id, [...additions.map((entry) => entry.id), ...this.round(round_id)]);
+    }
+    // 新页按“轮次头 + 该轮次内容”的显示顺序进入全局身份列表。
+    for (const header of page.headers) {
+      if (!this.snapshot.entryIds.includes(header.id)) added_entries.push(header.id);
+      for (const entry of by_round.get(header.id) ?? []) {
+        if (!this.snapshot.entryIds.includes(entry.id)) added_entries.push(entry.id);
+      }
+    }
+    const round_has = new Map(this.snapshot.roundHasEarlier);
+    for (const round of page.rounds) round_has.set(round.id, round.hasEarlier);
+    this.snapshot = {
+      ...this.snapshot,
+      entryIds: [...added_entries, ...this.snapshot.entryIds],
+      roundIds: [...page_rounds, ...this.snapshot.roundIds],
+      latestRoundId: this.snapshot.latestRoundId ?? page.rounds.at(-1)?.id ?? null,
+      hasEarlier: page.hasEarlier,
+      nextCursor: page.nextCursor,
+      roundHasEarlier: round_has,
+    };
+    this.structureChanged = true;
+  }
+
+  /** 回到跟随时只保留最新窗口，释放更早页。 */
+  public trim_to_latest_window(size: number): void {
+    const content_ids = this.snapshot.entryIds.filter((id) => {
+      const entry = this.entries.get(id);
+      return entry !== undefined && !is_round_header(entry);
+    });
+    if (content_ids.length <= size) return;
+    const kept_content = content_ids.slice(-size);
+    const dropped_rounds = new Set<string>();
+    for (const id of content_ids.slice(0, content_ids.length - size)) {
+      dropped_rounds.add(this.entries.get(id)!.roundId);
+    }
+    const kept_rounds = new Set<string>();
+    for (const id of kept_content) kept_rounds.add(this.entries.get(id)!.roundId);
+    const kept = new Set<string>(kept_content);
+    for (const round_id of kept_rounds) kept.add(round_id);
+    const kept_entries = this.snapshot.entryIds
+      .filter((id) => kept.has(id))
+      .map((id) => this.entries.get(id)!);
+    const earliest = kept_content[0] ?? null;
+    this.replace(kept_entries, {
+      hasEarlier: earliest !== null,
+      nextCursor: earliest,
+      rounds: [...kept_rounds].map((id) => ({
+        id,
+        // 本地丢弃过该轮次内容时，仍可继续向上加载。
+        hasEarlier: dropped_rounds.has(id) || (this.snapshot.roundHasEarlier.get(id) ?? false),
+      })),
+    });
+  }
+
+  /** 应用批次中的条目，追加身份时按条目自身 `roundId` 归属。 */
   public update(entries: readonly AgentEntry[]): void {
     const addedIds: string[] = [];
     const addedRounds: string[] = [];
     let latestRoundId = this.snapshot.latestRoundId;
     let latestCompactionId = this.snapshot.latestCompactionId;
     const roundAdditions = new Map<string, string[]>();
-    for (const entry of entries) {
+    // 先登记轮次头，再归属内容，避免同一批次内内容先于头部到达。
+    const ordered = [...entries].sort(
+      (a, b) => Number(is_round_header(b)) - Number(is_round_header(a)),
+    );
+    for (const entry of ordered) {
       const previous = this.entries.get(entry.id);
       if (previous === entry) continue;
       if (
@@ -113,16 +220,20 @@ export class AgentTimelineStore {
       if (previous !== undefined) continue;
       addedIds.push(entry.id);
       if (entry.kind === "context_compaction") latestCompactionId = entry.id;
-      if (entry.kind === "user_message" && entry.delivery === "round") {
+      if (is_round_header(entry)) {
         latestRoundId = entry.id;
-        addedRounds.push(entry.id);
-        this.rounds.set(entry.id, EMPTY_IDS);
-      } else if (latestRoundId !== null) {
-        const additions = roundAdditions.get(latestRoundId) ?? [];
-        additions.push(entry.id);
-        roundAdditions.set(latestRoundId, additions);
-        if (entry.kind === "assistant_message") this.assistants.set(latestRoundId, entry.id);
+        if (!this.rounds.has(entry.id)) {
+          addedRounds.push(entry.id);
+          this.rounds.set(entry.id, EMPTY_IDS);
+        }
+        continue;
       }
+      const round_id = this.resolve_round(entry, latestRoundId);
+      if (round_id === null) continue;
+      const additions = roundAdditions.get(round_id) ?? [];
+      additions.push(entry.id);
+      roundAdditions.set(round_id, additions);
+      if (entry.kind === "assistant_message") this.assistants.set(round_id, entry.id);
     }
     for (const [id, additions] of roundAdditions)
       this.rounds.set(id, [...this.round(id), ...additions]);
@@ -142,6 +253,9 @@ export class AgentTimelineStore {
             : [...this.snapshot.roundIds, ...addedRounds],
         latestRoundId,
         latestCompactionId,
+        hasEarlier: this.snapshot.hasEarlier,
+        nextCursor: this.snapshot.nextCursor,
+        roundHasEarlier: this.snapshot.roundHasEarlier,
         compacting,
         workspaceApplyRunning,
       };
@@ -157,5 +271,11 @@ export class AgentTimelineStore {
     this.structureChanged = false;
     if (structureChanged) for (const listener of this.structureListeners) listener();
     for (const id of ids) for (const listener of this.listeners.get(id) ?? []) listener();
+  }
+
+  /** 条目归属优先使用自身 `roundId`；旧载荷缺少归属时回退到当前最新轮次。 */
+  private resolve_round(entry: AgentEntry, fallback = this.snapshot.latestRoundId): string | null {
+    if (entry.roundId === "") return fallback;
+    return this.rounds.has(entry.roundId) ? entry.roundId : null;
   }
 }

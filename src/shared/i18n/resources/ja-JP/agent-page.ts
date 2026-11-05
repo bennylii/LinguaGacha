@@ -123,6 +123,16 @@ export const ja_jp_agent_page = {
     copied: "コピーしました",
     follow_latest: "最新を追従",
   },
+  auto_resume: {
+    waiting: "未完了のため {seconds} 秒後に自動続行します（{attempt} 回目）",
+    waiting_limited: "未完了のため {seconds} 秒後に自動続行します（{attempt}/{max_attempts}）",
+    continuing: "未完了のため自動続行中です（{attempt} 回目）",
+    cancel: "自動続行をキャンセル",
+  },
+  auto_continue: {
+    judging: "タスクの完了を確認しています…",
+    continuing: "未完了のため自動続行中です（{attempt} 回目）",
+  },
   editing: {
     user: "メッセージを編集中",
     assistant: "モデルの返信を編集中",
@@ -131,7 +141,6 @@ export const ja_jp_agent_page = {
   queue: {
     no_message_text: "メッセージ本文なし",
     attachments: "添付ファイル {count} 件",
-    reorder: "ドラッグして並べ替え",
     send_now: "今すぐ送信",
     sending: "送信中",
     delete: "メッセージを削除",
@@ -149,6 +158,9 @@ export const ja_jp_agent_page = {
     details: "{tool} ツール呼び出しの詳細",
     input: "入力",
     output: "出力",
+    loading_full: "完全な出力を読み込み中 …",
+    load_failed: "完全な出力を読み込めませんでした。",
+    retry: "再試行",
   },
   round: {
     running: "処理中 {duration}",
@@ -156,10 +168,16 @@ export const ja_jp_agent_page = {
     error: "失敗 · {duration}",
     stopped: "停止済み · {duration}",
   },
+  timeline: {
+    show_earlier: "以前のメッセージを表示",
+    show_earlier_in_round: "このラウンドの以前のメッセージを表示",
+    loading: "以前のメッセージを読み込み中 …",
+    retry: "以前のメッセージを読み込めませんでした。再試行",
+    cursor_expired: "履歴が変更されたため、最新のメッセージに戻りました。",
+  },
   upload: { uploading: "アップロード中", failed: "アップロードに失敗" },
   file_saved: "ファイルを保存しました",
   error: {
-    activate_link: "リンクを処理できませんでした …",
     decision: "回答を送信できませんでした。再試行してください …",
     restore: "セッションを復元できませんでした。再試行してください …",
     connection: "接続が切れました。再接続を待っています …",

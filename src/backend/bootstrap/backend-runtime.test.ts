@@ -109,6 +109,7 @@ describe("run_backend_runtime", () => {
           metadata: { read_version: () => "1.2.3" },
           paths: {
             get_berserker_update_root_dir: () => "E:/userdata/berserker",
+            get_log_dir: () => "E:/userdata/log",
           },
         },
         logManager: runtime_mocks.log_manager,
@@ -132,21 +133,23 @@ describe("run_backend_runtime", () => {
         apiBaseUrl: "http://127.0.0.1:4567",
         berserkerUpdateRootDir: "E:/userdata/berserker",
         appVersion: "1.2.3",
+        logDir: "E:/userdata/log",
         networkProxy: { mode: "proxy", address: "127.0.0.1:6789" },
       },
     });
     const bootstrap_options = runtime_mocks.constructor_options[0] as {
       appRoot: string;
       builtinRoot: string;
-      systemProxyResolver: { resolveProxy: (url: string) => Promise<string> };
+      proxyResolver: { resolveProxy: (url: string) => Promise<string> };
       openDirectory: (path: string) => Promise<void>;
       pickSavePath: (name: string) => Promise<string | null>;
     };
     expect(bootstrap_options).toMatchObject({
       appRoot: "E:/app",
       builtinRoot: "E:/app.asar/builtin",
+      shutdownTrace: expect.any(Function),
     });
-    const proxy = bootstrap_options.systemProxyResolver.resolveProxy("https://example.com");
+    const proxy = bootstrap_options.proxyResolver.resolveProxy("https://example.com");
     const proxy_request = get_host_request(port, "resolve_proxy");
     port.emit({
       type: "host_response",
@@ -209,11 +212,11 @@ describe("run_backend_runtime", () => {
       port,
     });
     const bootstrap_options = runtime_mocks.constructor_options[0] as {
-      systemProxyResolver: { resolveProxy: (url: string, signal: AbortSignal) => Promise<string> };
+      proxyResolver: { resolveProxy: (url: string, signal: AbortSignal) => Promise<string> };
     };
     const controller = new AbortController();
     const reason = new Error("用户停止 Agent");
-    const proxy = bootstrap_options.systemProxyResolver.resolveProxy(
+    const proxy = bootstrap_options.proxyResolver.resolveProxy(
       "https://example.com",
       controller.signal,
     );

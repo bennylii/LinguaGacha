@@ -3,6 +3,8 @@ import type { JsonRecord } from "../domain/json";
 import type { Locale } from "../domain/app-language";
 /** AgentService 与 renderer 共享的唯一 SSE topic。 */
 export const AGENT_CHAT_EVENT_TOPIC = "agent.chat_event";
+/** 时间线每页内容条目预算；轮次头额外附带且不占预算。 */
+export const AGENT_TIMELINE_PAGE_SIZE = 40;
 
 /** 一次工作区链接激活的完成结果。取消是正常交互。 */
 export type AgentWorkspaceLinkResult = Readonly<{ status: "saved" | "opened" | "cancelled" }>;
@@ -154,7 +156,7 @@ export type AgentInputQueueSnapshot = JsonRecord & {
   items: AgentQueuedInput[];
 };
 
-/** 最新轮次修订同时携带目标身份与完整替换内容。 */
+/** 轮次修订同时携带目标身份与完整替换内容。 */
 export type AgentRevisionRequest = JsonRecord & {
   entryId: string;
   message: AgentMessageInput;
@@ -163,31 +165,37 @@ export type AgentRevisionRequest = JsonRecord & {
 type AgentToolEntryBase = JsonRecord & {
   kind: "tool_call";
   id: string;
+  roundId: string; // 所属轮次，窗口外更新和分页前插据此归属
   toolName: string;
   input: string;
   createdAt: number;
 };
 
-/** 工具终帧按顺序保留文本块原文。数组为空表示没有文本输出，块间排版由前端负责。 */
+/**
+ * 工具终帧按顺序保留文本块原文。数组为空表示没有文本输出，块间排版由前端负责。
+ * `output` 只承载预览；完整内容通过时间线条目读取接口按 `id` 获取。
+ */
 export type AgentToolEntry = AgentToolEntryBase &
   (
-    | { status: "running"; output: null }
-    | { status: "stopped"; output: string[] | null }
-    | { status: "success" | "error"; output: string[] }
+    | { status: "running"; output: null; outputTruncated: false }
+    | { status: "stopped"; output: string[] | null; outputTruncated: boolean }
+    | { status: "success" | "error"; output: string[]; outputTruncated: boolean }
   );
 
 /** 仅公开已进入摘要流程的任务和失败，用户取消公开 stopped。 */
 export type AgentContextCompactionEntry = JsonRecord & {
   kind: "context_compaction";
   id: string;
+  roundId: string;
   status: AgentEntryStatus;
   createdAt: number | null; // 旧压缩任务没有可恢复的起始时间。
 };
 
-/** `round` 与 `steer` 共用的不可变用户消息字段。 */
+/** `round`、`auto_continue` 与 `steer` 共用的不可变用户消息字段。 */
 type AgentUserEntryBase = AgentMessageInput & {
   kind: "user_message";
   id: string;
+  roundId: string; // 轮次头等于自身 id
   createdAt: number;
 };
 
@@ -197,17 +205,18 @@ export type AgentEntry = JsonRecord &
     | (AgentUserEntryBase &
         (
           | {
-              delivery: "round";
+              delivery: "round" | "auto_continue";
               status: AgentEntryStatus;
               endedAt: number | null;
               averageTokensPerSecond: number | null; // 终态生成均速，运行中或没有有效统计时为空。
-              failure: AgentRunFailure | null; // 只有失败终态携带原因摘要。
+              failure: AgentRunFailure | null; // 最近一次失败原因；成功、停止或开始自动重试后清空。
             }
           | { delivery: "steer"; status: "success"; endedAt: number }
         ))
     | {
         kind: "assistant_message";
         id: string;
+        roundId: string;
         parts: AgentAssistantMessageParts;
         status: AgentEntryStatus;
         createdAt: number;
@@ -221,6 +230,26 @@ export type AgentTokenSpeedSnapshot =
   | (JsonRecord & { roundId: string; tokensPerSecond: number })
   | null;
 
+/**
+ * 可重试失败后的自动重试状态，覆盖等待与续跑两个阶段。
+ * `waiting` 表示尚未发出续跑请求，`retryAt` 为后端时钟绝对毫秒；
+ * `continuing` 表示隐藏的「继续」输入已受理，`retryAt` 必须为空。
+ */
+export type AgentAutoResumeSnapshot = JsonRecord & {
+  roundId: string;
+  attempt: number; // 从 1 开始
+  maxAttempts: number | null; // 空表示不限次数
+  phase: "waiting" | "continuing";
+  retryAt: number | null; // 后端时钟绝对毫秒，仅 `waiting` 阶段有效
+};
+
+/** 轮次成功结束后的完成度判定状态；`judging` 表示正在判定，`continuing` 表示判定后已发出继续。 */
+export type AgentAutoContinueSnapshot = JsonRecord & {
+  roundId: string;
+  attempt: number; // 从 1 开始
+  phase: "judging" | "continuing";
+};
+
 /** 当前产品对话累计的模型用量，历史修订后仍保留已发生的消耗。 */
 export type AgentUsageSnapshot = JsonRecord & {
   input: number; // 普通输入，缓存读取和写入分别计数
@@ -229,19 +258,57 @@ export type AgentUsageSnapshot = JsonRecord & {
   cacheWrite: number; // 写入缓存的输入
 };
 
+/** 时间线中一个轮次的加载状态；`hasEarlier` 表示该轮次内部还有更早内容。 */
+export type AgentTimelineRound = JsonRecord & {
+  id: string;
+  hasEarlier: boolean;
+};
+
+/** 时间线窗口按内容条目计数，轮次头额外附带且不计入条目预算。 */
+export type AgentTimelineWindow = JsonRecord & {
+  entries: AgentEntry[]; // 不含轮次头的内容条目
+  headers: AgentEntry[]; // 本窗口涉及的轮次头，顺序与 `rounds` 一致
+  rounds: AgentTimelineRound[];
+  hasEarlier: boolean;
+  nextCursor: string | null; // 下一条更早内容条目的 id
+};
+
+/** 分页响应携带会话身份与修订，便于前端丢弃迟到结果。 */
+export type AgentTimelinePage = AgentTimelineWindow & {
+  revision: number;
+  chatId: string;
+};
+
+/** 工具详情按需读取完整条目。 */
+export type AgentTimelineEntryResponse = JsonRecord & {
+  revision: number;
+  chatId: string;
+  entry: AgentEntry;
+};
+
+/** 快照只暴露当前窗口的加载状态，完整历史仍由后端持有。 */
+export type AgentTimelineSnapshot = JsonRecord & {
+  hasEarlier: boolean;
+  nextCursor: string | null;
+  rounds: AgentTimelineRound[];
+};
+
 /** GET `snapshot` 与 `snapshot_seed` 共用的完整会话形状。 */
 export type AgentChatSnapshot = JsonRecord & {
   chatId: string; // 对话重置与工程切换后改变，草稿据此清理旧文件引用。
   revision: number;
   state: AgentChatStatus;
   pendingDecision: AgentPendingDecision | null;
-  entries: AgentEntry[];
+  entries: AgentEntry[]; // 最近窗口的轮次头与内容条目，按轮次展开
+  timeline: AgentTimelineSnapshot;
   skills: AgentSkillSnapshot[];
   inputQueue: AgentInputQueueSnapshot;
   doing: string | null; // 模型正在处理的任务阶段，跨回合保留
   context: AgentContextSnapshot;
   usage: AgentUsageSnapshot;
   tokenSpeed: AgentTokenSpeedSnapshot;
+  autoResume: AgentAutoResumeSnapshot | null;
+  autoContinue: AgentAutoContinueSnapshot | null;
 };
 
 /** 写命令只确认后端受理到的事件边界，公开事实继续由事件同步。 */
@@ -267,6 +334,8 @@ export type AgentChatChange = JsonRecord &
     | { type: "input_queue"; inputQueue: AgentInputQueueSnapshot }
     | { type: "doing"; doing: string | null }
     | { type: "token_speed"; tokenSpeed: AgentTokenSpeedSnapshot }
+    | { type: "auto_resume"; autoResume: AgentAutoResumeSnapshot | null }
+    | { type: "auto_continue"; autoContinue: AgentAutoContinueSnapshot | null }
     | { type: "context"; context: AgentContextSnapshot }
     | { type: "usage"; usage: AgentUsageSnapshot }
   );

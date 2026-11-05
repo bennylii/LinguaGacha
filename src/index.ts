@@ -36,7 +36,16 @@ async function run_product_entry(): Promise<void> {
     desktopBundleDir: desktop_bundle_dir,
     backendRuntimeWorkerEntryUrl:
       build_backend_runtime_worker_entry_url_from_desktop_bundle_dir(desktop_bundle_dir),
+    initialProjectPath: read_project_argument(process.argv),
   });
+}
+
+/** 从 --project 读取新窗口预加载工程；缺失或格式错误时按普通启动处理。 */
+function read_project_argument(argv: readonly string[]): string | null {
+  const index = argv.indexOf("--project");
+  if (index < 0) return null;
+  const value = argv[index + 1]?.trim() ?? "";
+  return value === "" || value.startsWith("--") ? null : value;
 }
 
 /**

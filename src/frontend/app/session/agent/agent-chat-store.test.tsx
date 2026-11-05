@@ -22,11 +22,24 @@ import {
 } from "@shared/agent";
 import { AGENT_INPUT_HISTORY_STORAGE_KEY } from "./agent-input-history";
 
-const desktop_api_mocks = vi.hoisted(() => ({
-  api_get: vi.fn(),
-  api_fetch: vi.fn(),
-  open_event_stream: vi.fn(),
-}));
+const desktop_api_mocks = vi.hoisted(() => {
+  /** 与真实实现一致的错误形状，供游标失效分支做 `instanceof` 判断。 */
+  class DesktopApiError extends Error {
+    public readonly code: string;
+    public readonly details: Record<string, unknown>;
+    constructor(args: { code: string; details?: Record<string, unknown> }) {
+      super(args.code);
+      this.code = args.code;
+      this.details = args.details ?? {};
+    }
+  }
+  return {
+    api_get: vi.fn(),
+    api_fetch: vi.fn(),
+    open_event_stream: vi.fn(),
+    DesktopApiError,
+  };
+});
 
 vi.mock("@frontend/app/desktop/desktop-api", () => desktop_api_mocks);
 
@@ -353,6 +366,162 @@ describe("AgentChatStore", () => {
     } finally {
       store.disconnect();
     }
+  });
+
+  it("自动续跑等待通过快照和增量事件同步，拒绝非法帧", async () => {
+    const resuming = {
+      roundId: "round-1",
+      attempt: 1,
+      maxAttempts: 5,
+      phase: "waiting",
+      retryAt: 1_000,
+    } as const;
+    desktop_api_mocks.api_get.mockResolvedValueOnce(agent_snapshot({ autoResume: resuming }));
+    let latest!: ReturnType<typeof useAgentChat>;
+    await render_probe(() => {
+      latest = useAgentChat();
+    });
+    await wait_for(() => expect(latest.transport).toBe("ready"));
+    expect(latest.autoResume).toEqual(resuming);
+
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { ...resuming, attempt: 2, retryAt: 6_000 },
+      });
+    });
+    expect(latest.autoResume).toMatchObject({ attempt: 2, retryAt: 6_000 });
+
+    // 重试开始后快照切换为续跑相位，不再用空快照表示运行中。
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { ...resuming, attempt: 2, phase: "continuing", retryAt: null },
+      });
+    });
+    expect(latest.autoResume).toMatchObject({ attempt: 2, phase: "continuing", retryAt: null });
+
+    await act(async () => {
+      event_source.change({ type: "auto_resume", autoResume: null });
+    });
+    expect(latest.autoResume).toBeNull();
+
+    await act(async () => {
+      event_source.change({ type: "auto_resume", autoResume: resuming });
+    });
+    expect(latest.autoResume).toEqual(resuming);
+
+    // 非法帧整批丢弃，保留最近一次合法值；相位与 retryAt 组合必须一致。
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: { roundId: "", attempt: 0, maxAttempts: 0, phase: "waiting", retryAt: -1 },
+      });
+    });
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: {
+          roundId: "round-1",
+          attempt: 2,
+          maxAttempts: null,
+          phase: "unknown",
+          retryAt: null,
+        },
+      });
+    });
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: {
+          roundId: "round-1",
+          attempt: 2,
+          maxAttempts: null,
+          phase: "continuing",
+          retryAt: 1_000,
+        },
+      });
+    });
+    await act(async () => {
+      event_source.change({
+        type: "auto_resume",
+        autoResume: {
+          roundId: "round-1",
+          attempt: 2,
+          maxAttempts: null,
+          phase: "waiting",
+          retryAt: null,
+        },
+      });
+    });
+    expect(latest.autoResume).toEqual(resuming);
+  });
+
+  it("自动继续状态通过快照和增量事件同步，拒绝非法帧", async () => {
+    const judging = { roundId: "round-1", attempt: 1, phase: "judging" } as const;
+    desktop_api_mocks.api_get.mockResolvedValueOnce(agent_snapshot({ autoContinue: judging }));
+    let latest!: ReturnType<typeof useAgentChat>;
+    await render_probe(() => {
+      latest = useAgentChat();
+    });
+    await wait_for(() => expect(latest.transport).toBe("ready"));
+    expect(latest.autoContinue).toEqual(judging);
+
+    await act(async () => {
+      event_source.change({
+        type: "auto_continue",
+        autoContinue: { roundId: "round-1", attempt: 1, phase: "continuing" },
+      });
+    });
+    expect(latest.autoContinue).toEqual({ roundId: "round-1", attempt: 1, phase: "continuing" });
+
+    await act(async () => {
+      event_source.change({ type: "auto_continue", autoContinue: null });
+    });
+    expect(latest.autoContinue).toBeNull();
+
+    await act(async () => {
+      event_source.change({ type: "auto_continue", autoContinue: judging });
+    });
+    expect(latest.autoContinue).toEqual(judging);
+
+    // 非法帧整批丢弃，保留最近一次合法值。
+    await act(async () => {
+      event_source.change({
+        type: "auto_continue",
+        autoContinue: { roundId: "", attempt: 0, phase: "unknown" },
+      });
+    });
+    expect(latest.autoContinue).toEqual(judging);
+  });
+
+  it("自动重试等待期间空闲状态也允许取消", async () => {
+    desktop_api_mocks.api_get.mockResolvedValueOnce(
+      agent_snapshot({
+        state: "idle",
+        autoResume: {
+          roundId: "round-1",
+          attempt: 1,
+          maxAttempts: null,
+          phase: "waiting",
+          retryAt: 1_000,
+        },
+      }),
+    );
+    desktop_api_mocks.api_fetch.mockResolvedValueOnce({ revision: 0, status: "accepted" });
+    let latest!: ReturnType<typeof useAgentChat>;
+    await render_probe(() => {
+      latest = useAgentChat();
+    });
+    await wait_for(() => expect(latest.transport).toBe("ready"));
+    expect(latest.state).toBe("idle");
+    expect(latest.autoResume).not.toBeNull();
+
+    await act(async () => {
+      await latest.stop();
+    });
+
+    expect(desktop_api_mocks.api_fetch).toHaveBeenCalledWith("/api/agent/stop");
   });
 
   it("StrictMode effect 重放后仍能完成会话恢复", async () => {
@@ -702,6 +871,7 @@ describe("AgentChatStore", () => {
         kind: "context_compaction",
         createdAt: 1_000,
         id: "manual-compaction",
+        roundId: "",
         status: "running",
       },
     ]);
@@ -1084,6 +1254,8 @@ describe("AgentChatStore", () => {
       doing: null,
       context: { tokens: null, compactable: false, limits: null },
       tokenSpeed: null,
+      autoResume: null,
+      autoContinue: null,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       skills: [
         TEST_SKILLS[0],
@@ -1355,6 +1527,8 @@ describe("AgentChatStore", () => {
       doing: null,
       context: { tokens: null, compactable: false, limits: null },
       tokenSpeed: null,
+      autoResume: null,
+      autoContinue: null,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
     let latest!: ReturnType<typeof useAgentChat>;
@@ -1365,54 +1539,9 @@ describe("AgentChatStore", () => {
 
     expect(latest.entries).toEqual([
       {
-        kind: "tool_call",
-        id: "running",
-        toolName: "read_skill",
-        input: '{"path":"SKILL.md"}',
-        status: "running",
-        output: null,
-        createdAt: 1,
-      },
-      {
-        kind: "tool_call",
-        id: "success",
-        toolName: "workspace_run",
-        input: '{"script":"console.log([])"}',
-        status: "success",
-        output: ['{"items":[]}', "第二块\n", ""],
-        createdAt: 2,
-      },
-      {
-        kind: "tool_call",
-        id: "unknown",
-        toolName: "missing_tool",
-        input: "{}",
-        status: "error",
-        output: ["工具不存在"],
-        createdAt: 3,
-      },
-      {
-        kind: "tool_call",
-        id: "empty-output",
-        toolName: "workspace_run",
-        input: "{}",
-        status: "success",
-        output: [],
-        createdAt: 7,
-      },
-      {
-        kind: "assistant_message",
-        id: "assistant-new",
-        parts: [
-          { kind: "thinking", text: "检查\n完成" },
-          { kind: "text", text: "结论" },
-        ],
-        status: "success",
-        createdAt: 6,
-      },
-      {
         kind: "user_message",
         id: "user-new",
+        roundId: "user-new",
         delivery: "round",
         averageTokensPerSecond: null,
         text: '@skill("glossary-audit") 审校',
@@ -1426,8 +1555,64 @@ describe("AgentChatStore", () => {
         failure: null,
       },
       {
+        kind: "tool_call",
+        id: "running",
+        roundId: "",
+        toolName: "read_skill",
+        input: '{"path":"SKILL.md"}',
+        status: "running",
+        output: null,
+        outputTruncated: false,
+        createdAt: 1,
+      },
+      {
+        kind: "tool_call",
+        id: "success",
+        roundId: "",
+        toolName: "workspace_run",
+        input: '{"script":"console.log([])"}',
+        status: "success",
+        output: ['{"items":[]}', "第二块\n", ""],
+        outputTruncated: false,
+        createdAt: 2,
+      },
+      {
+        kind: "tool_call",
+        id: "unknown",
+        roundId: "",
+        toolName: "missing_tool",
+        input: "{}",
+        status: "error",
+        output: ["工具不存在"],
+        outputTruncated: false,
+        createdAt: 3,
+      },
+      {
+        kind: "tool_call",
+        id: "empty-output",
+        roundId: "",
+        toolName: "workspace_run",
+        input: "{}",
+        status: "success",
+        output: [],
+        outputTruncated: false,
+        createdAt: 7,
+      },
+      {
+        kind: "assistant_message",
+        id: "assistant-new",
+        roundId: "",
+        parts: [
+          { kind: "thinking", text: "检查\n完成" },
+          { kind: "text", text: "结论" },
+        ],
+        status: "success",
+        createdAt: 6,
+      },
+      {
         kind: "user_message",
         id: "user-steer",
+        roundId: "",
         delivery: "steer",
         text: "立即补充",
         attachments: [],
@@ -1437,11 +1622,18 @@ describe("AgentChatStore", () => {
       },
       {
         kind: "context_compaction",
+        roundId: "",
         createdAt: null,
         id: "compaction-success",
         status: "success",
       },
-      { kind: "context_compaction", createdAt: null, id: "compaction-stopped", status: "stopped" },
+      {
+        kind: "context_compaction",
+        roundId: "",
+        createdAt: null,
+        id: "compaction-stopped",
+        status: "stopped",
+      },
     ]);
   });
 
@@ -1632,7 +1824,7 @@ describe("AgentChatStore", () => {
     });
 
     await act(async () => {
-      await latest.reviseLatestRound("user-1", { text: "历史消息", attachments: [] });
+      await latest.reviseRound("user-1", { text: "历史消息", attachments: [] });
     });
 
     expect(desktop_api_mocks.api_fetch).toHaveBeenCalledWith("/api/agent/round/revise", {
@@ -1667,7 +1859,7 @@ describe("AgentChatStore", () => {
     latest.input.draft.write({ text: "普通草稿", attachments: image_attachments("draft-image") });
 
     await act(async () => {
-      await latest.reviseLatestRound("user-1", { text: "新消息", attachments: [] });
+      await latest.reviseRound("user-1", { text: "新消息", attachments: [] });
     });
 
     expect(desktop_api_mocks.api_fetch).toHaveBeenCalledWith("/api/agent/round/revise", {
@@ -1924,6 +2116,7 @@ describe("AgentChatStore", () => {
       kind: "context_compaction" as const,
       createdAt: null,
       id: "compaction-1",
+      roundId: "round-1",
       status: "error" as const,
     };
     desktop_api_mocks.api_get.mockResolvedValue(agent_snapshot({ entries: [failed_compaction] }));
@@ -2006,6 +2199,211 @@ describe("AgentChatStore", () => {
     expect(latest.command).toBeNull();
   });
 
+  it("加载更早一页按游标前插并保留当前窗口", async () => {
+    desktop_api_mocks.api_get.mockResolvedValue(
+      agent_snapshot({
+        entries: [
+          user_entry("round-2", "新任务"),
+          assistant_entry("assistant-2", "结果", "success", 2, "round-2"),
+        ],
+        timeline: {
+          hasEarlier: true,
+          nextCursor: "round-2",
+          rounds: [{ id: "round-2", hasEarlier: false }],
+        },
+      }),
+    );
+    desktop_api_mocks.api_fetch.mockImplementationOnce(async (path) => {
+      expect(path).toBe("/api/agent/timeline/page");
+      return {
+        chatId: "test-chat",
+        revision: 1,
+        entries: [assistant_entry("assistant-1", "旧结果", "success", 1, "round-1")],
+        headers: [user_entry("round-1", "旧任务")],
+        rounds: [{ id: "round-1", hasEarlier: false }],
+        hasEarlier: false,
+        nextCursor: null,
+      };
+    });
+    const store = new AgentChatStore(window.localStorage, vi.fn());
+    store.connect();
+    try {
+      await vi.waitFor(() => expect(store.get_controls().transport).toBe("ready"));
+      await store.actions.loadEarlier();
+
+      expect(desktop_api_mocks.api_fetch).toHaveBeenCalledWith("/api/agent/timeline/page", {
+        chatId: "test-chat",
+        before: "round-2",
+        limit: 40,
+      });
+      expect(store.timeline.read()).toMatchObject({
+        entryIds: ["round-1", "assistant-1", "round-2", "assistant-2"],
+        roundIds: ["round-1", "round-2"],
+        hasEarlier: false,
+        nextCursor: null,
+      });
+      expect(store.get_timeline_status()).toEqual({ loading: false, error: null });
+    } finally {
+      store.disconnect();
+    }
+  });
+
+  it("加载更早期间重复触发不重复请求", async () => {
+    desktop_api_mocks.api_get.mockResolvedValue(
+      agent_snapshot({
+        entries: [user_entry("round-2", "新任务")],
+        timeline: {
+          hasEarlier: true,
+          nextCursor: "round-2",
+          rounds: [{ id: "round-2", hasEarlier: false }],
+        },
+      }),
+    );
+    const page = Promise.withResolvers<unknown>();
+    desktop_api_mocks.api_fetch.mockImplementationOnce(() => page.promise);
+    const store = new AgentChatStore(window.localStorage, vi.fn());
+    store.connect();
+    try {
+      await vi.waitFor(() => expect(store.get_controls().transport).toBe("ready"));
+      const first = store.actions.loadEarlier();
+      await vi.waitFor(() => expect(store.get_timeline_status().loading).toBe(true));
+      await store.actions.loadEarlier();
+      expect(desktop_api_mocks.api_fetch).toHaveBeenCalledOnce();
+
+      page.resolve({
+        chatId: "test-chat",
+        revision: 1,
+        entries: [],
+        headers: [user_entry("round-1", "旧任务")],
+        rounds: [{ id: "round-1", hasEarlier: false }],
+        hasEarlier: false,
+        nextCursor: null,
+      });
+      await first;
+      expect(store.timeline.read().roundIds).toEqual(["round-1", "round-2"]);
+    } finally {
+      store.disconnect();
+    }
+  });
+
+  it("加载更早失败保留窗口并提供重试", async () => {
+    desktop_api_mocks.api_get.mockResolvedValue(
+      agent_snapshot({
+        entries: [user_entry("round-2", "新任务")],
+        timeline: {
+          hasEarlier: true,
+          nextCursor: "round-2",
+          rounds: [{ id: "round-2", hasEarlier: false }],
+        },
+      }),
+    );
+    desktop_api_mocks.api_fetch.mockRejectedValueOnce(new Error("offline"));
+    const store = new AgentChatStore(window.localStorage, vi.fn());
+    store.connect();
+    try {
+      await vi.waitFor(() => expect(store.get_controls().transport).toBe("ready"));
+      await store.actions.loadEarlier();
+      expect(store.get_timeline_status()).toEqual({ loading: false, error: "failed" });
+      expect(store.timeline.read().roundIds).toEqual(["round-2"]);
+
+      desktop_api_mocks.api_fetch.mockImplementationOnce(async () => ({
+        chatId: "test-chat",
+        revision: 1,
+        entries: [],
+        headers: [user_entry("round-1", "旧任务")],
+        rounds: [{ id: "round-1", hasEarlier: false }],
+        hasEarlier: false,
+        nextCursor: null,
+      }));
+      await store.actions.retryLoadEarlier();
+      expect(store.get_timeline_status()).toEqual({ loading: false, error: null });
+      expect(store.timeline.read().roundIds).toEqual(["round-1", "round-2"]);
+    } finally {
+      store.disconnect();
+    }
+  });
+
+  it("游标失效时重新读取快照并保留内嵌提示", async () => {
+    const initial = agent_snapshot({
+      entries: [user_entry("round-2", "新任务")],
+      timeline: {
+        hasEarlier: true,
+        nextCursor: "stale",
+        rounds: [{ id: "round-2", hasEarlier: false }],
+      },
+    });
+    const refreshed = agent_snapshot({
+      revision: 3,
+      entries: [user_entry("round-3", "最新任务")],
+      timeline: {
+        hasEarlier: false,
+        nextCursor: null,
+        rounds: [{ id: "round-3", hasEarlier: false }],
+      },
+    });
+    desktop_api_mocks.api_get.mockResolvedValueOnce(initial).mockResolvedValue(refreshed);
+    desktop_api_mocks.api_fetch.mockRejectedValueOnce(
+      new desktop_api_mocks.DesktopApiError({
+        code: "request.validation_failed",
+        details: { reason: "agent_timeline_cursor_expired" },
+      }),
+    );
+    const store = new AgentChatStore(window.localStorage, vi.fn());
+    store.connect();
+    try {
+      await vi.waitFor(() => expect(store.get_controls().transport).toBe("ready"));
+      await store.actions.loadEarlier();
+
+      expect(desktop_api_mocks.api_get).toHaveBeenCalledTimes(2);
+      expect(store.timeline.read().roundIds).toEqual(["round-3"]);
+      expect(store.get_timeline_status()).toEqual({
+        loading: false,
+        error: "cursor_expired",
+      });
+    } finally {
+      store.disconnect();
+    }
+  });
+
+  it("工具详情按条目身份读取完整输出，迟到响应不进入新会话", async () => {
+    const full_entry = {
+      kind: "tool_call" as const,
+      id: "tool-1",
+      roundId: "round-1",
+      toolName: "workspace_run",
+      input: "{}",
+      status: "success" as const,
+      output: ["完整输出"],
+      outputTruncated: true,
+      createdAt: 1,
+    };
+    desktop_api_mocks.api_fetch.mockImplementationOnce(async (path) => {
+      expect(path).toBe("/api/agent/timeline/entry");
+      return { chatId: "test-chat", revision: 2, entry: full_entry };
+    });
+    const store = new AgentChatStore(window.localStorage, vi.fn());
+    store.connect();
+    try {
+      await vi.waitFor(() => expect(store.get_controls().transport).toBe("ready"));
+      await expect(store.actions.readEntry("tool-1")).resolves.toEqual(full_entry);
+      expect(desktop_api_mocks.api_fetch).toHaveBeenCalledWith("/api/agent/timeline/entry", {
+        chatId: "test-chat",
+        id: "tool-1",
+      });
+
+      desktop_api_mocks.api_fetch.mockResolvedValueOnce({
+        chatId: "test-chat",
+        revision: 3,
+        entry: {},
+      });
+      await expect(store.actions.readEntry("unknown")).rejects.toThrow(
+        "Agent timeline entry is invalid.",
+      );
+    } finally {
+      store.disconnect();
+    }
+  });
+
   /** 探针只暴露 Hook 的公开返回值，不读取或注入内部 setter。 */
   async function render_probe(use_probe: () => void): Promise<void> {
     /** 在 React 生命周期中执行当前测试的订阅。 */
@@ -2032,10 +2430,12 @@ function assistant_entry(
   text: string,
   status: AgentEntryStatus,
   createdAt: number,
+  roundId = "",
 ): Extract<AgentEntry, { kind: "assistant_message" }> {
   return {
     kind: "assistant_message" as const,
     id,
+    roundId,
     parts: [{ kind: "text" as const, text }],
     status,
     createdAt,
@@ -2047,6 +2447,7 @@ function user_entry(id: string, text: string, images: string[] = []) {
   return {
     kind: "user_message" as const,
     id,
+    roundId: id,
     delivery: "round" as const,
     averageTokensPerSecond: null,
     text,
@@ -2071,12 +2472,15 @@ function agent_snapshot(overrides: Partial<AgentChatSnapshot> = {}): AgentChatSn
     state: "idle",
     pendingDecision: null,
     entries: [],
+    timeline: { hasEarlier: false, nextCursor: null, rounds: [] },
     skills: [],
     inputQueue: { paused: false, canSendNow: false, items: [] },
     doing: null,
     context: { tokens: null, compactable: false, limits: null },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     tokenSpeed: null,
+    autoResume: null,
+    autoContinue: null,
     ...overrides,
   };
 }

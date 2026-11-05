@@ -178,6 +178,19 @@
   margin-top: 4px;
 }
 
+/* 更早轮次按页换入，入口留在信息流顶部，不改变消息的角色对齐。 */
+.agent-page__timeline-earlier {
+  display: flex;
+  justify-content: center;
+}
+
+/* 页首落在轮次中间时，轮次头与已加载尾部之间保留清晰的分隔。 */
+.agent-page__timeline-earlier--in-round {
+  margin: 8px 0;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+
 .agent-message {
   min-width: 0;
 }
@@ -264,15 +277,15 @@
   color: color-mix(in srgb, var(--ui-failure) 64%, var(--foreground));
 }
 
-.agent-continue-entry:hover:not(:disabled) {
+button.agent-continue-entry:hover:not(:disabled) {
   background: color-mix(in srgb, var(--ui-failure) 9%, var(--card));
 }
 
-.agent-continue-entry:active:not(:disabled) {
+button.agent-continue-entry:active:not(:disabled) {
   transform: translateY(1px);
 }
 
-.agent-continue-entry:focus-visible {
+button.agent-continue-entry:focus-visible {
   outline: 1px solid var(--ring);
   outline-offset: 2px;
 }
@@ -280,6 +293,47 @@
 .agent-continue-entry:disabled {
   cursor: default;
   opacity: 0.58;
+}
+
+.agent-auto-resume-entry {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--ui-radius-button);
+  background: color-mix(in srgb, var(--muted) 42%, var(--card));
+  padding: 4px 8px;
+  color: color-mix(in srgb, var(--foreground) 78%, var(--muted-foreground));
+  font-size: var(--ui-font-size-12);
+  line-height: 1.45;
+}
+
+.agent-auto-resume-entry__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-auto-continue-entry {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--ui-radius-button);
+  background: color-mix(in srgb, var(--muted) 42%, var(--card));
+  padding: 4px 8px;
+  color: color-mix(in srgb, var(--foreground) 78%, var(--muted-foreground));
+  font-size: var(--ui-font-size-12);
+  line-height: 1.45;
+}
+
+.agent-auto-continue-entry__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .agent-message-actions {
@@ -715,6 +769,16 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 12px;
+}
+
+/* 完整输出按需读取，加载与失败反馈留在输出面板内。 */
+.agent-tool-detail__notice {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: var(--ui-font-size-12);
 }
 
 .agent-tool-detail__panel {

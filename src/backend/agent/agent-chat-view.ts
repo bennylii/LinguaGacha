@@ -10,23 +10,141 @@ import type {
   UsageState,
 } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
-import type { AgentEntry, AgentRunFailure, AgentUsageSnapshot } from "../../shared/agent";
+import type {
+  AgentEntry,
+  AgentRunFailure,
+  AgentTimelineRound,
+  AgentTimelineWindow,
+  AgentUsageSnapshot,
+} from "../../shared/agent";
 import { JsonTool } from "../../shared/utils/json-tool";
 import { project_assistant_message_parts, read_agent_tool_result_status } from "./agent-message";
-import { read_agent_input, type AgentInputRecord, type AgentChatData } from "./agent-chat-data";
+import {
+  read_agent_input,
+  type AgentInputDelivery,
+  type AgentInputRecord,
+  type AgentChatData,
+} from "./agent-chat-data";
 import { read_agent_compaction_result } from "./agent-compaction";
 
 /** 流式与正式响应使用同一任务身份，人工修订使用条目身份。 */
 export const assistant_entry_id = (task: number | undefined, entry: number): string =>
   `assistant:${task ?? `entry:${entry}`}`;
+/** 游标失效是前端可恢复的分页状态，服务层据此映射公开原因。 */
+export class AgentTimelineCursorExpiredError extends Error {
+  constructor() {
+    super("agent_timeline_cursor_expired");
+  }
+}
 const UNCOMMITTED_ENTRY_ORDER = Number.MAX_SAFE_INTEGER; // 尚无 SDK 条目身份的正文暂居轮次末尾
+
+/** 时间线窗口默认页大小由共享契约拥有。 */
+export { AGENT_TIMELINE_PAGE_SIZE } from "../../shared/agent";
+/** 工具输出预览上限，完整内容按需读取。 */
+export const AGENT_TOOL_OUTPUT_PREVIEW_BYTES = 2048;
 
 type TaskRecordValue = TaskRecord<JsonValue, JsonValue, JsonValue>;
 type Row = { order: number; entry: AgentEntry };
 export type AgentTimelineChange = { replace: boolean; entries: AgentEntry[] };
 
+/** 轮次头是可见任务单元，`auto_continue` 与普通轮次一样建立新轮次。 */
+export function is_round_header(
+  entry: AgentEntry,
+): entry is Extract<AgentEntry, { kind: "user_message"; delivery: "round" | "auto_continue" }> {
+  return (
+    entry.kind === "user_message" &&
+    (entry.delivery === "round" || entry.delivery === "auto_continue")
+  );
+}
+
+/** 工具输出按 UTF-8 字节截断，保持文本块顺序并标记是否仍有完整内容。 */
+export function to_public_entry(
+  entry: AgentEntry,
+  preview_bytes = AGENT_TOOL_OUTPUT_PREVIEW_BYTES,
+): AgentEntry {
+  if (entry.kind !== "tool_call" || entry.output === null) return entry;
+  let remaining = preview_bytes;
+  let truncated = false;
+  const output: string[] = [];
+  for (const part of entry.output) {
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    const bytes = Buffer.byteLength(part, "utf8");
+    if (bytes <= remaining) {
+      output.push(part);
+      remaining -= bytes;
+      continue;
+    }
+    output.push(truncate_utf8(part, remaining));
+    remaining = 0;
+    truncated = true;
+  }
+  return { ...entry, output, outputTruncated: entry.outputTruncated || truncated };
+}
+
+/** 按 UTF-8 字节上限裁剪字符串，不产生半个码点。 */
+function truncate_utf8(value: string, max_bytes: number): string {
+  let bytes = 0;
+  let end = 0;
+  for (const char of value) {
+    const size = Buffer.byteLength(char, "utf8");
+    if (bytes + size > max_bytes) break;
+    bytes += size;
+    end += char.length;
+  }
+  return value.slice(0, end);
+}
+
+// 瘦化时多留一个 UTF-8 码点，让投影层的 to_public_entry 能可靠识别「正文被裁剪」
+// 并标记 outputTruncated；完整正文由 read_full_entry 从存储按需读回。
+const SLIM_TOOL_OUTPUT_BYTES = AGENT_TOOL_OUTPUT_PREVIEW_BYTES + 4;
+
+/**
+ * 已提交记录只保留投影所需结构：工具结果正文裁剪到预览，其余字段（输入回执、
+ * 助手消息、工具调用参数、时间戳）原样保留。大输出不进入常驻 records，
+ * 完整内容仍可从 SDK 存储按记录身份读回。
+ */
+export function slim_entry_record(record: EntryRecord): EntryRecord {
+  const model = record.model;
+  if (model === undefined) return record;
+  let cut = false;
+  const slim = model.map((message) => {
+    if (message.role !== "toolResult") return message;
+    const content = message.content.map((part) => {
+      if (part.type !== "text") return part;
+      if (Buffer.byteLength(part.text, "utf8") <= AGENT_TOOL_OUTPUT_PREVIEW_BYTES) return part;
+      cut = true;
+      return { ...part, text: truncate_utf8(part.text, SLIM_TOOL_OUTPUT_BYTES) };
+    });
+    return { ...message, content };
+  });
+  return cut ? { ...record, model: slim } : record;
+}
+
+/** 用户输入按历史身份标记轮次起点；压缩等无输入条目据此归属轮次。 */
+type RoundMark = { id: number; roundId: string };
+
+/** 任务属于其提交位置之前最近的用户轮次，读取顺序和后续轮次都不能改变它。 */
+function read_round_at(marks: readonly RoundMark[], order: number): string | undefined {
+  let round: string | undefined;
+  for (const mark of marks) {
+    if (mark.id > order) break;
+    round = mark.roundId;
+  }
+  return round;
+}
+
 /** 可重建的公开投影。原始事实和查询索引只在这里保存，正文更新不扫描历史。 */
 export class AgentChatView {
+  /** 按需从 SDK 存储读回完整记录；未注入时退回到已常驻（测试夹具）的记录。 */
+  private read_full_record: ((id: number) => Promise<EntryRecord | undefined>) | null = null;
+
+  public set_full_record_reader(reader: (id: number) => Promise<EntryRecord | undefined>): void {
+    this.read_full_record = reader;
+  }
+
   public readonly records = new Map<number, EntryRecord>(); // 已读取的 SDK 历史，供分支恢复与修订定位
   public readonly conversations = new Map<number, ConversationRecord>(); // 分支继承关系，用于计算祖先切点
   public readonly submissions = new Map<number, SubmissionRecord>(); // 产品输入与实际历史条目的关联回执
@@ -40,6 +158,11 @@ export class AgentChatView {
   private readonly rows = new Map<string, Row>();
   private readonly inputSubmissions = new Map<number, SubmissionRecord>(); // 旧历史通过条目身份定位原提交回执
   private readonly calls = new Map<string, string>(); // 工具调用身份到公开条目的查询索引
+  /** 工具结果所在的 SDK 记录身份，供详情弹窗按需读回完整正文。 */
+  private readonly toolResultLocations = new Map<
+    string,
+    { recordId: number; toolCallId: string }
+  >();
   private readonly userRecords = new Map<string, EntryRecord>(); // 轮次状态变化时定位原用户消息
   private readonly changed = new Map<string, AgentEntry>(); // 尚未发布的条目，同一身份只保留最新值
   private readonly pendingRecords = new Set<number>();
@@ -57,10 +180,138 @@ export class AgentChatView {
   public get entries(): AgentEntry[] {
     return this.order.map((id) => this.rows.get(id)!.entry);
   }
+
+  /**
+   * 读取完整历史中某个位置之前的窗口。`before` 可以是任意公开条目 id；
+   * 返回的 `entries` 只含内容条目，轮次头额外附带且不占页预算。
+   */
+  public timeline_window(before: string | null, limit: number): AgentTimelineWindow {
+    if (!Number.isSafeInteger(limit) || limit <= 0)
+      throw new Error("Agent timeline page size is invalid.");
+    let end = this.order.length;
+    if (before !== null) {
+      const index = this.order.indexOf(before);
+      if (index < 0) throw new AgentTimelineCursorExpiredError();
+      end = index;
+    }
+    let start = end;
+    let content = 0;
+    while (start > 0 && content < limit) {
+      start--;
+      if (!is_round_header(this.rows.get(this.order[start]!)!.entry)) content++;
+    }
+    const included = this.order.slice(start, end);
+    const round_ids = new Set<string>();
+    for (const id of included) {
+      const entry = this.rows.get(id)!.entry;
+      // 页内轮次头即使尚无内容也要保留，否则刚发送的轮次会从快照消失。
+      if (is_round_header(entry)) round_ids.add(entry.id);
+      else round_ids.add(entry.roundId);
+    }
+    // 页首可能落在轮次中间，轮次头在页外也要补上，形成“轮次头 + 加载更早”。
+    const header_indices = new Map<string, number>();
+    for (let index = 0; index < this.order.length; index++) {
+      const entry = this.rows.get(this.order[index]!)!.entry;
+      if (is_round_header(entry) && round_ids.has(entry.id)) header_indices.set(entry.id, index);
+    }
+    const has_earlier = start > 0;
+    const next_cursor = start > 0 ? this.order[start]! : null;
+    // 轮次内更早内容：页首之前是否还有同轮次内容。
+    const earlier_rounds = new Set<string>();
+    for (let index = 0; index < start; index++) {
+      const entry = this.rows.get(this.order[index]!)!.entry;
+      if (!is_round_header(entry)) earlier_rounds.add(entry.roundId);
+    }
+    const rounds: AgentTimelineRound[] = [...header_indices.entries()]
+      .sort((a, b) => a[1] - b[1])
+      .map(([id]) => ({ id, hasEarlier: earlier_rounds.has(id) }));
+    return {
+      entries: included
+        .map((id) => this.rows.get(id)!.entry)
+        .filter((entry) => !is_round_header(entry))
+        .map((entry) => to_public_entry(entry)),
+      headers: rounds.map((round) => this.rows.get(round.id)!.entry),
+      rounds,
+      hasEarlier: has_earlier,
+      nextCursor: next_cursor,
+    };
+  }
+
+  /** 统计当前分支某个轮次内指定 delivery 的输入数。 */
+  public count_inputs(roundId: string, delivery: AgentInputDelivery): number {
+    let count = 0;
+    for (const record of this.branch_records()) {
+      const input = this.read_input(record);
+      if (input?.roundId === roundId && input.delivery === delivery) count++;
+    }
+    return count;
+  }
+
+  /** 从任务链根开始统计指定 delivery，自动继续按链累计。 */
+  public count_chain_inputs(rootId: string, delivery: AgentInputDelivery): number {
+    let seen_root = false;
+    let count = 0;
+    for (const record of this.branch_records()) {
+      const input = this.read_input(record);
+      if (input === undefined) continue;
+      if (input.delivery === "round" && input.roundId === rootId) {
+        seen_root = true;
+        continue;
+      }
+      if (!seen_root) continue;
+      if (input.delivery === delivery) count++;
+    }
+    return count;
+  }
+
+  /** 找到轮次所属任务链的根：当前轮次之前最近一条普通用户发送。 */
+  public find_round_root(roundId: string): string | null {
+    let root: string | null = null;
+    for (const record of this.branch_records()) {
+      const input = this.read_input(record);
+      if (input?.delivery !== "round") continue;
+      root = input.roundId;
+      if (input.roundId === roundId) return root;
+    }
+    return root;
+  }
+
+  /**
+   * 按公开条目身份读取完整内容。时间线只持有工具输出预览，完整正文按需从
+   * SDK 存储读回；瘦化的常驻记录只用于测试夹具与读者缺席时的回退。
+   */
+  public async read_full_entry(id: string): Promise<AgentEntry | undefined> {
+    const row = this.rows.get(id);
+    if (row === undefined || row.entry.kind !== "tool_call") return row?.entry;
+    const location = this.toolResultLocations.get(id);
+    if (location === undefined || row.entry.status === "running") return row.entry;
+    // toolResult 位于发起调用之后的独立记录，位置索引只存身份，不常驻正文。
+    const record = this.read_full_record
+      ? await this.read_full_record(location.recordId)
+      : this.records.get(location.recordId);
+    const result = record?.model?.find(
+      (message) => message.role === "toolResult" && message.toolCallId === location.toolCallId,
+    );
+    if (result === undefined || result.role !== "toolResult") return row.entry;
+    const output = result.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+    // 显式重建为终态工具条目，避免判别联合在展开时与 running 变体的 null 输出冲突。
+    return {
+      kind: "tool_call",
+      id: row.entry.id,
+      roundId: row.entry.roundId,
+      toolName: row.entry.toolName,
+      input: row.entry.input,
+      createdAt: row.entry.createdAt,
+      status: row.entry.status,
+      output,
+      outputTruncated: false,
+    };
+  }
+
   /** 实例故障只覆盖当前公开轮次，重开投影仍由持久化回执决定。 */
   public fail_round(id: string | null, endedAt: number, failure: AgentRunFailure | null): void {
     const row = id === null ? undefined : this.rows.get(id);
-    if (row?.entry.kind === "user_message" && row.entry.delivery === "round")
+    if (row?.entry.kind === "user_message" && is_round_header(row.entry))
       this.put({ ...row.entry, status: "error", endedAt, failure }, row.order);
   }
   /** 祖先分支只公开切点以前的事实。 */
@@ -78,7 +329,7 @@ export class AgentChatView {
   public observe(publication: CommitPublication): void {
     for (const change of publication.changes) {
       if (change.type === "entry") {
-        this.records.set(change.value.id, change.value);
+        this.records.set(change.value.id, slim_entry_record(change.value));
         this.pendingRecords.add(change.value.id);
       } else if (change.type === "conversation")
         this.conversations.set(change.value.id, change.value);
@@ -167,9 +418,14 @@ export class AgentChatView {
           if (startedAt !== previous.compactionStartedAt[id]) this.pendingTasks.add(Number(id));
         }
       }
-      for (const id of this.pendingTasks) {
-        const task = this.compactions.get(id)!;
-        if (this.visible(task.conversationId, id)) this.read_task(task);
+      if (this.pendingTasks.size > 0) {
+        // 压缩任务可能晚于后续轮次提交，按任务身份而不是读取顺序归属轮次。
+        const round_marks = this.read_round_marks(this.branch_records());
+        for (const id of this.pendingTasks) {
+          const task = this.compactions.get(id)!;
+          if (this.visible(task.conversationId, id))
+            this.read_task(task, read_round_at(round_marks, task.id));
+        }
       }
       if (this.liveChanged || previous.rounds !== state.rounds)
         this.read_live(this.live.get(conversationId) ?? {});
@@ -205,6 +461,7 @@ export class AgentChatView {
     this.rows.clear();
     this.inputSubmissions.clear();
     this.calls.clear();
+    this.toolResultLocations.clear();
     this.userRecords.clear();
     this.changed.clear();
     this.order = [];
@@ -224,7 +481,8 @@ export class AgentChatView {
     this.restoring = true;
     try {
       for (const record of records) this.read_record(record);
-      for (const task of tasks) this.read_task(task);
+      const round_marks = this.read_round_marks(records);
+      for (const task of tasks) this.read_task(task, read_round_at(round_marks, task.id));
       this.read_live(live);
     } finally {
       this.restoring = false;
@@ -243,7 +501,10 @@ export class AgentChatView {
   }
 
   /** 同一身份原位更新，删除或非尾部顺序变化要求发布完整快照。 */
-  private put(entry: AgentEntry, order: number): void {
+  private put(raw: AgentEntry, order: number): void {
+    // 完整工具正文只留在 SDK 原始记录里，常驻投影与变更缓冲统一持有预览，
+    // 避免同一份大输出在 rows、changed、快照与事件里各占一份。
+    const entry = to_public_entry(raw);
     const previous = this.rows.get(entry.id);
     if (previous?.order === order && isDeepStrictEqual(previous.entry, entry)) return;
     this.rows.set(entry.id, { entry, order });
@@ -274,6 +535,7 @@ export class AgentChatView {
   /** 移除已撤回的临时正文，并让前端重新取得完整顺序。 */
   private remove(id: string): void {
     if (!this.rows.delete(id)) return;
+    this.toolResultLocations.delete(id);
     this.changed.delete(id);
     this.order = this.order.filter((candidate) => candidate !== id);
     this.replace = true;
@@ -284,24 +546,43 @@ export class AgentChatView {
     return read_agent_input(record, this.inputSubmissions.get(record.id), this.state);
   }
 
-  /** `hidden` 输入留在模型历史，普通输入与 `steer` 按产品身份展示。 */
+  /** 按身份顺序记录每个用户输入开启的轮次，供无输入条目归属。 */
+  private read_round_marks(records: readonly EntryRecord[]): RoundMark[] {
+    const marks: RoundMark[] = [];
+    for (const record of records) {
+      const input = this.read_input(record);
+      if (input !== undefined) marks.push({ id: record.id, roundId: input.roundId });
+    }
+    return marks;
+  }
+
+  /** `hidden`、`auto_resume`、`manual_continue` 留在模型历史，普通输入与 `steer` 按产品身份展示。 */
   private read_user(record: EntryRecord, input: AgentInputRecord): void {
-    if (input.delivery === "hidden") return;
     const createdAt = record.model?.find((message) => message.role === "user")?.timestamp ?? 0;
     const base = {
       kind: "user_message" as const,
-      id: input.delivery === "round" ? input.roundId : `user:${record.id}`,
+      id:
+        input.delivery === "round" || input.delivery === "auto_continue"
+          ? input.roundId
+          : `user:${record.id}`,
+      roundId: input.roundId,
       text: input.message.text,
       attachments: structuredClone(input.message.attachments),
       createdAt,
     };
+    if (
+      input.delivery === "hidden" ||
+      input.delivery === "auto_resume" ||
+      input.delivery === "manual_continue"
+    )
+      return;
     const round = this.state.rounds[input.roundId];
     this.put(
       input.delivery === "steer"
         ? { ...base, delivery: "steer", status: "success", endedAt: createdAt }
         : {
             ...base,
-            delivery: "round",
+            delivery: input.delivery,
             status: round?.status ?? "running",
             endedAt: round?.endedAt ?? null,
             averageTokensPerSecond: round?.averageTokensPerSecond ?? null,
@@ -309,17 +590,19 @@ export class AgentChatView {
           },
       record.id,
     );
-    if (input.delivery === "round") this.userRecords.set(input.roundId, record);
+    if (input.delivery === "round" || input.delivery === "auto_continue")
+      this.userRecords.set(input.roundId, record);
   }
 
   /** 按历史顺序转换消息，工具结果归回原调用及其所属轮次。 */
   private read_record(record: EntryRecord): void {
     const input = this.read_input(record);
-    if (input !== undefined && input.delivery !== "hidden") {
+    if (input !== undefined) {
       this.currentRound = input.roundId;
       this.read_user(record, input);
     }
     if (this.currentRound === undefined) return;
+    const round_id = this.currentRound;
     for (const message of record.model ?? []) {
       if (message.role === "assistant") {
         const id = assistant_entry_id(record.byTaskId, record.id);
@@ -329,6 +612,7 @@ export class AgentChatView {
             {
               kind: "assistant_message",
               id,
+              roundId: round_id,
               parts,
               status:
                 message.stopReason === "error"
@@ -350,10 +634,12 @@ export class AgentChatView {
             {
               kind: "tool_call",
               id,
+              roundId: round_id,
               toolName: call.name,
               input: JsonTool.stringifyStrict(call.arguments),
               status: "running",
               output: null,
+              outputTruncated: false,
               createdAt: message.timestamp,
             },
             record.id,
@@ -361,13 +647,19 @@ export class AgentChatView {
         }
       } else if (message.role === "toolResult") {
         const id = this.calls.get(message.toolCallId);
-        const row = id === undefined ? undefined : this.rows.get(id);
+        if (id === undefined) continue;
+        const row = this.rows.get(id);
         if (row?.entry.kind !== "tool_call") continue;
+        this.toolResultLocations.set(id, {
+          recordId: record.id,
+          toolCallId: message.toolCallId,
+        });
         this.put(
           {
             ...row.entry,
             status: read_agent_tool_result_status(record, message),
             output: message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+            outputTruncated: false,
           },
           row.order,
         );
@@ -376,7 +668,7 @@ export class AgentChatView {
   }
 
   /** 选择切点时隐藏运行块，确认摘要范围后公开，失败保留诊断条目。 */
-  private read_task(task: TaskRecordValue): void {
+  private read_task(task: TaskRecordValue, round_id: string | undefined): void {
     const { status } = read_agent_compaction_result(task, this.submissions);
     const startedAt = this.state.compactionStartedAt[task.id];
     const id = `compaction:${task.id}`;
@@ -388,7 +680,16 @@ export class AgentChatView {
       this.remove(id);
       return;
     }
-    this.put({ kind: "context_compaction", id, createdAt: startedAt ?? null, status }, task.id);
+    this.put(
+      {
+        kind: "context_compaction",
+        id,
+        roundId: round_id ?? "",
+        createdAt: startedAt ?? null,
+        status,
+      },
+      task.id,
+    );
   }
 
   /** 流式正文沿用任务身份，正式条目以 SDK 排序身份接替临时位置。 */
@@ -416,6 +717,7 @@ export class AgentChatView {
       {
         kind: "assistant_message",
         id: nextId,
+        roundId: this.currentRound,
         parts,
         status: "running",
         createdAt: message.timestamp,

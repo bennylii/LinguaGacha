@@ -1,3 +1,4 @@
+import { DesktopApiError } from "@frontend/app/desktop/desktop-api";
 import { type ReactNode, act, cloneElement, isValidElement } from "react";
 
 import { createRoot, type Root } from "react-dom/client";
@@ -5,27 +6,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LocaleProvider } from "@frontend/app/locale/locale-provider";
 import { ProjectPage } from "@frontend/pages/project-page/page";
+import { PROJECT_LANGUAGE_PREFERENCE_STORAGE_KEY } from "./project-language-preference";
 import { create_desktop_bridge_api_mock } from "../../../test/desktop-bridge-mock";
 
-const {
-  api_fetch_mock,
-  desktop_runtime_fixture,
-  dismiss_toast_mock,
-  push_progress_toast_mock,
-  push_toast_mock,
-  update_progress_toast_mock,
-} = vi.hoisted(() => {
-  return {
-    api_fetch_mock: vi.fn(),
-    desktop_runtime_fixture: {
-      current: null as ReturnType<typeof create_desktop_runtime_fixture> | null,
-    },
-    dismiss_toast_mock: vi.fn(),
-    push_progress_toast_mock: vi.fn(() => "project-loading-toast"),
-    push_toast_mock: vi.fn(),
-    update_progress_toast_mock: vi.fn(),
-  };
-});
+const { api_fetch_mock, desktop_runtime_fixture, run_modal_progress_toast_mock, push_toast_mock } =
+  vi.hoisted(() => {
+    return {
+      api_fetch_mock: vi.fn(),
+      desktop_runtime_fixture: {
+        current: null as ReturnType<typeof create_desktop_runtime_fixture> | null,
+      },
+      run_modal_progress_toast_mock: vi.fn((args: { task: () => Promise<unknown> }) => args.task()),
+      push_toast_mock: vi.fn(),
+    };
+  });
 
 vi.mock("@frontend/app/desktop/desktop-api", async () => {
   const actual = await vi.importActual<typeof import("@frontend/app/desktop/desktop-api")>(
@@ -44,11 +38,9 @@ vi.mock("@frontend/app/state/use-desktop-state", () => {
 });
 
 vi.mock("@frontend/app/feedback/desktop-toast", () => ({
-  dismiss_toast: dismiss_toast_mock,
-  push_progress_toast: push_progress_toast_mock,
+  run_modal_progress_toast: run_modal_progress_toast_mock,
   push_error_toast: push_toast_mock,
   push_toast: push_toast_mock,
-  update_progress_toast: update_progress_toast_mock,
 }));
 
 vi.mock("@frontend/widgets/app-context-menu", () => {
@@ -130,9 +122,22 @@ vi.mock("@frontend/shadcn/tooltip", () => {
   };
 });
 
-vi.mock("@frontend/widgets/app-alert-dialog", () => {
+// 语言下拉替换为按钮，测试直接表达用户选择的语言。
+vi.mock("@frontend/features/project-language/project-language-select", () => {
   return {
-    AppConfirmDialog: () => null,
+    ProjectLanguageSelect: (props: {
+      field: string;
+      value: string;
+      on_change: (next_value: string) => void;
+    }) => (
+      <span data-field={props.field} data-value={props.value}>
+        {["JA", "EN", "KO", "ZH"].map((code) => (
+          <button key={code} type="button" onClick={() => props.on_change(code)}>
+            {`${props.field}:${code}`}
+          </button>
+        ))}
+      </span>
+    ),
   };
 });
 
@@ -140,16 +145,12 @@ vi.mock("@frontend/widgets/app-alert-dialog", () => {
 function create_settings_snapshot(overrides: Record<string, unknown> = {}) {
   return {
     app_language: "ZH",
-    source_language: "JA",
-    target_language: "ZH",
     project_save_mode: "SOURCE",
     project_fixed_path: "",
     output_folder_open_on_finish: false,
     request_timeout: 120,
     preceding_lines_threshold: 0,
-    clean_ruby: false,
-    deduplication_in_bilingual: true,
-    write_translated_name_fields_to_file: true,
+    following_lines_threshold: 0,
     mtool_optimizer_enable: true,
     skip_duplicate_source_text_enable: true,
     glossary_default_preset: "",
@@ -166,7 +167,6 @@ function create_settings_snapshot(overrides: Record<string, unknown> = {}) {
 /** 构造页面公开依赖的 DesktopState 测试替身。 */
 function create_desktop_runtime_fixture(settings_overrides: Record<string, unknown> = {}) {
   return {
-    project_session_stage: null,
     settings_snapshot: create_settings_snapshot(settings_overrides),
     refresh_project_snapshot: vi.fn(),
     set_project_session_status: vi.fn(),
@@ -183,7 +183,7 @@ function install_desktop_app_fixture(): void {
     value: create_desktop_bridge_api_mock({
       methods: {
         getPathForFile: vi.fn(() => ""),
-        pickFixedProjectDirectory: vi.fn(async () => ({ canceled: true, paths: [] })),
+        pickDirectory: vi.fn(async () => ({ canceled: true, paths: [] })),
         pickProjectFilePath: vi.fn(async () => ({ canceled: true, paths: [] })),
         pickProjectSavePath: vi.fn(async () => ({ canceled: true, paths: [] })),
         pickProjectSourceDirectoryPath: vi.fn(async () => ({ canceled: true, paths: [] })),
@@ -209,6 +209,13 @@ function get_button_by_text(container: HTMLElement, text: string): HTMLButtonEle
   return button;
 }
 
+/** 受控输入框走原生 setter，让 React 观察到值变化。 */
+function set_input_value(input: HTMLInputElement, value: string): void {
+  const value_setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  value_setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 /** 通过真实拖放入口提交宿主路径，让页面自行完成摘要与选择。 */
 async function drop_paths(target: HTMLElement, paths: string[]): Promise<void> {
   const files = paths.map((path) => new File([], path));
@@ -227,6 +234,7 @@ describe("ProjectPage", () => {
   let root: Root | null = null;
 
   beforeEach(() => {
+    window.localStorage.removeItem(PROJECT_LANGUAGE_PREFERENCE_STORAGE_KEY);
     desktop_runtime_fixture.current = create_desktop_runtime_fixture();
     install_desktop_app_fixture();
     window.requestAnimationFrame = (callback: FrameRequestCallback): number => {
@@ -259,10 +267,11 @@ describe("ProjectPage", () => {
     container = null;
     root = null;
     api_fetch_mock.mockReset();
-    dismiss_toast_mock.mockReset();
-    push_progress_toast_mock.mockClear();
+    run_modal_progress_toast_mock.mockClear();
     push_toast_mock.mockReset();
-    update_progress_toast_mock.mockReset();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    window.localStorage.removeItem(PROJECT_LANGUAGE_PREFERENCE_STORAGE_KEY);
   });
 
   /** 使用真实中文 i18n 资源挂载项目页。 */
@@ -280,21 +289,168 @@ describe("ProjectPage", () => {
     });
   }
 
-  /** 复用公开交互完成一次源文件选择和工程创建。 */
-  async function create_project_from_selected_source(): Promise<void> {
-    if (container === null) {
-      throw new Error("项目页尚未挂载。");
-    }
-    const page_container = container;
-
+  /** 新建前的语言弹窗渲染在页面容器外，确认后继续创建。 */
+  async function confirm_create_languages(): Promise<void> {
     await act(async () => {
-      get_button_by_text(page_container, "选择文件").click();
-    });
-
-    await act(async () => {
-      get_button_by_text(page_container, "创建工程").click();
+      get_button_by_text(document.body, "确认").click();
     });
   }
+
+  /** 销毁页面内存后重新进入，验证持久偏好的恢复。 */
+  async function remount_page(): Promise<void> {
+    await act(async () => root?.unmount());
+    container?.remove();
+    await mount_page();
+  }
+
+  /** 从来源选择入口打开语言弹窗。 */
+  async function open_create_languages(): Promise<void> {
+    await act(async () => get_button_by_text(container!, "选择文件").click());
+    await act(async () => get_button_by_text(container!, "创建工程").click());
+  }
+
+  /** 通过下拉替身的按钮选择场景指定的语言。 */
+  async function select_create_languages(source: string, target: string): Promise<void> {
+    await act(async () => {
+      get_button_by_text(document.body, `source_language:${source}`).click();
+      get_button_by_text(document.body, `target_language:${target}`).click();
+    });
+  }
+
+  /** 读取下拉替身展示的当前语言，供用户行为断言使用。 */
+  function read_create_languages() {
+    return {
+      source_language: document
+        .querySelector('[data-field="source_language"]')
+        ?.getAttribute("data-value"),
+      target_language: document
+        .querySelector('[data-field="target_language"]')
+        ?.getAttribute("data-value"),
+    };
+  }
+
+  it.each(["backup", "order", null])("游戏确认取消于 %s，完成确认后才创建工程", async (cancel) => {
+    const game_root = "E:/game";
+    api_fetch_mock.mockResolvedValueOnce({
+      source_file_count: 1,
+      contains_game: true,
+      format_hit_counts: { godot: 1 },
+      godot_packs: [{ game_root, game_name: "game", external_pcks: ["base.pck", "patch.pck"] }],
+    });
+    await mount_page();
+    vi.useFakeTimers();
+    await open_create_languages();
+    const primary = [...document.querySelectorAll("button")].find((button) =>
+      /^\d+s/u.test(button.textContent ?? ""),
+    )!;
+    expect(primary.disabled).toBe(true);
+    expect(document.querySelector('[data-field="source_language"]')).toBeNull();
+    if (cancel === "backup") {
+      await act(async () => get_button_by_text(document.body, "取消").click());
+      expect(document.querySelector('[data-field="source_language"]')).toBeNull();
+      expect(
+        api_fetch_mock.mock.calls.some(([path]) => path === "/api/session/project/create"),
+      ).toBe(false);
+      return;
+    }
+    act(() => vi.advanceTimersByTime(Number.parseInt(primary.textContent!, 10) * 1_000));
+    await act(async () => primary.click());
+    await confirm_create_languages();
+    expect(document.querySelector('[role="dialog"] ol')?.textContent).toContain("base.pck");
+    expect(api_fetch_mock.mock.calls.some(([path]) => path === "/api/session/project/create")).toBe(
+      false,
+    );
+    await act(async () => {
+      get_button_by_text(document.body, cancel ? "取消" : "确认").click();
+    });
+    if (cancel)
+      expect(
+        api_fetch_mock.mock.calls.some(([path]) => path === "/api/session/project/create"),
+      ).toBe(false);
+    else
+      expect(api_fetch_mock).toHaveBeenCalledWith(
+        "/api/session/project/create",
+        expect.objectContaining({
+          godot_pack_orders: [{ game_root, ordered_pcks: ["base.pck", "patch.pck"] }],
+        }),
+      );
+  });
+
+  it.each(["loading", "failed"])("预览 %s 时仍能打开，打开后的迟到结果不再消费", async (state) => {
+    const preview = Promise.withResolvers<object>();
+    api_fetch_mock.mockImplementation((path: string) =>
+      path.endsWith("/preview") ? preview.promise : Promise.resolve({}),
+    );
+    await mount_page();
+    await drop_paths(get_button_by_text(container!, "点击或拖拽 .lg 文件"), ["E:/open.lg"]);
+    if (state === "failed") await act(async () => preview.reject(new Error("preview failed")));
+    expect(get_button_by_text(container!, "打开工程").disabled).toBe(false);
+    expect(run_modal_progress_toast_mock).not.toHaveBeenCalled();
+    push_toast_mock.mockClear();
+    await act(async () => get_button_by_text(container!, "打开工程").click());
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/session/project/open", {
+      path: "E:/open.lg",
+    });
+    if (state === "loading") {
+      expect(
+        api_fetch_mock.mock.calls.find(([path]) => path.endsWith("/preview"))?.[2].aborted,
+      ).toBe(true);
+      await act(async () => preview.reject(new Error("late preview failure")));
+      expect(push_toast_mock).not.toHaveBeenCalled();
+    }
+    expect(get_button_by_text(container!, "open.lg")).toBeDefined();
+  });
+
+  it("点击失效最近工程立即确认移除，取消后保留记录并禁用打开", async () => {
+    desktop_runtime_fixture.current = create_desktop_runtime_fixture({
+      recent_projects: [{ path: "E:/missing.lg", name: "失效工程" }],
+    });
+    api_fetch_mock.mockRejectedValueOnce(new DesktopApiError({ code: "project.not_found" }));
+    await mount_page();
+    await act(async () => get_button_by_text(container!, "失效工程").click());
+    expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+    expect(get_button_by_text(container!, "点击或拖拽 .lg 文件")).toBeDefined(); // 失效工程未被选中。
+    expect(get_button_by_text(container!, "打开工程").disabled).toBe(true);
+    expect(push_toast_mock).not.toHaveBeenCalled();
+    api_fetch_mock.mockClear();
+    await act(async () => get_button_by_text(document.body, "取消").click());
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(get_button_by_text(container!, "失效工程")).toBeDefined();
+    expect(get_button_by_text(container!, "打开工程").disabled).toBe(true);
+    expect(api_fetch_mock).not.toHaveBeenCalled();
+  });
+
+  it("高版本确认强调完整版本并接入延迟确认", async () => {
+    api_fetch_mock.mockImplementation(async (path: string, body: Record<string, unknown>) => {
+      if (path.endsWith("/preview")) throw new Error("preview unavailable");
+      if (path.endsWith("/open") && !body.confirmed_target_app_version)
+        throw new DesktopApiError({
+          code: "project.newer_app_version",
+          details: {
+            target_app_version: "2.1.0",
+            current_app_version: "1.0.0",
+          },
+        });
+      return {};
+    });
+    await mount_page();
+    await drop_paths(get_button_by_text(container!, "点击或拖拽 .lg 文件"), ["E:/newer.lg"]);
+    push_toast_mock.mockClear();
+    vi.useFakeTimers();
+    await act(async () => get_button_by_text(container!, "打开工程").click());
+    expect(document.querySelector(".project-home__version-emphasis")?.textContent).toBe("v2.1.0");
+    expect(push_toast_mock).not.toHaveBeenCalled();
+    const primary = [...document.querySelectorAll("button")].find((button) =>
+      /^\d+s/u.test(button.textContent ?? ""),
+    )!;
+    expect(primary.disabled).toBe(true);
+    act(() => vi.advanceTimersByTime(Number.parseInt(primary.textContent!, 10) * 1000));
+    await act(async () => primary.click());
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/session/project/open", {
+      path: "E:/newer.lg",
+      confirmed_target_app_version: "2.1.0",
+    });
+  });
 
   it("保留预览文件顺序并用当前工程文件名记录最近打开", async () => {
     const paths = [
@@ -358,7 +514,8 @@ describe("ProjectPage", () => {
   it("新建工程默认提交 stem.lg，并用后端真实路径写入最近工程", async () => {
     await mount_page();
 
-    await create_project_from_selected_source();
+    await open_create_languages();
+    await confirm_create_languages();
 
     expect(api_fetch_mock).toHaveBeenCalledWith(
       "/api/session/project/create",
@@ -372,7 +529,258 @@ describe("ProjectPage", () => {
     });
   });
 
-  it("来源摘要全部失败时展示具体文件原因，重新选择仍可恢复", async () => {
+  it("检测小说地址后按远程来源提交创建请求", async () => {
+    const novel_url = "https://n.novelia.cc/novel/kakuyomu/123456";
+    desktop_runtime_fixture.current = create_desktop_runtime_fixture({
+      project_fixed_path: "E:\\Projects",
+    });
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/novel/preview") {
+        return {
+          preview: {
+            origin: "https://n.novelia.cc",
+            kind: "web",
+            title: "测试小说",
+            title_jp: "テスト小説",
+            title_zh: null,
+            chapter_count: 12,
+            filename: "テスト小説.txt",
+          },
+        };
+      }
+      if (path === "/api/session/project/create") {
+        return { project: { path: "E:\\Projects\\テスト小説.lg", loaded: true } };
+      }
+      if (path === "/api/settings/recent-projects/add") {
+        return { settings: { recent_projects: [] } };
+      }
+
+      return {};
+    });
+    await mount_page();
+    const page_container = container!;
+
+    await act(async () => {
+      get_button_by_text(page_container, "小说地址").click();
+    });
+    const novel_input = page_container.querySelector<HTMLInputElement>("input");
+    if (novel_input === null) throw new Error("未找到小说地址输入框。");
+
+    await act(async () => {
+      set_input_value(novel_input, novel_url);
+    });
+    await act(async () => {
+      get_button_by_text(page_container, "检测").click();
+    });
+
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/remote/novel/preview", { url: novel_url });
+    expect(page_container.textContent).toContain("测试小说");
+    expect(page_container.textContent).toContain("12 章");
+
+    await act(async () => {
+      get_button_by_text(page_container, "创建工程").click();
+    });
+    await confirm_create_languages();
+
+    expect(api_fetch_mock).toHaveBeenCalledWith(
+      "/api/session/project/create",
+      expect.objectContaining({
+        remote_novel_url: novel_url,
+        path: "E:\\Projects\\テスト小説.lg",
+      }),
+    );
+    expect(api_fetch_mock).toHaveBeenCalledWith("/api/settings/recent-projects/add", {
+      path: "E:\\Projects\\テスト小説.lg",
+      name: "テスト小説",
+    });
+  });
+
+  it("来源模式切换会清空另一种模式的候选", async () => {
+    const novel_url = "https://n.novelia.cc/novel/kakuyomu/123456";
+    api_fetch_mock.mockImplementation(async (path: string) => {
+      if (path === "/api/remote/novel/preview") {
+        return {
+          preview: {
+            origin: "https://n.novelia.cc",
+            kind: "web",
+            title: "切换前的小说",
+            title_jp: "",
+            title_zh: null,
+            chapter_count: 3,
+            filename: "切換前.txt",
+          },
+        };
+      }
+      if (path === "/api/session/source-files/summary") {
+        return { source_file_count: 1, format_hit_counts: { txt: 1 } };
+      }
+
+      return {};
+    });
+    await mount_page();
+    const page_container = container!;
+
+    await act(async () => {
+      get_button_by_text(page_container, "选择文件").click();
+    });
+    expect(page_container.textContent).toContain("已选择 1 个源文件");
+
+    await act(async () => {
+      get_button_by_text(page_container, "小说地址").click();
+    });
+    expect(page_container.textContent).not.toContain("已选择 1 个源文件");
+
+    const novel_input = page_container.querySelector<HTMLInputElement>("input");
+    if (novel_input === null) throw new Error("未找到小说地址输入框。");
+    await act(async () => {
+      set_input_value(novel_input, novel_url);
+    });
+    await act(async () => {
+      get_button_by_text(page_container, "检测").click();
+    });
+    expect(page_container.textContent).toContain("切换前的小说");
+
+    await act(async () => {
+      get_button_by_text(page_container, "本地文件").click();
+    });
+    expect(page_container.textContent).not.toContain("切换前的小说");
+    expect(page_container.textContent).not.toContain("已选择 1 个源文件");
+
+    await act(async () => {
+      get_button_by_text(page_container, "小说地址").click();
+    });
+    expect(page_container.textContent).not.toContain("切换前的小说");
+    expect((page_container.querySelector<HTMLInputElement>("input")?.value ?? null) === "").toBe(
+      true,
+    );
+  });
+
+  it("点击创建先选择工程语言，取消保留来源且不创建", async () => {
+    await mount_page();
+    await act(async () => {
+      get_button_by_text(container!, "选择文件").click();
+    });
+    await act(async () => {
+      get_button_by_text(container!, "创建工程").click();
+    });
+
+    expect(document.body.textContent).toContain("工程语言");
+    await act(async () => {
+      get_button_by_text(document.body, "取消").click();
+    });
+
+    expect(api_fetch_mock).not.toHaveBeenCalledWith(
+      "/api/session/project/create",
+      expect.anything(),
+    );
+    expect(container!.textContent).toContain("已选择 1 个源文件");
+  });
+
+  it("确认后使用所选语言创建，成功后再次新建及重新挂载仍使用该组合", async () => {
+    await mount_page();
+    await open_create_languages();
+    await select_create_languages("EN", "KO");
+    await confirm_create_languages();
+
+    const languages = { source_language: "EN", target_language: "KO" };
+    expect(api_fetch_mock).toHaveBeenCalledWith(
+      "/api/session/project/create",
+      expect.objectContaining({ languages }),
+    );
+    await open_create_languages();
+    expect(read_create_languages()).toEqual(languages);
+    await act(async () => get_button_by_text(document.body, "取消").click());
+
+    await remount_page();
+    await open_create_languages();
+    expect(read_create_languages()).toEqual(languages);
+  });
+
+  it("取消语言弹窗保留本次草稿，重新挂载恢复此前确认值", async () => {
+    window.localStorage.setItem(
+      PROJECT_LANGUAGE_PREFERENCE_STORAGE_KEY,
+      JSON.stringify({
+        source_language: "KO",
+        target_language: "EN",
+      }),
+    );
+    await mount_page();
+    await open_create_languages();
+    expect(read_create_languages()).toEqual({ source_language: "KO", target_language: "EN" });
+    await select_create_languages("EN", "KO");
+    await act(async () => get_button_by_text(document.body, "取消").click());
+    await act(async () => get_button_by_text(container!, "创建工程").click());
+    expect(read_create_languages()).toEqual({ source_language: "EN", target_language: "KO" });
+    expect(api_fetch_mock).not.toHaveBeenCalledWith(
+      "/api/session/project/create",
+      expect.anything(),
+    );
+
+    await remount_page();
+    await open_create_languages();
+    expect(read_create_languages()).toEqual({ source_language: "KO", target_language: "EN" });
+  });
+
+  it("取消保存路径后保留已确认的语言，重新挂载仍可恢复", async () => {
+    desktop_runtime_fixture.current = create_desktop_runtime_fixture({
+      project_save_mode: "MANUAL",
+    });
+    await mount_page();
+    await open_create_languages();
+    await select_create_languages("EN", "KO");
+    await confirm_create_languages();
+
+    expect(window.desktopApp.pickProjectSavePath).toHaveBeenCalled();
+    expect(api_fetch_mock).not.toHaveBeenCalledWith(
+      "/api/session/project/create",
+      expect.anything(),
+    );
+    await act(async () => get_button_by_text(container!, "创建工程").click());
+    expect(read_create_languages()).toEqual({ source_language: "EN", target_language: "KO" });
+
+    await remount_page();
+    await open_create_languages();
+    expect(read_create_languages()).toEqual({ source_language: "EN", target_language: "KO" });
+  });
+
+  it("偏好写入失败时仍使用内存草稿创建工程", async () => {
+    await mount_page();
+    await open_create_languages();
+    await select_create_languages("EN", "KO");
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("quota exceeded");
+    });
+    await confirm_create_languages();
+
+    expect(api_fetch_mock).toHaveBeenCalledWith(
+      "/api/session/project/create",
+      expect.objectContaining({ languages: { source_language: "EN", target_language: "KO" } }),
+    );
+    expect(container!.textContent).toContain("点击或拖拽源文件");
+  });
+
+  it("确认后使用所选语言创建，失败后重试或重新挂载保留已确认选择", async () => {
+    await mount_page();
+    await open_create_languages();
+    await select_create_languages("EN", "KO");
+    api_fetch_mock.mockRejectedValueOnce(new Error("create failed"));
+    await confirm_create_languages();
+    api_fetch_mock.mockClear(); // 重试载荷必须来自后续请求。
+    await act(async () => {
+      get_button_by_text(container!, "创建工程").click();
+    });
+    expect(read_create_languages()).toEqual({ source_language: "EN", target_language: "KO" });
+    await remount_page();
+    await open_create_languages();
+    expect(read_create_languages()).toEqual({ source_language: "EN", target_language: "KO" });
+    await confirm_create_languages();
+    expect(api_fetch_mock).toHaveBeenCalledWith(
+      "/api/session/project/create",
+      expect.objectContaining({ languages: { source_language: "EN", target_language: "KO" } }),
+    );
+  });
+
+  it("来源摘要没有可用文件时只提示结果，重新选择仍可恢复", async () => {
     const source = "E:/Source/broken.exe";
     vi.mocked(window.desktopApp.pickProjectSourceFilePath).mockResolvedValueOnce({
       canceled: false,
@@ -383,15 +791,6 @@ describe("ProjectPage", () => {
         ? {
             source_file_count: 0,
             format_hit_counts: {},
-            failed_files: [
-              {
-                source_path: source,
-                rel_path: "broken.exe",
-                filename: "broken.exe",
-                code: "file.io_failed",
-                message: "EVB header damaged",
-              },
-            ],
           }
         : {},
     );
@@ -399,14 +798,7 @@ describe("ProjectPage", () => {
     await act(async () => {
       get_button_by_text(container as HTMLElement, "选择文件").click();
     });
-    expect(push_toast_mock).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining("broken.exe"),
-    );
-    expect(push_toast_mock).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining("EVB header damaged"),
-    );
+    expect(push_toast_mock).toHaveBeenCalledOnce();
     vi.mocked(window.desktopApp.pickProjectSourceFilePath).mockResolvedValueOnce({
       canceled: false,
       paths: ["E:/Source/good.txt"],
@@ -448,6 +840,7 @@ describe("ProjectPage", () => {
     await act(async () => {
       get_button_by_text(container as HTMLElement, "创建工程").click();
     });
+    await confirm_create_languages();
 
     expect(api_fetch_mock).toHaveBeenCalledWith("/api/session/source-files/summary", {
       source_paths: selected_paths,
@@ -485,6 +878,7 @@ describe("ProjectPage", () => {
     await act(async () => {
       get_button_by_text(container!, "创建工程").click();
     });
+    await confirm_create_languages();
     expect(api_fetch_mock).toHaveBeenCalledWith(
       "/api/session/project/create",
       expect.objectContaining({ source_paths, path: "E:/Source/a.lg" }),
@@ -502,6 +896,7 @@ describe("ProjectPage", () => {
     await act(async () => {
       get_button_by_text(container!, "创建工程").click();
     });
+    await confirm_create_languages();
     expect(api_fetch_mock).toHaveBeenCalledWith(
       "/api/session/project/create",
       expect.objectContaining({ source_paths }),
@@ -603,6 +998,7 @@ describe("ProjectPage", () => {
     await act(async () => {
       get_button_by_text(container!, "创建工程").click();
     });
+    await confirm_create_languages();
     const dropzone = get_button_by_text(container!, "已选择 1 个源文件");
     expect(dropzone.disabled).toBe(true);
     expect(get_button_by_text(container!, "选择文件").disabled).toBe(true);

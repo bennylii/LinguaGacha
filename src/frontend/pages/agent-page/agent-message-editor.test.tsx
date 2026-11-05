@@ -807,12 +807,15 @@ describe("AgentMessageEditor", () => {
       state: "idle",
       pendingDecision: null,
       entries: [],
+      timeline: { hasEarlier: false, nextCursor: null, rounds: [] },
       skills: [],
       inputQueue: { paused: false, canSendNow: false, items: [] },
       doing: null,
       context: { tokens: null, compactable: false, limits: null },
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       tokenSpeed: null,
+      autoResume: null,
+      autoContinue: null,
     };
     chat_mocks.api_get.mockReset().mockResolvedValue(snapshot);
     chat_mocks.api_fetch.mockReset().mockResolvedValue({ revision: 0, status: "accepted" });

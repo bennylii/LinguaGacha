@@ -5,8 +5,11 @@ export const en_us_toolbox_page = {
   title: "Toolbox",
   entries: {
     game_font: {
+      description: "Godot · RenPy · Tyrano · WOLFRPG · RPGMAKER MV/MZ",
+    },
+    translation_transfer: {
       description:
-        "Supported engines:\n<emphasis>WOLF RPG 3</emphasis>\n<emphasis>RPG Maker MV/MZ</emphasis>",
+        "Transfer completed translations into another project, commonly used for updating content such as novels or games",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_toolbox_page>;

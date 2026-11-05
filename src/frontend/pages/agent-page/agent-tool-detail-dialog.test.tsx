@@ -17,6 +17,11 @@ vi.mock("@frontend/app/appearance/appearance-context", () => ({
   useAppearance: () => ({ resolved_theme: "light" }),
 }));
 
+const read_entry = vi.hoisted(() => vi.fn());
+vi.mock("@frontend/app/session/agent/agent-chat-context", () => ({
+  useAgentChatActions: () => ({ readEntry: read_entry }),
+}));
+
 import { AgentToolDetailDialog } from "./agent-tool-detail-dialog";
 
 describe("AgentToolDetailDialog", () => {
@@ -38,6 +43,7 @@ describe("AgentToolDetailDialog", () => {
       document.body.append(container);
       root = createRoot(container);
     }
+    read_entry.mockResolvedValue(entry);
     await act(async () => {
       root?.render(
         <TooltipProvider>
@@ -196,10 +202,12 @@ function tool_running(tool_name: string, input: string): AgentToolEntry {
   return {
     kind: "tool_call",
     id: "tool-1",
+    roundId: "round-1",
     toolName: tool_name,
     input,
     status: "running",
     output: null,
+    outputTruncated: false,
     createdAt: 1,
   };
 }
@@ -209,10 +217,12 @@ function tool_success(tool_name: string, input: string, output: string): AgentTo
   return {
     kind: "tool_call",
     id: "tool-1",
+    roundId: "round-1",
     toolName: tool_name,
     input,
     status: "success",
     output: [output],
+    outputTruncated: false,
     createdAt: 1,
   };
 }

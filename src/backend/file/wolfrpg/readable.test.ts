@@ -1,9 +1,10 @@
+import { GameDirectoryOperations } from "../shared/game/game-directory-operations";
 import { expect, it } from "vitest";
 import JSZip from "jszip";
 import { wolf_files, wolf_common, wolf_command } from "../../../test/wolf-fixture";
 import { FileFormatService } from "../file-format-service";
 import { read_game_container } from "../shared/game/format";
-import { read_wolf_sources } from "./readable";
+import { read_wolf_projections } from "./readable";
 import { read_wolf_common } from "./common-events";
 import { read_wolf_map } from "./map";
 import { read_wolf_metadata, wolf_location_key } from "./item";
@@ -18,19 +19,24 @@ it("地图登记资格在条目和 Agent 投影中一致", async () => {
   files.set(common_path, wolf_common(0x91, [wolf_command(101, ["原文"]), wolf_command(101, [""])]));
   for (const [name, content] of files) zip.file(name, content);
   const content = await zip.generateAsync({ type: "uint8array" });
-  const service = new FileFormatService({ target_language: "ZH" }, async () => null);
+  const service = new FileFormatService(
+    new GameDirectoryOperations(),
+    { target_language: "ZH" },
+    async () => null,
+  );
   const parsed = await service.parse_asset("game.zip", content, "WOLFRPG");
   if (parsed.kind !== "items") throw new Error("Expected items");
   const projections = new Map<
     string,
     Pick<WolfSlot, "text" | "location" | "usage" | "context">[]
   >();
-  for await (const [name, bytes] of read_wolf_sources(
+  for await (const [name, bytes] of read_wolf_projections(
     (await read_game_container(content, "game.zip")).members,
   )) {
-    if ([registered, unregistered, common_path].some((file) => name === file + ".json"))
+    expect(files.has(name)).toBe(false);
+    if ([registered, unregistered, common_path].some((file) => name === file + ".reference.json"))
       projections.set(
-        name.slice(0, -5),
+        name.slice(0, -".reference.json".length),
         (
           JSON.parse(Buffer.from(bytes).toString()) as {
             strings: Pick<WolfSlot, "text" | "location" | "usage" | "context">[];
@@ -77,5 +83,5 @@ it("地图登记资格在条目和 Agent 投影中一致", async () => {
   ).toBe("metadata");
   expect(projections.get(common_path)!.some((slot) => slot.text === "")).toBe(true);
   for (const [name, member] of (await read_game_container(content, "game.zip")).members)
-    expect(await member.async("nodebuffer")).toEqual(files.get(name));
+    expect((await member.async("nodebuffer")).equals(files.get(name)!)).toBe(true);
 });

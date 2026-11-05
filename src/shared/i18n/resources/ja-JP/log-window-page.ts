@@ -3,7 +3,8 @@ import type { LocaleMessageSchema } from "../../types";
 export const ja_jp_log_window_page = {
   title: "ログ",
   history: {
-    date: "ログの日付",
+    file: "ログファイル",
+    current: "現在のインスタンス",
     expired: "この日付のログは削除されました",
   },
   level: {

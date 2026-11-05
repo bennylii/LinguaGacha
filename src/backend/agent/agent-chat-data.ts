@@ -30,7 +30,12 @@ export function read_agent_input(
   if (
     typeof roundId !== "string" ||
     roundId === "" ||
-    (delivery !== "round" && delivery !== "steer" && delivery !== "hidden") ||
+    (delivery !== "round" &&
+      delivery !== "steer" &&
+      delivery !== "auto_continue" &&
+      delivery !== "auto_resume" &&
+      delivery !== "manual_continue" &&
+      delivery !== "hidden") ||
     (queuedId !== null && (typeof queuedId !== "string" || queuedId === "")) ||
     normalize_agent_message_input(message) === null
   )
@@ -38,11 +43,20 @@ export function read_agent_input(
   return data as AgentInputRecord;
 }
 
+/** 产品输入关联 SDK 提交；隐藏输入仍属于当前轮次。 */
+export type AgentInputDelivery =
+  | "round"
+  | "steer"
+  | "auto_continue"
+  | "auto_resume"
+  | "manual_continue"
+  | "hidden"; // 仅旧历史
+
 /** 产品输入关联 SDK 提交，隐藏继续输入仍属于原轮次。 */
 export type AgentInputRecord = {
   roundId: string;
   message: AgentMessageInput;
-  delivery: "round" | "steer" | "hidden";
+  delivery: AgentInputDelivery;
   queuedId: string | null;
 };
 /** 一轮用户意图可跨多次 SDK 生成，统一保存终态与修订切点。 */

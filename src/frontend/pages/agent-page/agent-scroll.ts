@@ -2,11 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 /** 吸收触控板微小位移与布局误差的底部容差。 */
 export const AGENT_SCROLL_BOTTOM_TOLERANCE_PX = 16;
+/** 距离顶部多少像素内触发更早历史加载。 */
+export const AGENT_SCROLL_TOP_THRESHOLD_PX = 120;
 
 function is_near_scroll_end(target: HTMLElement): boolean {
   return (
     target.scrollHeight - target.scrollTop - target.clientHeight <= AGENT_SCROLL_BOTTOM_TOLERANCE_PX
   );
+}
+
+/** 顶部阈值只决定是否请求更早页，不改变跟随状态。 */
+export function is_near_scroll_top(target: HTMLElement): boolean {
+  return target.scrollTop <= AGENT_SCROLL_TOP_THRESHOLD_PX;
 }
 
 type AgentFollowLatest = {

@@ -1,6 +1,9 @@
 import type { TranslationRequestPort } from "../../protocol/translation-request";
 import { Model } from "../../../../domain/model";
-import { normalize_setting_snapshot } from "../../../../domain/setting";
+import {
+  build_project_execution_settings,
+  read_project_language_settings,
+} from "../../../../domain/project-settings";
 import { read_text_quality_snapshot } from "../../../../shared/text/text-processing";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -39,11 +42,12 @@ function create_empty_translation_unit(): TranslationWorkUnit {
     unit_id: "translation-unit-1",
     run_id: "run-1",
     model: { ...Model.from_json({}, "test") },
-    config_snapshot: normalize_setting_snapshot({}),
+    config_snapshot: create_execution_settings({}),
     quality_snapshot: read_text_quality_snapshot({}),
     payload: {
       items: [],
       precedings: [],
+      followings: [],
     },
   };
 }
@@ -384,14 +388,14 @@ describe("TranslationWorkUnitRunner", () => {
     expect(captured_requests[0]?.messages[0]?.content).not.toContain("提示词增强");
   });
 
-  it("按 work unit 顺序投影上文和请求引用并在提交前恢复", async () => {
+  it("按 work unit 顺序投影前后文和请求引用并在提交前恢复", async () => {
     const captured_requests: LLMRequestBody[] = [];
     const runner = new TranslationWorkUnitRunner(
       await create_template_root(),
       create_llm_client(
         {
           response_result:
-            '{"id":0,"actor":"爱丽丝 lg-uri/1","text":"查看 lg-uri/2"}\n{"id":1,"actor":null,"text":"图片 lg-uri/3"}',
+            '{"id":0,"actor":"爱丽丝 lg-uri/2","text":"查看 lg-uri/3"}\n{"id":1,"actor":null,"text":"图片 lg-uri/4"}',
         },
         captured_requests,
       ),
@@ -415,14 +419,20 @@ describe("TranslationWorkUnitRunner", () => {
       ],
     });
     unit.payload.precedings = [
-      { id: 9, src: "上文 https://previous.example", status: "PROCESSED", text_type: "TXT" },
+      { id: 9, src: "前文 https://previous.example", status: "PROCESSED", text_type: "TXT" },
     ];
 
+    unit.payload.followings = [{ id: 10, src: "后文 https://following.example", status: "NONE" }];
+    const original = structuredClone(unit);
     const result = await runner.execute_unit(unit, new AbortController().signal);
+    expect(unit).toEqual(original);
+    expect(result.output.items.map((item) => item.id)).toEqual([1, 2]);
+    expect(captured_requests[0]?.messages[1]?.content).toContain("后文 lg-uri/1");
+    expect(read_translation_log(result.logs[0]).summary.join("\n")).toContain("后文 lg-uri/1");
 
-    expect(captured_requests[0]?.messages[1]?.content).toContain("上文 lg-uri/0");
+    expect(captured_requests[0]?.messages[1]?.content).toContain("前文 lg-uri/0");
     expect(captured_requests[0]?.messages[1]?.content).toContain(
-      '{"id":0,"actor":"Alice lg-uri/1","text":"打开 lg-uri/2"}',
+      '{"id":0,"actor":"Alice lg-uri/2","text":"打开 lg-uri/3"}',
     );
     expect(result.output).toMatchObject({
       kind: "translation",
@@ -835,7 +845,6 @@ function create_config_payload(overrides: JsonRecord = {}): JsonRecord {
     app_language: "ZH",
     source_language: "JA",
     target_language: "ZH",
-    clean_ruby: false,
     ...overrides,
   };
 }
@@ -896,7 +905,7 @@ function create_translation_unit(args: {
     unit_id: "translation-unit-1",
     run_id: "run-1",
     model: { ...Model.from_json(args.model, "test") },
-    config_snapshot: normalize_setting_snapshot(create_config_payload(args.config_overrides)),
+    config_snapshot: create_execution_settings(create_config_payload(args.config_overrides)),
     quality_snapshot: read_text_quality_snapshot(args.quality_snapshot ?? create_quality_payload()),
     payload: {
       items: args.items ?? [
@@ -908,6 +917,7 @@ function create_translation_unit(args: {
         },
       ],
       precedings: [],
+      followings: [],
     },
   };
 }
@@ -929,4 +939,9 @@ async function create_template_root(): Promise<string> {
     "utf-8",
   );
   return builtin_root;
+}
+
+/** 测试执行快照与生产一致：应用设置组合项目语言，语言缺省时使用项目默认值。 */
+function create_execution_settings(value: Record<string, unknown>) {
+  return build_project_execution_settings(value, read_project_language_settings(value));
 }

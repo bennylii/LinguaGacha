@@ -13,7 +13,7 @@ describe("buildProofreadingLookupQuery", () => {
     expect(
       buildProofreadingLookupQuery({
         rule_type: "glossary",
-        entry: { src: "魔法", dst: "魔法", info: "", case_sensitive: true },
+        entry: { src: "魔法", dst: "魔法", info: "", evidence: "", case_sensitive: true },
       }),
     ).toEqual({ keyword: "魔法", is_regex: false, scope: "src" });
     expect(

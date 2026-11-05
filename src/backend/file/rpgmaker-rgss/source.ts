@@ -1,10 +1,11 @@
-import { GameSourceConflictError } from "../source-file-paths";
+import { GameSourceConflictError, sort_game_paths } from "../source-file-paths";
 import path from "node:path";
 import type { NativeFs } from "../../../native/native-fs";
 import { validate_zip_member_path } from "../shared/zip-members";
 import { read_text } from "./value";
 import type { GameFiles } from "../shared/game/format";
 import { read_rgss_archive_version } from "./archive";
+import { resolve_game_source_input } from "../shared/game/source-input";
 
 export const RGSS_VERSIONS = { xp: ".rxdata", vx: ".rvdata", ace: ".rvdata2" } as const;
 export type RGSSVersion = keyof typeof RGSS_VERSIONS;
@@ -16,13 +17,9 @@ export type RGSSSource = {
 };
 /** 发现只读取配置和归档头，错误由来源编排边界统一归集。 */
 export function discover_rgss_source(source: string, fs: NativeFs): RGSSSource | null {
-  if (!fs.exists(source)) return null;
-  const root = fs.stat(source).isDirectory()
-    ? path.resolve(source)
-    : [".exe", ".ini", ...Object.values(RGSS_ARCHIVES)].includes(path.extname(source).toLowerCase())
-      ? path.dirname(path.resolve(source))
-      : null;
-  if (root === null) return null;
+  const input = resolve_game_source_input(source, fs);
+  if (!input) return null;
+  const { root } = input;
   const versions = new Set(
     (Object.keys(RGSS_VERSIONS) as RGSSVersion[]).filter((version) =>
       fs.exists(path.join(root, "Data", "System" + RGSS_VERSIONS[version])),
@@ -43,11 +40,13 @@ export function discover_rgss_source(source: string, fs: NativeFs): RGSSSource |
     )!;
     versions.add(version);
   }
-  const archive = archives[0]?.name ?? null;
+  let archive: string | null = null;
   if (!fs.exists(path.join(root, "Game.ini")) && versions.size === 0) return null;
   {
     const content = fs.read_file(path.join(root, "Game.ini"));
     const ini = decode_ini(content);
+    const observed = new Set(versions);
+    versions.clear();
     const scripts = read_ini_value(ini, "Scripts");
     const library = read_ini_value(ini, "Library");
     for (const version of Object.keys(RGSS_VERSIONS) as RGSSVersion[]) {
@@ -59,9 +58,15 @@ export function discover_rgss_source(source: string, fs: NativeFs): RGSSSource |
     }
     const generation = /(?:^|[\\/])RGSS([123])\d*[^\\/]*\.dll$/iu.exec(library ?? "")?.[1];
     if (generation) versions.add(generation === "1" ? "xp" : generation === "2" ? "vx" : "ace");
+    if (!versions.size) for (const version of observed) versions.add(version);
     const version = [...versions][0];
     if (!version) return null;
-    if (archives.length > 1) throw new GameSourceConflictError("Conflicting RGSS archive entries");
+    const active_archives = archives.filter(
+      (entry) => path.extname(entry.name).toLowerCase() === RGSS_ARCHIVES[version],
+    );
+    if (active_archives.length > 1)
+      throw new GameSourceConflictError("Conflicting RGSS archive entries");
+    archive = active_archives[0]?.name ?? null;
     if (versions.size !== 1) throw new Error("Conflicting RGSS engine versions");
     script_path(content, version);
     if (archive) {
@@ -106,46 +111,47 @@ export function script_path(content: Uint8Array, version: RGSSVersion): string {
   }
   return "Data/Scripts" + RGSS_VERSIONS[version];
 }
-/** 固化数据和配置指定的脚本，使工程脱离游戏目录后仍能导出。 */
-export function collect_rgss_files(game: RGSSSource, fs: NativeFs) {
-  const { root, version } = game;
-  const names = new Set<string>(["Game.ini"]);
-  const scripts = script_path(fs.read_file(path.join(root, "Game.ini")), version);
-  // 仅沿数据目录收集本代文件，素材继续由原游戏提供。
-  function collect(directory: string): void {
-    for (const entry of fs
-      .read_dirents(path.join(root, directory))
-      .sort((a, b) => a.name.localeCompare(b.name))) {
-      const name = directory + "/" + entry.name;
-      if (entry.isDirectory()) collect(name);
-      else if (entry.isFile() && path.extname(name).toLowerCase() === RGSS_VERSIONS[version])
-        names.add(name);
-    }
-  }
-  collect("Data");
-  // 配置大小写可能与磁盘不同，同一脚本仅保存实际数据清单中的一份。
-  if (![...names].some((name) => name.toLowerCase() === scripts.toLowerCase())) names.add(scripts);
-  return [...names].map((rel_path) => ({ rel_path, source_path: path.join(root, rel_path) }));
+/** 配置和本代数据使用准备后的路径清单，保留配置脚本的实际拼写。 */
+export function collect_rgss_files(names: Iterable<string>, scripts: string): string[] {
+  const files = [...names];
+  const data = sort_game_paths(
+    files.filter(
+      (name) =>
+        name.toLowerCase().startsWith("data/") &&
+        Object.values(RGSS_VERSIONS).some(
+          (extension) => path.extname(name).toLowerCase() === extension,
+        ),
+    ),
+  );
+  const script = files.find((name) => name.toLowerCase() === scripts.toLowerCase()) ?? scripts; // 缺失脚本仍交给读取入口报错，防止静默遗漏。
+  // 保持配置、数据、外部脚本的原稿顺序，避免重导入时改变条目行号。
+  return [
+    ...files.filter((name) => name.toLowerCase() === "game.ini"),
+    ...data,
+    ...(data.includes(script) ? [] : [script]),
+  ];
 }
 /** 导出以固化原稿确认版本，配置与数据扩展名必须一致。 */
 export async function read_rgss_game(
   files: GameFiles,
 ): Promise<{ version: RGSSVersion; scripts: string }> {
+  const ini = [...files].find(([name]) => name.toLowerCase() === "game.ini")?.[1];
+  if (!ini) throw new Error("Missing Game.ini");
+  const content = await ini.async("uint8array");
+  const configured = read_ini_value(decode_ini(content), "Scripts");
   const versions = (Object.keys(RGSS_VERSIONS) as RGSSVersion[]).filter((version) =>
-    [...files.keys()].some((name) => name.toLowerCase() === "data/system" + RGSS_VERSIONS[version]),
+    configured
+      ? path.extname(configured).toLowerCase() === RGSS_VERSIONS[version]
+      : [...files.keys()].some(
+          (name) => name.toLowerCase() === "data/system" + RGSS_VERSIONS[version],
+        ),
   );
   if (versions.length !== 1) throw new Error("Ambiguous RGSS version");
   const version = versions[0]!;
-  const ini = [...files].find(([name]) => name.toLowerCase() === "game.ini")?.[1];
-  if (!ini) throw new Error("Missing Game.ini");
-  const scripts = script_path(await ini.async("uint8array"), version);
   if (
-    [...files.keys()].some(
-      (name) =>
-        /\.(?:rxdata|rvdata2?)$/iu.test(name) &&
-        path.extname(name).toLowerCase() !== RGSS_VERSIONS[version],
-    )
+    ![...files.keys()].some((name) => name.toLowerCase() === "data/system" + RGSS_VERSIONS[version])
   )
-    throw new Error("Mixed RGSS versions");
+    throw new Error("Missing RGSS System for configured version");
+  const scripts = script_path(content, version);
   return { version, scripts };
 }

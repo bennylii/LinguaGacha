@@ -70,6 +70,7 @@ function message(id: string, text: string): AgentEntry {
   return {
     kind: "assistant_message",
     id,
+    roundId: "round",
     parts: [{ kind: "text", text }],
     status: "running",
     createdAt: 1,

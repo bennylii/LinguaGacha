@@ -1,16 +1,17 @@
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
-import { type JSX, startTransition } from "react";
+import { type JSX, type ReactNode, startTransition } from "react";
 
 import { useI18n } from "@frontend/app/locale/locale-context";
 import { useSidebar } from "@frontend/shadcn/sidebar-context";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@frontend/shadcn/tooltip";
-import { resolve_shortcut_platform } from "@frontend/widgets/interactions/keyboard-shortcuts";
+import { get_shortcut_aria_keys } from "@frontend/widgets/interactions/keyboard-shortcuts";
 import { ShortcutTooltipRow } from "@frontend/widgets/interactions/shortcut-kbd";
 import { useActionShortcut } from "@frontend/widgets/interactions/use-action-shortcut";
 import "@frontend/app/shell/app-titlebar.css";
 
 type AppTitlebarProps = {
   title: string;
+  actions?: ReactNode; // 页面级工具（例如工程切换器）由应用根注入，标题栏不感知业务状态
 };
 
 /** 标题栏共享侧栏切换入口，并用同一动作文案提供提示和无障碍名称。 */
@@ -26,7 +27,6 @@ export function AppTitlebar(props: AppTitlebarProps): JSX.Element {
       ? "app.navigation_action.collapse_sidebar"
       : "app.navigation_action.expand_sidebar",
   );
-  const toggle_aria_shortcut = resolve_shortcut_platform() === "mac" ? "Meta+B" : "Control+B"; // ARIA 使用标准键名，键帽使用平台符号。
   /** 点击与快捷键共用低优先级布局更新，避免阻塞正在处理的输入。 */
   function handle_toggle_sidebar(): void {
     startTransition(toggleSidebar);
@@ -50,7 +50,7 @@ export function AppTitlebar(props: AppTitlebarProps): JSX.Element {
                   className="topbar__menu-button"
                   aria-label={toggle_label}
                   aria-expanded={state === "expanded"}
-                  aria-keyshortcuts={toggle_aria_shortcut}
+                  aria-keyshortcuts={get_shortcut_aria_keys("toggle_sidebar")}
                   onClick={handle_toggle_sidebar}
                 >
                   <SidebarToggleIcon size={18} aria-hidden="true" />
@@ -67,6 +67,7 @@ export function AppTitlebar(props: AppTitlebarProps): JSX.Element {
             </strong>
           </div>
         </div>
+        {props.actions === undefined ? null : <div className="topbar__right">{props.actions}</div>}
       </div>
       <div className="topbar__safe-area topbar__safe-area--end" aria-hidden="true" />
     </header>

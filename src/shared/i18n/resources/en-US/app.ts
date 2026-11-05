@@ -2,6 +2,11 @@ import { zh_cn_app } from "../zh-CN/app";
 import type { LocaleMessageSchema } from "../../types";
 
 export const en_us_app = {
+  godot_pack_order: {
+    title: "Resource pack priority",
+    description: "Later resource packs override resources with the same name in earlier packs",
+  },
+  game_backup_warning: "Back up the entire game directory before proceeding …!",
   media: {
     zoom_out: "Zoom out",
     zoom_in: "Zoom in",
@@ -59,6 +64,7 @@ export const en_us_app = {
     select_folder: "Select Folder",
   },
   feedback: {
+    activate_link: "Failed to process the link …",
     load_failed: "Load failed …",
     refresh_failed: "Refresh failed …",
     query_failed: "Query failed …",
@@ -70,6 +76,8 @@ export const en_us_app = {
     export_failed: "Export failed …",
     copy_failed: "Copy failed …",
     read_failed: "Read failed …",
+    operation_running: "Running operation …",
+    operation_success: "Operation succeeded …",
     operation_failed: "Operation failed …",
     content_unavailable: "Content unavailable",
     save_failed: "Save failed …",
@@ -81,7 +89,6 @@ export const en_us_app = {
     no_valid_data: "No valid data",
     update_failed: "Update failed …",
     project_settings_aligned: "Project settings updated from current settings",
-    project_cache_loading: "Refreshing project cache …",
   },
   error_boundary: {
     eyebrow: "Renderer Runtime",
@@ -102,7 +109,7 @@ export const en_us_app = {
     duplicate_description: "{COUNT} duplicate rules were detected. Choose how to handle them …",
   },
   update: {
-    confirm_description: "LinguaGacha v{VERSION} is available. Download the update …?",
+    action: "Update",
     restart_confirm: "Restart and Update",
     launching: "Processing …",
   },
@@ -177,6 +184,22 @@ export const en_us_app = {
     language: "Language",
     logs: "Logs",
   },
+  project_switcher: {
+    create: "New project",
+    label: "Switch project window",
+    current: "Current project",
+    no_project: "Project Home",
+    instances: "Running windows",
+    no_instances: "No other windows",
+    loading: "Reading windows …",
+    recent: "Recent projects",
+    empty_recent: "No recent projects",
+    open_current: "Open in this window",
+    open_new: "Open in a new window",
+    load_failed: "Failed to read the window list …",
+    focus_failed: "Failed to switch windows …",
+    open_failed: "Failed to open the project window …",
+  },
   profile: {
     status: "Ciallo～(∠・ω< )⌒✮",
     status_tooltip: "Open the GitHub repository",
@@ -185,10 +208,12 @@ export const en_us_app = {
   },
   prompt: {
     source: "Source",
-    builder_control_character_samples: "Control Characters Samples:",
-    builder_glossary_header: "Glossary <Original Term> -> <Translated Term> #<Term Information>:",
-    builder_input: "Input:",
-    builder_preceding_context: "Preceding Context:",
+    builder_control_character_samples: "Control character samples (keep as-is):",
+    builder_glossary_header:
+      "Glossary (apply per context and Term Note) <Original Term> -> <Translated Term> #<Term Note>:",
+    builder_input: "Input (translate each entry, keep in-entry line breaks):",
+    builder_preceding_context: "Preceding context (for reference only):",
+    builder_following_context: "Following context (for reference only):",
   },
   translation_generation: {
     action: "Generate Translation",
@@ -198,7 +223,7 @@ export const en_us_app = {
       check_failed:
         "Proofreading warnings could not be loaded. You can still generate the current translation …",
       warning_description:
-        "Detected {COUNT} proofreading warnings. We recommend using AGENT to review and fix them automatically before generating the translation. Continue anyway …?",
+        "Detected {COUNT} proofreading warnings. Warnings do not necessarily indicate errors, but we recommend running at least one automatic review with AGENT first. Continue generating the translation …?",
       retry_check: "Check Again",
       continue_generate: "Generate Anyway",
     },
@@ -219,7 +244,7 @@ export const en_us_app = {
     json_files: "JSON files (*.json)",
     excel_files: "Excel files (*.xlsx)",
     supported_txt_files: "Supported files (*.txt)",
-    font_files: "Font files (*.ttf *.otf)",
+    font_files: "Font files (*.ttf)",
     executable_files: "Executable files (*.exe)",
   },
   diagnostic: {

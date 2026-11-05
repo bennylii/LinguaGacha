@@ -2,19 +2,24 @@ import { AgentPersonalityService } from "../agent/agent-personality-service";
 import { AgentSkillsService } from "../agent/agent-skills-service";
 import type { PDFHost } from "../../shared/pdf";
 import type { AgentImageHost } from "../../shared/agent-image";
+import type { RemoteAuthHost } from "../../shared/remote-auth-host";
 import { AgentImageService } from "../agent/agent-image-service";
 import { AgentService } from "../agent/agent-service";
 import { WebSearchService } from "../agent/web-search-service";
+import { TermLookupService } from "../agent/term-lookup-service";
 import { AgentWorkspaceService } from "../agent/workspace/service";
 import { AgentWorkspaceRunner } from "../agent/workspace/runtime/runner";
 import { ApiGatewayServer } from "../api/api-gateway-server";
 import { ApiStreamHub } from "../api/api-stream-hub";
 import { t_main_log } from "../log/log-text";
-import type { SystemProxyResolver } from "../network/system-proxy-http-client";
+import type { ProxyResolver } from "../network/proxy-http-client";
 import type { NetworkProxyPolicy } from "../../domain/setting";
 import type { BackendWorkerExecution } from "../worker/worker-execution";
+import type { ShutdownTrace } from "../../native/shutdown-trace";
 import { AppError } from "../../shared/error";
 import type { LogTargets } from "../../shared/log";
+import { SHUTDOWN_STAGE_TIMEOUT_MS, SHUTDOWN_TOTAL_TIMEOUT_MS } from "../../shared/shutdown-timing";
+import { is_timeout_error, with_timeout } from "../../shared/utils/timeout";
 import { write_bootstrap_error } from "./bootstrap-log";
 import { BackendResources } from "./backend-resources";
 import { BackendServices } from "./backend-services";
@@ -27,11 +32,15 @@ export interface GuiBackendBootstrapOptions {
   appRoot: string; // 安装根与便携数据位置
   builtinRoot: string; // 当前版本只读内置资产根
   logTargets?: Partial<LogTargets>; // GUI Backend 日志出口
-  systemProxyResolver: SystemProxyResolver; // Electron main 提供的代理解析端口
+  proxyResolver: ProxyResolver; // Electron main 提供的代理解析端口
   workspaceRuntimeDirectory: string; // 与 runner 同版本的标准 npm 环境
   openDirectory: (path: string) => Promise<void>; // Electron main 副作用端口
   pickSavePath: (defaultName: string) => Promise<string | null>; // 原生保存选择，取消返回 null
+  focusWindow?: (() => Promise<void>) | undefined; // 聚焦本实例窗口，供其他实例的切换请求调用
+  openProjectWindow?: ((projectPath: string) => Promise<void>) | undefined; // 以 --project 启动新窗口
+  remoteAuthHost?: RemoteAuthHost | undefined; // 内嵌登录窗口与续期，Electron main 提供、CLI 缺席
   workerExecution: BackendWorkerExecution; // 正式 worker_threads 与测试执行策略
+  shutdownTrace?: ShutdownTrace; // 退出阶段追踪；日志系统不可用时仍能留下最后到达的阶段
 }
 
 export interface GuiBackendBootstrapStartResult {
@@ -107,28 +116,37 @@ export class GuiBackendBootstrap {
         logManager: resources.logManager,
         publishEvent: (topic, payload) => event_stream.publish(topic, payload),
         openOutputFolder: this.options.openDirectory,
+        focusWindow: this.options.focusWindow,
+        openProjectWindow: this.options.openProjectWindow,
+        remoteAuthHost: this.options.remoteAuthHost,
         pdfHost: this.options.pdfHost,
         workspaceRuntimeDirectory: this.options.workspaceRuntimeDirectory,
         workerExecution: this.options.workerExecution,
+        noveliaFetch: resources.noveliaFetch,
       });
       this.services = services;
+      await services.start_remote_services();
       const web_search = new WebSearchService(
         resources.metadata.read_version_or_default(),
         resources.logManager,
       );
       this.web_search = web_search;
+      const term_lookup = new TermLookupService({
+        paths: resources.paths,
+        userAgent: resources.metadata.build_linguagacha_user_agent(),
+        fetch: globalThis.fetch,
+      }); // 使用已安装的代理感知 transport，服务本身不持有需释放的连接。
       const images = new AgentImageService(this.options.imageHost);
       this.images = images;
       // runner 与 catalog 共用同一 AppPathService，避免重复维护可写数据根的选择。
       const runner = new AgentWorkspaceRunner({
         paths: resources.paths,
         runtimeDirectory: this.options.workspaceRuntimeDirectory,
-        systemProxyResolver: resources.proxyResolver, // 子进程代理路由与后端同源
+        proxyResolver: resources.proxyResolver, // 子进程代理路由与后端同源
       });
       const workspace = new AgentWorkspaceService({
         images,
         paths: resources.paths,
-        settings: resources.settings,
         sessionState: services.state.session,
         cache: services.state.cache,
         proofreading: services.proofreading.query,
@@ -162,6 +180,33 @@ export class GuiBackendBootstrap {
         sessionState: services.state.session,
         runtimeGate: services.state.runtimeGate,
         webSearch: web_search.search,
+        termLookup: term_lookup.lookup,
+        readLanguages: () => services.state.cache.languages.readBlock(),
+        novelChapters: (request, signal) => services.remote.chapters.list_chapters(request, signal),
+        novelChapterImport: (request, signal) =>
+          services.remote.chapters.import_chapter(request, signal),
+        novelChapterRead: (request, signal) =>
+          services.remote.chapters.read_chapter(request, signal),
+        novelChapterSync: (request, signal) =>
+          services.remote.chapters.sync_chapter(request, signal),
+        novelSourceRebind: (request, signal) => {
+          signal.throwIfAborted();
+          return services.remote.sources.rebind_existing(request.url, signal, {
+            under_agent: true,
+          });
+        },
+        novelChapterUpload: (request, signal) =>
+          services.remote.chapters.upload_chapter(request, signal),
+        novelChapterLineUpload: (request, signal) =>
+          services.remote.chapters.upload_line(request, signal),
+        novelSyncPreview: (signal) => services.remote.sources.preview_sync(signal),
+        novelSyncApply: (request, signal) => {
+          signal.throwIfAborted();
+          return services.remote.sources.apply_sync_request(
+            { stash_id: request.stash_id, mode: request.mode },
+            { under_agent: true },
+          );
+        },
         workspace,
         logManager: resources.logManager,
         publish: (topic, payload) => event_stream.publish(topic, payload),
@@ -183,6 +228,15 @@ export class GuiBackendBootstrap {
       this.gateway = gateway;
       const gateway_result = await gateway.start();
       this.state = "ready";
+      // 端口确定后才能写入实例注册项；注册失败只失去窗口切换能力，不应阻止启动。
+      try {
+        await services.start_instances(gateway_result.baseUrl);
+      } catch (error) {
+        resources.logManager.warning(t_main_log("app.diagnostic.lifecycle.app_start_failed"), {
+          error,
+          context: { reason: "instance_registry_start_failed" },
+        });
+      }
       services.start_model_catalog_check();
       return {
         apiBaseUrl: gateway_result.baseUrl,
@@ -240,49 +294,111 @@ export class GuiBackendBootstrap {
   private async dispose_runtime(failures: unknown[]): Promise<void> {
     if (this.state === "stopped" && this.resources === null) return;
     this.state = "stopping";
+    const trace = this.options.shutdownTrace ?? (() => undefined);
+    // 所有阶段共享同一截止时间：单段卡死不能把后面阶段的时间预算也吃掉。
+    const deadline = Date.now() + SHUTDOWN_TOTAL_TIMEOUT_MS;
+    trace("dispose_begin");
     this.agent?.cancel_uploads();
     this.images?.clear();
     this.images = null;
     const gateway = this.gateway;
     this.gateway = null;
-    // Gateway 停止受理时同步取消在途接口测试与工程写入，排空须等到目录恢复结束。
+    // Gateway 停止受理时同步取消在途接口测试与文件操作，排空须等到目录恢复结束。
     await Promise.all([
-      collect_failure(failures, async () => await gateway?.stop()),
-      collect_failure(failures, async () => await this.services?.model.dispose()),
-      collect_failure(failures, async () => await this.services?.stop_project_writes()),
+      this.run_stage(failures, trace, deadline, "gateway.stop", async () => await gateway?.stop()),
+      this.run_stage(
+        failures,
+        trace,
+        deadline,
+        "model.dispose",
+        async () => await this.services?.model.dispose(),
+      ),
+      this.run_stage(
+        failures,
+        trace,
+        deadline,
+        "file_operations.stop",
+        async () => await this.services?.stop_file_operations(),
+      ),
     ]);
 
     this.resources?.settings.set_stream_publisher(null);
     const agent = this.agent;
     this.agent = null;
-    await collect_failure(failures, async () => await agent?.dispose());
+    await this.run_stage(
+      failures,
+      trace,
+      deadline,
+      "agent.dispose",
+      async () => await agent?.dispose(),
+    );
 
     const web_search = this.web_search;
     this.web_search = null;
-    await collect_failure(failures, async () => await web_search?.dispose());
+    await this.run_stage(
+      failures,
+      trace,
+      deadline,
+      "web_search.dispose",
+      async () => await web_search?.dispose(),
+    );
 
     this.event_stream?.stop();
     this.event_stream = null;
 
     const services = this.services;
     this.services = null;
-    await collect_failure(failures, async () => await services?.dispose());
+    await this.run_stage(
+      failures,
+      trace,
+      deadline,
+      "services.dispose",
+      async () => await services?.dispose(),
+    );
 
     const resources = this.resources;
     this.resources = null;
-    await collect_failure(failures, async () => await resources?.dispose());
+    await this.run_stage(
+      failures,
+      trace,
+      deadline,
+      "resources.dispose",
+      async () => await resources?.dispose(),
+    );
     this.state = "stopped";
+    trace("dispose_end");
   }
-}
 
-/** 将一次清理失败追加到共享生命周期结果。 */
-async function collect_failure(
-  failures: unknown[],
-  operation: () => void | Promise<void>,
-): Promise<void> {
-  try {
-    await operation();
-  } catch (error) {
-    failures.push(error);
+  /**
+   * 关闭阶段单段等待有界：日志索引互锁或会话收尾不结算时记录超时并继续释放后续资源，
+   * 让 worker 能在总时限内应答 main，而不是把进程留在无界等待里。
+   */
+  private async run_stage(
+    failures: unknown[],
+    trace: ShutdownTrace,
+    deadline: number,
+    stage: string,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const started_at = Date.now();
+    const budget = Math.min(SHUTDOWN_STAGE_TIMEOUT_MS, deadline - started_at);
+    if (budget <= 0) {
+      // 总预算耗尽后不再启动新阶段，剩余资源随 worker 终止一并回收。
+      trace(`${stage}.skipped`, { reason: "shutdown_budget_exhausted" });
+      failures.push(new Error(`Shutdown budget exhausted before ${stage}.`));
+      return;
+    }
+    trace(`${stage}.begin`, { budget_ms: budget });
+    try {
+      await with_timeout(stage, operation(), budget);
+      trace(`${stage}.end`, { elapsed_ms: Date.now() - started_at });
+    } catch (error) {
+      trace(`${stage}.failed`, {
+        elapsed_ms: Date.now() - started_at,
+        timed_out: is_timeout_error(error),
+        error: error instanceof Error ? error.message : String(error),
+      });
+      failures.push(error);
+    }
   }
 }

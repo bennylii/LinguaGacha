@@ -1,11 +1,16 @@
+import { AppContentState } from "@frontend/widgets/app-content-state";
+import { useProjectOpen } from "./use-project-open";
+import { render_rich_text } from "@frontend/app/locale/rich-text";
+import { GODOT_PACK_ORDER_REFRESH_ACTION } from "@shared/godot";
+import { useGodotPackOrder } from "@frontend/features/godot-pack-order/use-godot-pack-order";
+import { GodotPackOrderDialog } from "@frontend/features/godot-pack-order/godot-pack-order-dialog";
+import { useGameBackupConfirm } from "@frontend/features/game-backup-confirm/use-game-backup-confirm";
 import {
   push_error_toast,
   push_toast,
-  push_progress_toast,
-  update_progress_toast,
-  dismiss_toast,
+  run_modal_progress_toast,
 } from "@frontend/app/feedback/desktop-toast";
-import type { ProjectPreview, ProjectPreviewResponse } from "@shared/project-preview";
+import type { ProjectPreview } from "@shared/project-preview";
 import { format_local_timestamp } from "@shared/utils/format-local-timestamp";
 import { TranslationProgressBadge } from "@frontend/features/translation-progress/translation-progress-badge";
 import { Badge } from "@frontend/shadcn/badge";
@@ -15,10 +20,11 @@ import {
   FileInput,
   FilePlus,
   FolderOpen,
+  Globe,
   X,
   type LucideIcon,
 } from "lucide-react";
-import { type JSX, type MouseEvent, useEffect, useRef, useState } from "react";
+import { type JSX, type MouseEvent, useState } from "react";
 
 import type { SettingsSnapshot } from "@frontend/app/state/desktop-state-context";
 
@@ -42,23 +48,22 @@ import { Spinner } from "@frontend/shadcn/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@frontend/shadcn/tooltip";
 import { type LocaleKey, useI18n } from "@frontend/app/locale/locale-context";
 import { normalize_source_paths } from "@frontend/app/desktop/source-paths";
-import {
-  format_source_file_parse_failure_error_toast,
-  format_source_file_parse_failure_toast,
-} from "@frontend/app/feedback/source-file-parse-failure-feedback";
 import "@frontend/pages/project-page/project-page.css";
 import { ProjectSourceFormats } from "@frontend/pages/project-page/components/project-source-formats";
 import { DesktopApiError, api_fetch } from "@frontend/app/desktop/desktop-api";
-import type { ProjectStage } from "@frontend/app/state/desktop-project-change-types";
+import { extract_file_name, extract_parent_dir } from "@frontend/app/desktop/path";
+import type { ProjectLanguageKey } from "@domain/project-settings";
+import { ProjectLanguageDialog } from "@frontend/pages/project-page/components/project-language-dialog";
 import {
-  format_project_settings_aligned_toast,
-  type ProjectSettingsAlignmentChangedFields,
-  type ProjectSettingsAlignmentSettings,
-} from "@frontend/app/feedback/project-settings-alignment-feedback";
+  read_project_language_preference,
+  save_project_language_preference,
+} from "@frontend/pages/project-page/project-language-preference";
 import { AppConfirmDialog } from "@frontend/widgets/app-alert-dialog";
 import { open_context_menu_at_click_position } from "@frontend/widgets/app-menu";
 import type { PathDropIssue } from "@frontend/widgets/file-drop-zone/use-path-drop";
 import { PathSelectionCard } from "@frontend/widgets/path-selection-card/path-selection-card";
+import { Input } from "@frontend/shadcn/input";
+import { SegmentedToggle } from "@frontend/shadcn/segmented-toggle";
 import {
   PROJECT_SOURCE_FORMATS,
   type ProjectSourceFormatHitCounts,
@@ -73,47 +78,34 @@ type ProjectPageProps = {
 };
 
 /**
- * 已选择的 .lg 工程及其可选预览结果。
- */
-type SelectedProject = {
-  path: string;
-  preview: ProjectPreview | null;
-};
-
-/**
  * 已选择的源路径与后端摘要，首个路径用于推导默认工程名。
  */
 type SelectedSource = ProjectSourceFileSummary & {
   source_paths: string[]; // 创建工程时原样提交的归一化用户选择
 };
 
-/**
- * 最近工程缺失时弹窗只需要记住待移除路径。
- */
-type MissingRecentProjectState = {
-  path: string;
-} | null;
+/** 新建来源模式：本地文件与站点小说共用同一提交入口。 */
+type ProjectSourceMode = "files" | "novel";
 
-/**
- * 新建工程提交后的公开载荷，failed_files 交给专用 formatter 收窄。
- */
+/** 小说地址检测结果，只用于展示与生成默认工程名。 */
+type RemoteNovelPreviewPayload = {
+  origin: string;
+  kind: "web" | "wenku";
+  title: string;
+  title_jp: string;
+  title_zh: string | null;
+  chapter_count: number;
+  filename: string;
+};
+
+/** 新建工程提交后的公开载荷。 */
 type ProjectCreateCommitPayload = {
   project?: {
     path?: string;
   };
-  failed_files?: unknown;
 };
 
-/**
- * 打开工程前 settings alignment 预演结果。
- */
-type ProjectOpenAlignmentPreviewPayload = {
-  preview?: {
-    action?: string;
-    section_revisions?: Record<string, unknown> | null;
-    changed?: ProjectSettingsAlignmentChangedFields;
-  };
-};
+type ProjectLanguageDraft = Record<ProjectLanguageKey, string>;
 
 /**
  * 默认预设设置字段白名单，控制新建成功后的提示内容。
@@ -159,10 +151,10 @@ type RecentProjectRowProps = {
 };
 
 /**
- * 工程预览面板只依赖已归一的 selected project。
+ * 工程预览面板只消费已取得的摘要。
  */
 type ProjectPreviewPanelProps = {
-  project: SelectedProject;
+  preview: ProjectPreview;
 };
 
 /**
@@ -204,30 +196,10 @@ const DEFAULT_PRESET_SETTING_SPECS: DefaultPresetSettingSpec[] = [
 ];
 
 /**
- * 从跨平台路径中提取文件名，供默认工程名和最近工程名复用。
- */
-function extract_file_name(file_path: string): string {
-  const normalized_segments = file_path.split(/[\\/]+/u);
-  return normalized_segments.at(-1) ?? file_path;
-}
-
-/**
  * 从文件名中提取 stem，避免默认工程名继承源文件扩展名。
  */
 function extract_stem(file_name: string): string {
   return file_name.replace(/\.[^.]+$/u, "");
-}
-
-/**
- * 提取父目录，SOURCE 保存模式使用源文件所在目录。
- */
-function extract_parent_dir(file_path: string): string {
-  const normalized_index = Math.max(file_path.lastIndexOf("/"), file_path.lastIndexOf("\\"));
-  if (normalized_index <= 0) {
-    return "";
-  }
-
-  return file_path.slice(0, normalized_index);
 }
 
 /**
@@ -276,20 +248,6 @@ function normalize_project_source_format_hit_counts(value: unknown): ProjectSour
   return Object.fromEntries(
     PROJECT_SOURCE_FORMATS.map((format) => [format.id, normalize_count(record[format.id])]),
   ) as ProjectSourceFormatHitCounts;
-}
-
-/**
- * 提取 settings alignment 需要的项目镜像字段。
- */
-function build_project_prefilter_settings(
-  settings_snapshot: SettingsSnapshot,
-): ProjectSettingsAlignmentSettings {
-  return {
-    source_language: settings_snapshot.source_language,
-    target_language: settings_snapshot.target_language,
-    mtool_optimizer_enable: settings_snapshot.mtool_optimizer_enable,
-    skip_duplicate_source_text_enable: settings_snapshot.skip_duplicate_source_text_enable,
-  };
 }
 
 /**
@@ -374,8 +332,7 @@ function RecentProjectEmptyState(): JSX.Element {
  */
 function ProjectPreviewPanel(props: ProjectPreviewPanelProps): JSX.Element {
   const { t } = useI18n();
-  const preview = props.project.preview;
-  if (preview === null) return <></>;
+  const preview = props.preview;
   return (
     <div className="project-home__preview-panel">
       <dl className="project-home__preview-list">
@@ -445,40 +402,7 @@ function ProjectActionButton(props: ProjectActionButtonProps): JSX.Element {
 }
 
 /**
- * 将项目加载阶段映射为模态进度文案。
- */
-function resolve_project_loading_stage_message(
-  stage: ProjectStage | null,
-  t: ReturnType<typeof useI18n>["t"],
-): string | null {
-  if (stage === "project") {
-    return t("project_page.loading_stages.project");
-  }
-  if (stage === "files" || stage === "pdf") {
-    return t("project_page.loading_stages.files");
-  }
-  if (stage === "items") {
-    return t("project_page.loading_stages.items");
-  }
-  if (stage === "quality") {
-    return t("project_page.loading_stages.quality");
-  }
-  if (stage === "prompts") {
-    return t("project_page.loading_stages.prompts");
-  }
-
-  if (stage === "proofreading") {
-    return t("project_page.loading_stages.proofreading");
-  }
-  if (stage === "task") {
-    return t("project_page.loading_stages.task");
-  }
-
-  return null;
-}
-
-/**
- * 等待下一帧，给加载 Toast 的最后一次阶段更新留出渲染机会。
+ * 等待下一帧，任务结束后的界面先完成渲染再解除遮罩。
  */
 function wait_for_next_animation_frame(): Promise<void> {
   return new Promise((resolve) => {
@@ -493,7 +417,6 @@ function wait_for_next_animation_frame(): Promise<void> {
  */
 export function ProjectPage(_props: ProjectPageProps): JSX.Element {
   const {
-    project_session_stage,
     settings_snapshot,
     set_project_session_status,
     refresh_project_snapshot,
@@ -502,25 +425,38 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
   } = useDesktopState();
 
   const { t } = useI18n();
+  const [source_mode, set_source_mode] = useState<ProjectSourceMode>("files");
+  const pack_order = useGodotPackOrder();
+  const backup_confirm = useGameBackupConfirm();
   const [selected_source, set_selected_source] = useState<SelectedSource | null>(null);
-  const [selected_project, set_selected_project] = useState<SelectedProject | null>(null);
+  const [novel_url, set_novel_url] = useState("");
+  const [novel_preview, set_novel_preview] = useState<RemoteNovelPreviewPayload | null>(null);
+  const [is_novel_checking, set_is_novel_checking] = useState(false);
   const [is_source_checking, set_is_source_checking] = useState(false);
-  const [is_preview_loading, set_is_preview_loading] = useState(false);
   const [is_creating_project, set_is_creating_project] = useState(false);
-  const [is_opening_project, set_is_opening_project] = useState(false);
-  const [missing_recent_project, set_missing_recent_project] =
-    useState<MissingRecentProjectState>(null);
-  const project_loading_toast_id_ref = useRef<string | number | null>(null);
+  const [is_language_dialog_open, set_is_language_dialog_open] = useState(false);
+  // 新建语言草稿由项目页持有，取消或创建失败后保留本次选择。
+  const [create_languages, set_create_languages] = useState<ProjectLanguageDraft>(
+    read_project_language_preference,
+  );
   const recent_projects = settings_snapshot.recent_projects.slice(0, 5);
   const has_recent_projects = recent_projects.length > 0;
-  const source_selection_disabled = is_source_checking || is_creating_project; // 摘要与创建共用来源快照，期间冻结所有编辑入口。
+  const source_selection_disabled = is_source_checking || is_novel_checking || is_creating_project; // 摘要、检测与创建共用来源快照，期间冻结所有编辑入口。
 
-  /**
-   * 清空打开工程选择，保留源文件选择。
-   */
-  function clear_selected_project(): void {
-    set_selected_project(null);
-  }
+  const {
+    selected_project,
+    preview_state,
+    is_opening_project,
+    pending_confirmation,
+    missing_recent_project,
+    clear_selected_project,
+    select_project_path,
+    handle_open_project,
+    handle_recent_project_remove,
+    confirm_open,
+    cancel_confirmation,
+    close_missing_recent,
+  } = useProjectOpen(run_project_loading_modal);
 
   /**
    * 清空新建工程源文件选择，保留打开工程选择。
@@ -529,78 +465,63 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
     set_selected_source(null);
   }
 
-  useEffect(() => {
-    const toast_id = project_loading_toast_id_ref.current;
-    const next_message = resolve_project_loading_stage_message(project_session_stage, t);
-    const normalized_message = next_message?.trim() ?? "";
-
-    if (toast_id === null || normalized_message === "") {
-      return;
+  /** 切换来源模式时清空另一种模式的候选，避免提交到过期事实。 */
+  function handle_source_mode_change(next_mode: ProjectSourceMode): void {
+    if (next_mode === source_mode) return;
+    set_source_mode(next_mode);
+    if (next_mode === "files") {
+      set_novel_url("");
+      set_novel_preview(null);
+    } else {
+      set_selected_source(null);
     }
+  }
 
-    update_progress_toast(toast_id, {
-      message: normalized_message,
-      presentation: "modal",
-    });
-  }, [project_session_stage, t]);
-
-  /**
-   * 包裹创建、打开和预览流程，统一展示可更新的模态进度。
-   */
-  async function run_project_loading_modal(args: {
-    initial_message: string;
-    task: () => Promise<void>;
-  }): Promise<void> {
-    const toast_id = push_progress_toast({
-      message: args.initial_message,
-      presentation: "modal",
-    });
-    project_loading_toast_id_ref.current = toast_id;
-
+  /** 带会话指纹的地址检测，响应只接受完整预览载荷。 */
+  async function handle_check_novel_url(): Promise<void> {
+    const url = novel_url.trim();
+    if (url === "" || is_novel_checking) return;
+    set_is_novel_checking(true);
+    set_novel_preview(null);
     try {
-      await args.task();
-      await wait_for_next_animation_frame();
-    } finally {
-      if (project_loading_toast_id_ref.current === toast_id) {
-        project_loading_toast_id_ref.current = null;
+      const payload = await api_fetch<{ preview?: RemoteNovelPreviewPayload }>(
+        "/api/remote/novel/preview",
+        { url },
+      );
+      const preview = payload.preview;
+      if (
+        preview === undefined ||
+        typeof preview.title !== "string" ||
+        typeof preview.filename !== "string" ||
+        typeof preview.chapter_count !== "number"
+      ) {
+        throw new DesktopApiError({
+          code: "remote.fetch_failed",
+          message: "Invalid preview payload",
+        });
       }
-      dismiss_toast(toast_id);
+      set_novel_preview(preview);
+    } catch (error) {
+      push_error_toast(t("project_page.create.remote.check_failed"), error);
+    } finally {
+      set_is_novel_checking(false);
     }
   }
 
   /**
-   * 选择工程路径并读取预览，最近工程缺失时转入移除确认。
+   * 创建和打开流程共用模态进度。
    */
-  async function select_project_path(project_path: string, from_recent = false): Promise<void> {
-    set_is_preview_loading(true);
-    set_selected_project({
-      path: project_path,
-      preview: null,
+  async function run_project_loading_modal(args: {
+    message: string;
+    task: () => Promise<void>;
+  }): Promise<void> {
+    await run_modal_progress_toast({
+      message: args.message,
+      task: async () => {
+        await args.task();
+        await wait_for_next_animation_frame();
+      },
     });
-
-    try {
-      await run_project_loading_modal({
-        initial_message: t("project_page.open.preview_loading_toast"),
-        task: async () => {
-          const payload = await api_fetch<ProjectPreviewResponse>("/api/session/project/preview", {
-            path: project_path,
-          });
-          set_selected_project({ path: project_path, preview: payload.preview });
-        },
-      });
-    } catch (error) {
-      if (from_recent && error instanceof DesktopApiError && error.code === "project.not_found") {
-        set_missing_recent_project({
-          path: project_path,
-        });
-      } else {
-        push_error_toast(t("project_page.open.preview_unavailable"), error);
-      }
-
-      set_selected_project(null);
-    } finally {
-      set_is_preview_loading(false);
-    }
   }
 
   /**
@@ -627,13 +548,12 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
 
       if (source_file_count === 0) {
         set_selected_source(null);
-        const failure_toast = format_source_file_parse_failure_toast(payload.failed_files);
-        if (failure_toast !== null)
-          push_error_toast(t("project_page.create.unavailable"), failure_toast);
-        else push_toast("warning", t("project_page.create.unavailable"));
+        push_toast("warning", t("project_page.create.unavailable"));
       } else {
         set_selected_source({
           source_paths: normalized_source_paths,
+          godot_packs: payload.godot_packs ?? [],
+          contains_game: payload.contains_game === true,
           source_file_count,
           format_hit_counts: normalize_project_source_format_hit_counts(payload.format_hit_counts),
         });
@@ -702,29 +622,72 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       return join_path(parent_dir, default_file_name);
     }
 
-    let fixed_directory = settings_snapshot.project_fixed_path;
-    if (fixed_directory === "") {
-      const result = await window.desktopApp.pickFixedProjectDirectory();
-      const selected_path = result.paths[0] ?? null;
-      if (result.canceled || selected_path === null) {
-        return null;
-      }
+    const fixed_directory = await resolve_fixed_project_directory();
+    return fixed_directory === null ? null : join_path(fixed_directory, default_file_name);
+  }
 
-      fixed_directory = selected_path;
-      await api_fetch<SettingsPayload>("/api/settings/update", {
-        project_fixed_path: fixed_directory,
-      });
-      await refresh_settings();
+  /**
+   * 小说来源没有本地父目录，SOURCE 与 FIXED 共用固定目录保存位置。
+   */
+  async function resolve_remote_project_output_path(filename: string): Promise<string | null> {
+    const default_file_name = build_default_project_file_name(filename);
+    if (settings_snapshot.project_save_mode === "MANUAL") {
+      const result = await window.desktopApp.pickProjectSavePath(default_file_name);
+      return result.canceled ? null : (result.paths[0] ?? null);
+    }
+    const fixed_directory = await resolve_fixed_project_directory();
+    return fixed_directory === null ? null : join_path(fixed_directory, default_file_name);
+  }
+
+  /** 固定目录缺失时请求一次选择并写回设置。 */
+  async function resolve_fixed_project_directory(): Promise<string | null> {
+    let fixed_directory = settings_snapshot.project_fixed_path;
+    if (fixed_directory !== "") return fixed_directory;
+    const result = await window.desktopApp.pickDirectory();
+    const selected_path = result.paths[0] ?? null;
+    if (result.canceled || selected_path === null) return null;
+    fixed_directory = selected_path;
+    await api_fetch<SettingsPayload>("/api/settings/update", {
+      project_fixed_path: fixed_directory,
+    });
+    await refresh_settings();
+    return fixed_directory;
+  }
+
+  /**
+   * 点击创建先提示备份原生游戏，再选择项目语言，确认后才进入保存路径与创建流程。
+   */
+  async function open_language_dialog(): Promise<void> {
+    if (source_selection_disabled) return;
+    const source_ready =
+      source_mode === "files" ? selected_source !== null : novel_preview !== null;
+    if (!source_ready) return;
+    // 站点小说没有本地原生资源，只有本地来源需要备份确认。
+    if (
+      source_mode === "files" &&
+      !(await backup_confirm.request_confirm(selected_source!.contains_game))
+    ) {
+      return;
     }
 
-    return join_path(fixed_directory, default_file_name);
+    set_is_language_dialog_open(true);
+  }
+
+  /** 确认即保存偏好，再使用同一份语言快照创建工程。 */
+  function confirm_language_dialog(): void {
+    const languages = { ...create_languages }; // 路径选择期间固定本次提交值。
+    save_project_language_preference(languages);
+    set_is_language_dialog_open(false);
+    void handle_create_project(languages);
   }
 
   /**
    * 提交新建工程请求，成功后刷新会话、任务和最近工程。
    */
-  async function handle_create_project(): Promise<void> {
-    if (selected_source === null || source_selection_disabled) {
+  async function handle_create_project(languages: ProjectLanguageDraft): Promise<void> {
+    const source_ready =
+      source_mode === "files" ? selected_source !== null : novel_preview !== null;
+    if (!source_ready || source_selection_disabled) {
       return;
     }
 
@@ -732,30 +695,41 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
 
     try {
       const loaded_default_preset_names = collect_loaded_default_preset_names(settings_snapshot, t);
-      const source_path = selected_source.source_paths[0]!; // 选择阶段保证非空，首项决定默认名称和目录。
-      const source_paths = selected_source.source_paths;
-      const output_path = await resolve_project_output_path(source_path);
+      // Godot 多包优先级先于路径选择请求；小说来源没有本地资产包。
+      const godot_pack_orders =
+        source_mode === "files" ? await pack_order.request_order(selected_source!.godot_packs) : [];
+      if (godot_pack_orders === null) return;
+      const source_paths = source_mode === "files" ? selected_source!.source_paths : [];
+      const output_path =
+        source_mode === "files"
+          ? await resolve_project_output_path(source_paths[0]!)
+          : await resolve_remote_project_output_path(novel_preview?.filename ?? "");
       if (output_path === null || output_path === "") {
         return;
       }
       const normalized_output_path = output_path.endsWith(".lg")
         ? output_path
         : `${output_path}.lg`;
+      const create_request =
+        source_mode === "files"
+          ? {
+              source_paths,
+              ...(godot_pack_orders.length ? { godot_pack_orders } : {}),
+              path: normalized_output_path,
+              languages,
+            }
+          : {
+              remote_novel_url: novel_url.trim(),
+              path: normalized_output_path,
+              languages,
+            };
       await run_project_loading_modal({
-        initial_message: t("project_page.create.loading_toast"),
+        message: t("project_page.create.loading_toast"),
         task: async () => {
           const create_payload = await api_fetch<ProjectCreateCommitPayload>(
             "/api/session/project/create",
-            {
-              source_paths,
-              path: normalized_output_path,
-              project_settings: build_project_prefilter_settings(settings_snapshot),
-            },
+            create_request,
           );
-          const failure_toast = format_source_file_parse_failure_toast(create_payload.failed_files);
-          if (failure_toast !== null) {
-            push_toast("warning", failure_toast);
-          }
           const created_project_path =
             typeof create_payload.project?.path === "string" &&
             create_payload.project.path.trim() !== ""
@@ -781,111 +755,21 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       }
       clear_selected_source();
       clear_selected_project();
+      set_novel_url("");
+      set_novel_preview(null);
     } catch (error) {
-      const parse_failure_toast = format_source_file_parse_failure_error_toast(error);
-      if (parse_failure_toast !== null) {
-        push_error_toast(t("app.feedback.create_failed"), parse_failure_toast);
-        return;
+      if (
+        error instanceof DesktopApiError &&
+        error.details.action === GODOT_PACK_ORDER_REFRESH_ACTION &&
+        selected_source !== null
+      ) {
+        await handle_select_source_paths(selected_source.source_paths);
       }
+
       push_error_toast(t("app.feedback.create_failed"), error);
       return;
     } finally {
       set_is_creating_project(false);
-    }
-  }
-
-  /**
-   * 打开既有工程前先执行设置对齐预演，再加载后端会话。
-   */
-  async function handle_open_project(): Promise<void> {
-    if (selected_project === null || selected_project.preview === null || is_opening_project) {
-      return;
-    }
-
-    set_is_opening_project(true);
-
-    try {
-      const project_to_open = selected_project;
-      let did_align_project_settings = false;
-      let aligned_changed_fields: ProjectSettingsAlignmentChangedFields = {};
-
-      await run_project_loading_modal({
-        initial_message: t("project_page.open.loading_toast"),
-        task: async () => {
-          const alignment_payload = await api_fetch<ProjectOpenAlignmentPreviewPayload>(
-            "/api/session/project/open-preview",
-            {
-              path: project_to_open.path,
-            },
-          );
-          const alignment_preview = alignment_payload.preview ?? {};
-          const alignment_action = String(alignment_preview.action ?? "load");
-          const alignment_settings = build_project_prefilter_settings(settings_snapshot);
-          const alignment_changed_fields = alignment_preview.changed ?? {};
-
-          if (alignment_action === "settings_only") {
-            await api_fetch("/api/workbench/settings-alignment/apply", {
-              path: project_to_open.path,
-              mode: "settings_only",
-              project_settings: alignment_settings,
-            });
-            did_align_project_settings = true;
-            aligned_changed_fields = alignment_changed_fields;
-          } else if (alignment_action === "prefiltered_items") {
-            const section_revisions = alignment_preview.section_revisions ?? {};
-            await api_fetch("/api/workbench/settings-alignment/apply", {
-              path: project_to_open.path,
-              mode: "prefiltered_items",
-              project_settings: alignment_settings,
-              expected_section_revisions: {
-                items: Number(section_revisions.items ?? 0),
-              },
-            });
-            did_align_project_settings = true;
-            aligned_changed_fields = alignment_changed_fields;
-          }
-
-          await api_fetch("/api/session/project/open", {
-            path: project_to_open.path,
-          });
-          set_project_session_status("warming");
-          await refresh_project_snapshot();
-          await api_fetch<SettingsPayload>("/api/settings/recent-projects/add", {
-            path: project_to_open.path,
-            name: extract_stem(extract_file_name(project_to_open.path)),
-          });
-          await Promise.all([refresh_settings(), refresh_batch_translation()]);
-        },
-      });
-      if (did_align_project_settings) {
-        push_toast(
-          "info",
-          format_project_settings_aligned_toast({
-            settings: build_project_prefilter_settings(settings_snapshot),
-            changed_fields: aligned_changed_fields,
-            t,
-          }),
-        );
-      }
-    } catch (error) {
-      push_error_toast(t("app.feedback.load_failed"), error);
-      return;
-    } finally {
-      set_is_opening_project(false);
-    }
-  }
-
-  /**
-   * 从最近工程列表移除路径后刷新 settings 快照。
-   */
-  async function handle_recent_project_remove(project_path: string): Promise<void> {
-    try {
-      await api_fetch<SettingsPayload>("/api/settings/recent-projects/remove", {
-        path: project_path,
-      });
-      await refresh_settings();
-    } catch (error) {
-      push_error_toast(t("project_page.open.remove_unavailable"), error);
     }
   }
 
@@ -902,6 +786,73 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       ),
     );
   }
+
+  const source_mode_toggle = (
+    <SegmentedToggle<ProjectSourceMode>
+      aria_label={t("project_page.create.mode.label")}
+      value={source_mode}
+      stretch
+      disabled={source_selection_disabled}
+      options={[
+        { value: "files", label: t("project_page.create.mode.files") },
+        { value: "novel", label: t("project_page.create.mode.novel") },
+      ]}
+      on_value_change={handle_source_mode_change}
+    />
+  );
+
+  const novel_selection = (
+    <div className="project-home__novel-form">
+      <div className="project-home__novel-url-row">
+        <Input
+          value={novel_url}
+          aria-label={t("project_page.create.remote.url_placeholder")}
+          placeholder={t("project_page.create.remote.url_placeholder")}
+          disabled={source_selection_disabled}
+          onChange={(event) => {
+            set_novel_url(event.target.value);
+            set_novel_preview(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void handle_check_novel_url();
+          }}
+        />
+        <AppButton
+          type="button"
+          variant="outline"
+          className="shrink-0"
+          disabled={novel_url.trim() === "" || source_selection_disabled}
+          onClick={() => {
+            void handle_check_novel_url();
+          }}
+        >
+          {is_novel_checking ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <Globe data-icon="inline-start" />
+          )}
+          {t("project_page.create.remote.check")}
+        </AppButton>
+      </div>
+      {novel_preview === null ? (
+        <p className="project-home__novel-hint">{t("project_page.create.remote.hint")}</p>
+      ) : (
+        <div className="project-home__novel-preview">
+          <p className="project-home__novel-title">{novel_preview.title}</p>
+          {novel_preview.title_jp === "" ? null : (
+            <p className="project-home__novel-subtitle">{novel_preview.title_jp}</p>
+          )}
+          <p className="project-home__novel-meta">
+            {t("project_page.create.remote.chapters", {
+              COUNT: String(novel_preview.chapter_count),
+            })}
+            {" · "}
+            {novel_preview.origin}
+          </p>
+        </div>
+      )}
+    </div>
+  );
 
   const source_selection = (
     <AppContextMenu disabled={source_selection_disabled}>
@@ -962,12 +913,12 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
           ? null
           : {
               name: extract_file_name(selected_project.path),
-              detail: t("project_page.open.ready_status"),
+              path: selected_project.path,
             }
       }
       clear_label={t("app.action.reset")}
       on_clear={clear_selected_project}
-      disabled={is_preview_loading || is_opening_project}
+      disabled={is_opening_project || is_creating_project}
       onClick={() => {
         void handle_select_project_file();
       }}
@@ -998,14 +949,54 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
       ) : (
         <RecentProjectEmptyState />
       )
-    ) : selected_project.preview !== null ? (
-      <ProjectPreviewPanel project={selected_project} />
+    ) : preview_state.status === "ready" ? (
+      <ProjectPreviewPanel preview={preview_state.preview} />
+    ) : preview_state.status === "loading" ? (
+      <AppContentState status="loading" />
+    ) : preview_state.status === "failed" ? (
+      <AppContentState status="error" />
     ) : null;
   const missing_recent_project_description =
     missing_recent_project === null ? "" : t("project_page.open.missing_file_description");
 
   return (
     <>
+      <GodotPackOrderDialog {...pack_order.dialog_props} />
+      <AppConfirmDialog {...backup_confirm.dialog_props} />
+      <AppConfirmDialog
+        open={pending_confirmation !== null}
+        confirmDelay
+        description={
+          pending_confirmation === null
+            ? ""
+            : render_rich_text(
+                t("project_page.open.newer_app_version_description", {
+                  VERSION: pending_confirmation.target_app_version,
+                }),
+                {
+                  emphasis: (children) => (
+                    <span className="project-home__version-emphasis font-medium">{children}</span>
+                  ),
+                },
+              )
+        }
+        onConfirm={() => {
+          void confirm_open();
+        }}
+        onClose={cancel_confirmation}
+      />
+      <ProjectLanguageDialog
+        open={is_language_dialog_open}
+        languages={create_languages}
+        on_change={(field, next_value) => {
+          set_create_languages((previous) => ({ ...previous, [field]: next_value }));
+        }}
+        on_confirm={confirm_language_dialog}
+        on_close={() => {
+          set_is_language_dialog_open(false);
+        }}
+      />
+
       <AppConfirmDialog
         open={missing_recent_project !== null}
         description={missing_recent_project_description}
@@ -1015,17 +1006,9 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
             return;
           }
 
-          void (async () => {
-            await api_fetch<SettingsPayload>("/api/settings/recent-projects/remove", {
-              path: target_path,
-            });
-            await refresh_settings();
-            set_missing_recent_project(null);
-          })();
+          void handle_recent_project_remove(target_path);
         }}
-        onClose={() => {
-          set_missing_recent_project(null);
-        }}
+        onClose={close_missing_recent}
       />
 
       <div className="project-home page-shell page-shell--full">
@@ -1041,9 +1024,16 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
             </CardHeader>
 
             <CardContent className="project-home__panel-content">
-              {source_selection}
+              {source_mode_toggle}
 
-              <ProjectSourceFormats format_hit_counts={selected_source?.format_hit_counts} />
+              {source_mode === "files" ? (
+                <>
+                  {source_selection}
+                  <ProjectSourceFormats format_hit_counts={selected_source?.format_hit_counts} />
+                </>
+              ) : (
+                novel_selection
+              )}
             </CardContent>
 
             <CardFooter className="project-home__footer">
@@ -1052,10 +1042,11 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
                 label={t("project_page.create.action")}
                 loading_label={t("app.action.loading")}
                 is_loading={is_creating_project}
-                disabled={selected_source === null || source_selection_disabled}
-                on_click={() => {
-                  void handle_create_project();
-                }}
+                disabled={
+                  (source_mode === "files" ? selected_source === null : novel_preview === null) ||
+                  source_selection_disabled
+                }
+                on_click={() => void open_language_dialog()}
               />
             </CardFooter>
           </Card>
@@ -1092,12 +1083,7 @@ export function ProjectPage(_props: ProjectPageProps): JSX.Element {
                 label={t("project_page.open.action")}
                 loading_label={t("app.action.loading")}
                 is_loading={is_opening_project}
-                disabled={
-                  selected_project === null ||
-                  selected_project.preview === null ||
-                  is_preview_loading ||
-                  is_opening_project
-                }
+                disabled={selected_project === null || is_creating_project || is_opening_project}
                 on_click={() => {
                   void handle_open_project();
                 }}

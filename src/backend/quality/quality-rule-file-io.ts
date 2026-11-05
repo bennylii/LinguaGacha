@@ -7,7 +7,7 @@ import { JsonTool } from "../../shared/utils/json-tool";
 
 export type QualityRuleFileEntry = JsonRecord;
 
-const RULE_COLUMNS = ["src", "dst", "info", "regex", "case_sensitive"] as const;
+const RULE_COLUMNS = ["src", "dst", "info", "evidence", "regex", "case_sensitive"] as const;
 const RULE_COLUMN_WIDTH = 24;
 const RULE_FONT_SIZE = 10;
 
@@ -113,7 +113,7 @@ async function load_quality_rule_entries_from_json(
 }
 
 /**
- * Excel 导入读取前五列，列顺序与导出文件保持一致。
+ * Excel 导入按固定列顺序识别字段；旧五列文件和新增 evidence 的六列文件都可读取。
  */
 async function load_quality_rule_entries_from_xlsx(
   file_path: string,
@@ -121,17 +121,23 @@ async function load_quality_rule_entries_from_xlsx(
 ): Promise<QualityRuleFileEntry[]> {
   const workbook = await read_workbook(native_fs.read_file(file_path));
   const sheet = workbook.worksheets[0];
+  if (sheet === undefined) return [];
   const result: QualityRuleFileEntry[] = [];
-  sheet?.eachRow((row) => {
-    const [src = "", dst = "", info = "", regex = "", case_sensitive = ""] = Array.from(
-      { length: RULE_COLUMNS.length },
-      (_, index) => cell_text(row.getCell(index + 1).value).trim(),
-    );
-    if (src === "" || (src === "src" && dst === "dst")) return;
+  // 旧文件没有 evidence 列，不能把原 regex 列误读为查证材料。
+  const has_evidence_column = cell_text(sheet.getRow(1).getCell(4).value).trim() === "evidence";
+  sheet.eachRow((row, row_number) => {
+    const headers = RULE_COLUMNS.map((_, index) => cell_text(row.getCell(index + 1).value).trim());
+    if (row_number === 1 && headers[0] === "src" && headers[1] === "dst") return;
+    const [src = "", dst = "", info = "", evidence = "", regex = "", case_sensitive = ""] =
+      has_evidence_column
+        ? headers
+        : [headers[0], headers[1], headers[2], "", headers[3], headers[4]];
+    if (src === "") return;
     push_normalized_rule(result, {
       src,
       dst,
       info,
+      evidence,
       regex: regex.toLowerCase() === "true",
       case_sensitive: case_sensitive.toLowerCase() === "true",
     });
@@ -197,7 +203,7 @@ function push_normalized_rule(result: unknown[], entry: QualityRuleFileEntry): v
 /** JSON 数组只投影外部可维护字段，字段值留给具体规则边界校验。 */
 function project_external_rule_fields(entry: QualityRuleFileEntry): QualityRuleFileEntry {
   const result: QualityRuleFileEntry = {};
-  for (const key of ["src", "dst", "info", "regex", "case_sensitive"] as const) {
+  for (const key of ["src", "dst", "info", "evidence", "regex", "case_sensitive"] as const) {
     if (Object.hasOwn(entry, key)) {
       result[key] = entry[key]!; // 自有 JSON 字段的值不会是 undefined。
     }
@@ -211,6 +217,7 @@ function normalize_external_rule(entry: QualityRuleFileEntry): QualityRuleFileEn
     src: String(entry["src"] ?? "").trim(),
     dst: String(entry["dst"] ?? "").trim(),
     info: String(entry["info"] ?? "").trim(),
+    evidence: String(entry["evidence"] ?? "").trim(),
     regex: Boolean(entry["regex"] ?? false),
     case_sensitive: Boolean(entry["case_sensitive"] ?? false),
   };

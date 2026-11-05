@@ -3,14 +3,16 @@ import { describe, expect, it } from "vitest";
 import type { LogEntry } from "@frontend/app/desktop/desktop-api";
 import {
   filter_log_entries,
+  log_file_key,
   sort_log_entries_latest_first,
 } from "@frontend/pages/log-window-page/logic";
 
 /** 提供完整摘要夹具，场景只覆写需要变化的字段。 */
 function build_event(overrides: Partial<LogEntry>): LogEntry {
   return {
-    id: "log-1",
+    id: "20260426:1234:1",
     date: "20260426",
+    instance: "1234",
     revision: "rev",
     line: 1,
     created_at: "2026-04-26T08:30:15.000+00:00",
@@ -23,6 +25,15 @@ function build_event(overrides: Partial<LogEntry>): LogEntry {
 }
 
 describe("log-window logic", () => {
+  it("文件身份同时包含日期与实例", () => {
+    expect(log_file_key({ date: "20260913", instance: "1234", current: true })).toBe(
+      "20260913:1234",
+    );
+    expect(log_file_key({ date: "20260913", instance: "5678", current: false })).toBe(
+      "20260913:5678",
+    );
+  });
+
   it("按日期与物理行号倒序展示日志", () => {
     const events = [
       build_event({ id: "log-1", line: 1 }),

@@ -1,5 +1,5 @@
 import type { NetworkProxyPolicy } from "../../domain/setting";
-import type { SystemProxyResolver } from "./system-proxy-http-client";
+import type { ProxyResolver } from "./proxy-http-client";
 
 /**
  * 把设置里的代理模式翻译成系统代理客户端消费的 Chromium 规则串。
@@ -8,9 +8,9 @@ import type { SystemProxyResolver } from "./system-proxy-http-client";
  * 原样交给宿主 resolver，保持 Electron session 仍是系统代理规则的唯一来源。
  */
 export function create_proxy_policy_resolver(
-  host_resolver: SystemProxyResolver,
+  host_resolver: ProxyResolver,
   read_policy: () => NetworkProxyPolicy,
-): SystemProxyResolver {
+): ProxyResolver {
   return {
     resolveProxy: async (url, signal) => {
       const policy = read_policy();

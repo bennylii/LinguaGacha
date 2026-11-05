@@ -1,9 +1,11 @@
-import { type JSX, memo, useState } from "react";
+import { type JSX, memo, useEffect, useState } from "react";
 
 import { is_json_record } from "@domain/json";
 import type { AgentToolEntry } from "@shared/agent";
 import { useI18n } from "@frontend/app/locale/locale-context";
+import { useAgentChatActions } from "@frontend/app/session/agent/agent-chat-context";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@frontend/shadcn/tabs";
+import { AppButton } from "@frontend/widgets/app-button";
 import { AppEditor } from "@frontend/widgets/app-editor/app-editor";
 import type {
   AppEditorSyntax,
@@ -40,10 +42,46 @@ type AgentToolDetailDialogProps = {
 /** 工具详情只挂载当前输入或输出面板，避免长载荷进入会话信息流 DOM。 */
 export function AgentToolDetailDialog(props: AgentToolDetailDialogProps): JSX.Element {
   const { t } = useI18n();
+  const actions = useAgentChatActions();
   const entry = props.entry;
-  const label = format_agent_tool_label(entry.toolName, entry.input);
+  const [loaded, set_loaded] = useState<AgentToolEntry | null>(null);
+  const [loading_full, set_loading_full] = useState(false);
+  const [load_failed, set_load_failed] = useState(false);
+  const [read_attempt, set_read_attempt] = useState(0);
+  const read_entry = actions.readEntry;
+
+  // 终帧到达后按条目身份读取完整输出；运行中继续使用预览。
+  useEffect(() => {
+    if (entry.status === "running") {
+      set_loaded(null);
+      set_loading_full(false);
+      set_load_failed(false);
+      return;
+    }
+    let cancelled = false;
+    set_loading_full(true);
+    set_load_failed(false);
+    void read_entry(entry.id)
+      .then(
+        (value) => {
+          if (!cancelled && value.kind === "tool_call") set_loaded(value);
+        },
+        () => {
+          if (!cancelled) set_load_failed(true);
+        },
+      )
+      .finally(() => {
+        if (!cancelled) set_loading_full(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [entry, read_attempt, read_entry]);
+
+  const display = loaded ?? entry;
+  const label = format_agent_tool_label(display.toolName, display.input);
   const [initial_channel] = useState<AgentToolPayloadChannel>(
-    entry.output === null ? "input" : "output",
+    display.output === null ? "input" : "output",
   );
   // 缓存只属于本次弹窗，两个标签各保留一份结果，关闭即释放；隐藏标签不提前解析。
   const [read_payload] = useState(() => {
@@ -98,18 +136,35 @@ export function AgentToolDetailDialog(props: AgentToolDetailDialogProps): JSX.El
         <TabsContent value="input" className="agent-tool-detail__panel">
           <AgentToolPayload
             read_payload={read_payload}
-            tool_name={entry.toolName}
+            tool_name={display.toolName}
             channel="input"
-            content={entry.input}
+            content={display.input}
             aria_label={t("agent_page.tool.input")}
           />
         </TabsContent>
         <TabsContent value="output" className="agent-tool-detail__panel">
+          {loading_full ? (
+            <div className="agent-tool-detail__notice" role="status">
+              {t("agent_page.tool.loading_full")}
+            </div>
+          ) : load_failed ? (
+            <div className="agent-tool-detail__notice" role="status">
+              <span>{t("agent_page.tool.load_failed")}</span>
+              <AppButton
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={() => set_read_attempt((attempt) => attempt + 1)}
+              >
+                {t("agent_page.tool.retry")}
+              </AppButton>
+            </div>
+          ) : null}
           <AgentToolPayload
             read_payload={read_payload}
-            tool_name={entry.toolName}
+            tool_name={display.toolName}
             channel="output"
-            content={entry.output}
+            content={display.output}
             fallback={status_label}
             aria_label={t("agent_page.tool.output")}
           />

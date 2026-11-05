@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ProjectItemPublicRecord } from "../../domain/item";
 import {
+  apply_remote_translations,
   build_translation_extras_from_items,
   compute_project_prefilter_write,
   type ProjectWriteState,
@@ -45,6 +46,54 @@ function create_state(items: ProjectItemPublicRecord[]): ProjectWriteState {
   };
 }
 
+describe("apply_remote_translations", () => {
+  it("只补齐待翻译条目并重算进度", () => {
+    const output = compute_project_prefilter_write({
+      state: create_state([
+        create_item(1, { src: "a", row_number: 0 }),
+        create_item(2, { src: "b", row_number: 1 }),
+        create_item(3, { src: "", row_number: 2 }),
+        create_item(4, { src: "d", row_number: 3, status: "EXCLUDED" }),
+        create_item(5, { src: "e", row_number: 4, file_path: "other.txt" }),
+      ]),
+      source_language: "ALL",
+      mtool_optimizer_enable: false,
+      skip_duplicate_source_text_enable: false,
+    });
+
+    const result = apply_remote_translations(
+      output,
+      new Map([
+        [0, "甲"],
+        [1, "乙"],
+        [2, "丙"],
+        [3, "丁"],
+        [4, "戊"],
+      ]),
+      "script.txt",
+    );
+
+    expect(result.items["1"]).toMatchObject({ dst: "甲", status: "PROCESSED" });
+    expect(result.items["2"]).toMatchObject({ dst: "乙", status: "PROCESSED" });
+    expect(result.items["3"]).toMatchObject({ dst: "", status: "RULE_SKIPPED" });
+    expect(result.items["4"]).toMatchObject({ dst: "", status: "EXCLUDED" });
+    expect(result.items["5"]).toMatchObject({ dst: "", status: "NONE" });
+    expect(result.translation_extras.processed_line).toBe(2);
+  });
+
+  it("没有可用译文时保持原结果", () => {
+    const output = compute_project_prefilter_write({
+      state: create_state([create_item(1, { src: "a" })]),
+      source_language: "ALL",
+      mtool_optimizer_enable: false,
+      skip_duplicate_source_text_enable: false,
+    });
+
+    expect(apply_remote_translations(output, new Map(), "script.txt")).toBe(output);
+    expect(apply_remote_translations(output, new Map([[0, " "]]), "script.txt")).toBe(output);
+  });
+});
+
 describe("compute_project_prefilter_write", () => {
   it("内部预过滤与统计只读取业务字段，保留格式私有数据和上游姓名快照", () => {
     let private_reads = 0;
@@ -54,7 +103,12 @@ describe("compute_project_prefilter_write", () => {
         return ["格式数据"];
       },
     };
-    const original = create_item(1, { src: "hello", name_src: ["姓名", "格式槽"], extra_field });
+    const original = create_item(1, {
+      src: "hello",
+      name_src: ["姓名", "格式槽"],
+      name_dst: ["译名", "译名槽"],
+      extra_field,
+    });
     const state = create_state([original]);
     const result = compute_project_prefilter_write({
       state,
@@ -72,7 +126,26 @@ describe("compute_project_prefilter_write", () => {
     const result_name = result.items["1"]!.name_src;
     if (Array.isArray(result_name)) result_name[0] = "编辑后";
     expect(original.name_src).toEqual(["姓名", "格式槽"]);
+    const result_name_dst = result.items["1"]!.name_dst;
+    if (Array.isArray(result_name_dst)) result_name_dst[0] = "编辑后";
+    expect(original.name_dst).toEqual(["译名", "译名槽"]);
+    result.items["1"]!.status = "PROCESSED";
     expect(original.status).toBe("NONE");
+  });
+  it("稀疏身份与输入顺序不影响重复代表项，输出仍按身份索引", () => {
+    const later = create_item(9001, { src: "同文" });
+    const first = create_item(7, { src: "同文", status: "DUPLICATED" });
+    const result = compute_project_prefilter_write({
+      state: { files: create_state([]).files, items: { later, first } },
+      source_language: "ZH",
+      mtool_optimizer_enable: false,
+      skip_duplicate_source_text_enable: true,
+    });
+    expect(Object.keys(result.items)).toEqual(["7", "9001"]);
+    expect(result.items["7"]!.status).toBe("NONE");
+    expect(result.items["9001"]!.status).toBe("DUPLICATED");
+    expect(result.translation_extras.total_line).toBe(1);
+    expect([later.status, first.status]).toEqual(["NONE", "DUPLICATED"]);
   });
   it("按正文与可见姓名判断翻译候选，正文特殊规则不作用于姓名", () => {
     const result = compute_project_prefilter_write({

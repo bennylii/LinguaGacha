@@ -45,7 +45,7 @@ export class AppSettingService {
   }
 
   /**
-   * 设置同进程入口的临时覆盖值；CLI 语言参数需要影响任务快照，但不能改写 GUI 配置文件。
+   * 设置同进程入口的临时覆盖值，供 CLI 调整预设与输出选项。
    */
   public set_transient_overrides(overrides: JsonRecord | null): void {
     this.transient_overrides = overrides === null ? null : { ...overrides };
@@ -119,12 +119,12 @@ export class AppSettingService {
   }
 
   /**
-   * 持久化完整设置对象，并同步刷新运行期缓存。
+   * 持久化完整设置对象，并同步刷新运行期缓存；多实例共用 userdata 时以原子替换避免截断。
    */
   public save_setting(setting: JsonRecord): void {
     const config_path = this.paths.get_config_path();
     const normalized_setting = Setting.from_json(setting);
-    this.native_fs.write_file_sync(
+    this.native_fs.write_file_atomic(
       config_path,
       JsonTool.stringifyStrict(normalized_setting.to_json(), { indent: 4 }),
     );

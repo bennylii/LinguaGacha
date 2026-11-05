@@ -14,6 +14,19 @@ type TextPreservePresetEntry = {
 };
 
 describe("text-preserve-rules", () => {
+  it("Godot 格式保护 printf、命名占位符与 BBCode", () => {
+    const rule = build_text_preserve_rule({ mode: "SMART", text_type: "GODOT", entries: [] });
+    const text = "[b]玩家 {name}：%s %.2f %-5d[/b]";
+    expect(rule.collect(text).filter((segment) => segment.trim())).toEqual([
+      "[b]",
+      "{name}",
+      "%s",
+      "%.2f",
+      "%-5d",
+      "[/b]",
+    ]);
+    expect(rule.analyze(text).unpreserved_text).toContain("玩家");
+  });
   it("内置文本保护规则只包含可编译的 JS Unicode 正则", () => {
     const preset_dir = path.join(process.cwd(), "builtin", "text_preserve", "preset");
     const rule_files = fs
@@ -114,6 +127,11 @@ describe("text-preserve-rules", () => {
 
     expect(rule.collect("{player_name}")).toEqual(["{player_name}"]);
     expect(rule.collect("{名前}")).toEqual([]);
+    expect(rule.collect("[a[0]]")).toEqual(["[a[0]]"]);
+    expect(rule.analyze("Hello [a[0]]").unpreserved_text.trim()).toBe("Hello");
+    expect(collect_non_blank_text_preserve_segments("%(count)d 个，100% 完成", rule)).toEqual([
+      "%(count)d",
+    ]);
   });
 
   it("收集保护段时会忽略只包含空白的命中", () => {

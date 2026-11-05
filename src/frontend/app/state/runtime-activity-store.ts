@@ -29,7 +29,12 @@ export function normalize_runtime_activity_snapshot(
         ? revision
         : 0,
     owner:
-      owner === "batch_translation" || owner === "agent" || owner === "model_test" ? owner : null,
+      owner === "batch_translation" ||
+      owner === "agent" ||
+      owner === "model_test" ||
+      owner === "remote_workspace"
+        ? owner
+        : null,
   };
 }
 

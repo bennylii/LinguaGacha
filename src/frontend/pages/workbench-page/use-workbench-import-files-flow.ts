@@ -1,3 +1,7 @@
+import { GODOT_PACK_ORDER_REFRESH_ACTION } from "@shared/godot";
+import type { GodotPackOrder } from "@shared/godot";
+import { useGodotPackOrder } from "@frontend/features/godot-pack-order/use-godot-pack-order";
+import { useGameBackupConfirm } from "@frontend/features/game-backup-confirm/use-game-backup-confirm";
 import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
@@ -6,21 +10,17 @@ import type { ProjectWriteResultPayload } from "@frontend/app/state/desktop-proj
 import type { LocaleKey } from "@frontend/app/locale/locale-context";
 import { normalize_source_paths } from "@frontend/app/desktop/source-paths";
 import {
-  format_source_file_parse_failure_error_toast,
-  format_source_file_parse_failure_toast,
-} from "@frontend/app/feedback/source-file-parse-failure-feedback";
-import {
   create_workbench_import_files_plan,
   type WorkbenchFileConflictAction,
   type WorkbenchImportFileCandidate,
   type WorkbenchImportFilesPreview,
   type WorkbenchCommandPlanningState,
-  type WorkbenchPlannerSettings,
   type WorkbenchCommandPlan,
 } from "@shared/workbench/workbench-command-planner";
 import type { WorkbenchDialogState } from "@frontend/pages/workbench-page/types";
 
 type PendingImportFilesRequest = {
+  godot_pack_orders: readonly GodotPackOrder[];
   preview: WorkbenchImportFilesPreview; // 后端拥有目标名称、冲突分类和修订。
   conflict_action: WorkbenchFileConflictAction;
   source_paths: string[];
@@ -33,7 +33,6 @@ type WorkbenchImportFilesFlowOptions = {
   project_identity: string;
   dialog_state: WorkbenchDialogState;
   get_planning_state: () => WorkbenchCommandPlanningState;
-  planner_settings: WorkbenchPlannerSettings; // 导入命令只需要预过滤设置，不依赖完整应用设置快照
   run_modal_progress_toast: <T>(args: {
     message: string;
     task: () => Promise<T>;
@@ -50,6 +49,8 @@ type WorkbenchImportFilesFlowOptions = {
 };
 
 export type WorkbenchImportFilesFlow = {
+  godot_pack_order: ReturnType<typeof useGodotPackOrder>;
+  game_backup_confirm: ReturnType<typeof useGameBackupConfirm>;
   request_add_files_from_paths: (source_paths: string[]) => Promise<void>;
   confirm_dialog: () => Promise<boolean>;
   secondary_dialog: () => Promise<boolean>;
@@ -100,12 +101,16 @@ function normalize_workbench_import_candidate(
 export function useWorkbenchImportFilesFlow(
   options: WorkbenchImportFilesFlowOptions,
 ): WorkbenchImportFilesFlow {
+  const godot_pack_order = useGodotPackOrder();
+  const game_backup_confirm = useGameBackupConfirm();
   const [pending_import_files_request, set_pending_import_files_request] =
     useState<PendingImportFilesRequest | null>(null);
 
   useEffect(() => {
     set_pending_import_files_request(null);
-  }, [options.project_identity]);
+    game_backup_confirm.finish(false);
+    godot_pack_order.finish(null);
+  }, [options.project_identity, game_backup_confirm.finish, godot_pack_order.finish]);
 
   /**
    * 打开译文继承确认对话框，按冲突策略筛出本次真正会导入的文件。
@@ -161,7 +166,7 @@ export function useWorkbenchImportFilesFlow(
       }
 
       const import_preview = await options.run_modal_progress_toast({
-        message: options.t("workbench_page.feedback.add_file_loading_toast"),
+        message: options.t("app.feedback.operation_running"),
         task: async (): Promise<WorkbenchImportFilesPreview> => {
           const payload = await api_fetch<WorkbenchImportFilesPreview>(
             "/api/workbench/files/preview",
@@ -171,6 +176,7 @@ export function useWorkbenchImportFilesFlow(
           );
           return {
             ...payload,
+            contains_game: payload.contains_game === true,
             files: Array.isArray(payload.files)
               ? payload.files.flatMap((file) => {
                   const candidate = normalize_workbench_import_candidate(file);
@@ -192,7 +198,11 @@ export function useWorkbenchImportFilesFlow(
         return;
       }
 
+      if (!(await game_backup_confirm.request_confirm(import_preview.contains_game))) return;
+      const godot_pack_orders = await godot_pack_order.request_order(import_preview.godot_packs);
+      if (godot_pack_orders === null) return;
       const pending_request: PendingImportFilesRequest = {
+        godot_pack_orders,
         preview: import_preview,
         conflict_action: "skip",
         source_paths: normalized_source_paths,
@@ -211,7 +221,12 @@ export function useWorkbenchImportFilesFlow(
 
       open_import_inheritance_dialog(pending_request, "skip");
     },
-    [open_import_inheritance_dialog, options],
+    [
+      open_import_inheritance_dialog,
+      options,
+      game_backup_confirm.request_confirm,
+      godot_pack_order.request_order,
+    ],
   );
 
   /**
@@ -229,28 +244,41 @@ export function useWorkbenchImportFilesFlow(
         state,
         preview: pending_request.preview,
         conflict_action,
-        settings: options.planner_settings,
         inheritance_mode,
       });
-      let import_payload: ProjectWriteResultPayload;
+      const selected_paths = new Set(
+        pending_request.preview.files
+          .filter((file) => conflict_action === "replace" || !file.conflict)
+          .flatMap((file) => {
+            const value = file.source_path.replaceAll("\\", "/").toLowerCase();
+            return [value, value.replace(/\/[^/]+\.exe$/iu, "")];
+          }),
+      );
+      const godot_pack_orders = pending_request.godot_pack_orders.filter((game) =>
+        selected_paths.has(game.game_root.replaceAll("\\", "/").toLowerCase()),
+      );
       try {
-        import_payload = await options.run_modal_progress_toast({
-          message: options.t("workbench_page.feedback.add_file_loading_toast"),
+        await options.run_modal_progress_toast({
+          message: options.t("app.feedback.operation_running"),
           task: () =>
             options.run_project_file_write(import_plan, (body) =>
-              api_fetch<ProjectWriteResultPayload>("/api/workbench/files/import", body),
+              api_fetch<ProjectWriteResultPayload>("/api/workbench/files/import", {
+                ...body,
+                ...(godot_pack_orders.length ? { godot_pack_orders } : {}),
+              }),
             ),
         });
       } catch (error) {
-        if (!(error instanceof DesktopApiError) || error.code !== "data.revision_conflict")
+        if (
+          !(error instanceof DesktopApiError) ||
+          (error.code !== "data.revision_conflict" &&
+            error.details.action !== GODOT_PACK_ORDER_REFRESH_ACTION)
+        )
           throw error;
         await request_add_files_from_paths(pending_request.source_paths);
         return;
       }
-      const failure_toast = format_source_file_parse_failure_toast(import_payload.failed_files);
-      if (failure_toast !== null) {
-        options.push_toast("warning", failure_toast);
-      }
+      options.push_toast("success", options.t("app.feedback.operation_success"));
       set_pending_import_files_request(null);
       options.set_dialog_state(close_dialog_state());
     },
@@ -281,10 +309,7 @@ export function useWorkbenchImportFilesFlow(
           await execute_import_files_request(pending, primary ? "inherit" : "none");
         }
       } catch (error) {
-        push_error_toast(
-          options.t("app.feedback.operation_failed"),
-          format_source_file_parse_failure_error_toast(error) ?? error,
-        );
+        push_error_toast(options.t("app.feedback.operation_failed"), error);
         options.set_dialog_submitting(false);
       }
       return true;
@@ -320,6 +345,8 @@ export function useWorkbenchImportFilesFlow(
   }, [options]);
 
   return {
+    godot_pack_order,
+    game_backup_confirm,
     request_add_files_from_paths,
     confirm_dialog,
     secondary_dialog,

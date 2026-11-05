@@ -8,7 +8,7 @@ export const en_us_game_font_page = {
     font_file: {
       title: "Font File",
       description: "Click or Drag Font File",
-      hint: "Supports TTF and OTF",
+      hint: "Supports TTF",
     },
   },
   action: {
@@ -16,11 +16,7 @@ export const en_us_game_font_page = {
     pick_directory: "Select Game Folder",
     start: "Modify",
   },
-  confirm: { description: "Modify the game font …?" },
   feedback: {
     inspect_failed: "Detection failed …",
-    apply_failed: "Modification failed …",
-    applying: "Modifying game font …",
-    apply_success: "Game font modified …",
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_game_font_page>;
