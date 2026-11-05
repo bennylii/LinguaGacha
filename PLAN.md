@@ -69,12 +69,15 @@
 - **P0 双表示接入已回滚**（`3c6b5ce7` → `df1c3c7c`）：`ItemCache` 回到纯对象 Map，双表示与 parity 测试移除。
 - **真机收益实测（P0 列式版）**：列式路径确认生效（917793 行 ≥ 阈值），但 idle MAIN 588 vs 595 MB（噪声内）、ws_run 峰值 3115 vs 2751/3033 MB（持平）。P0 对常驻与峰值均无可见收益。
 - **P0′ 前提已证伪**：装入期 `get_all_items` 的 92 万 `{id,data}` 行 + parse 对象是**瞬时、可完全 GC**（显式 GC 后 heap 917→292 MB），流式化只能削加载尖峰、降不了 idle 稳态。
-- **分阶段埋点闭环（决定性，22:01 诊断构建，验完已删）**：校对 sync 链路 rss 轨迹 —— `before_build_input` 727 → `after_build_input(upsert=917793)` 874（+147）→ `after_postMessage` 1089（+215 外部克隆）→ `worker:after_evaluate` **2800（评估 66 秒，rss +1665、heap 仅 +88）** → `worker_returned` 3051 → `after_sync_state` 1856（GC 回落）。**2GB 峰值的主因是 `evaluateProofreadingSlice` 逐条评估过程产生的大对象分配/延迟回收（工作集涨、JS 堆涨得少），不是全量对象索引、不是装入数组、不是 `ItemCache` 表示。** 这条链路所有阶段均在 in_process 计算 worker（同一 pid），按进程分角色不会拆开。
-- 安装目录当前为诊断构建；下一步替换回与 HEAD 一致的干净构建。
+- **分阶段埋点闭环（22:01 诊断构建，验完已删）**：校对 sync 链路 rss 轨迹 —— `before_build_input` 727 → `after_build_input(upsert=917793)` 874（+147）→ `after_postMessage` 1089（+215）→ `worker:after_evaluate` **2800（评估 66 秒，rss +1665、compute-worker isolate heap 仅 +88）** → `worker_returned` 3051 → `after_sync_state` 1856（GC 回落）。各线程 isolate 的 heap 增长远小于进程 rss 增长。
+- **compute worker 执行模式已核实**：生产 GUI 的 Backend runtime（`backend-runtime.ts:141`）注入 `worker_threads`，`ComputeWorkerClient` 构造时 `new Worker` —— compute worker 是**独立 worker_thread**，不是 in_process。埋点里 `pid` 全相同只是因为 `worker_threads` 共享 OS 进程 pid；之前据 pid 判断 in_process 是误判，已修正。`worker_threads` 与后端线程共享进程地址空间，故 rss 是整进程口径。
+- **分片方案已证伪**（独立原型，用产品真实 `evaluateProofreadingItem`）：2 万 / 30 万行、片大小 5000 / 20000 / 50000，逐条 `deepEqual` 全 PASS（语义等价成立，须共享 `sample_rule_cache`）；但即使片间 `setImmediate` + 显式 GC，分片 rss 峰值仍**高于**一次性版（+39~41 MB）—— `evaluations` 结果数组必须全量累积，让出与 GC 只增开销。独立原型 30 万行峰值仅 ~370 MB，远小于产品 2800 MB，反证产品的 +2GB 不是单靠评估函数、而是**跨线程全量拷贝 + 大对象空间 + 延迟 GC 的多份数据叠加**。
+- **主因收敛**：峰值大头在**跨线程 structuredClone 的序列化缓冲、V8 大对象/外部内存、延迟 GC 的未回收页**，而非任一 isolate 的 JS 对象数组。这解释了为何工具正文 / 列式 / 装入流式化 / 评估分片全部打不中。
+- 安装目录当前为与 HEAD 一致的干净构建，应用正常 idle；工作区干净。
 
-## 下一步（按分阶段埋点重排优先级）
+## 下一步（按最新证据重排优先级）
 
-1. **评估过程分片 / 及时释放**：`evaluateProofreadingSlice` 对 92 万条一次性 `map` 评估改为分片（每片数千条、片间可 GC），或把评估产物改成流式回传。直接命中已坐实的 +1665 MB 主因；优先做只读原型验证「分片后 rss 峰值」。
-2. **免深拷贝 + 轻量 state**（次要）：`build_sync_input` 分批 + Transferable 免 postMessage 克隆（+215）、父进程 `state` 按身份轻量派生（+129 heap）。各约百 MB 级，收益远小于第 1 项。
-3. **常驻基线**（另一目标）：多套全量对象索引合并为一份主数据 + 轻量派生索引（`ItemColumnStore` 已备）。只在超大工程有意义，与瞬时峰值是不同问题。
+1. **减少跨线程全量拷贝（唯一有正收益候选）**：`build_sync_input` 的 92 万 `upsertItems` 经 `postMessage` structuredClone 到 compute worker，改为 **Transferable ArrayBuffer**（打包成二进制、零拷贝移交）或 **SharedArrayBuffer**（两线程共享一份）。直接命中「多份全量数据叠加」这一已坐实主因，且是 MDN/Node 文档确认的成熟手段。先做只读原型验证「零拷贝后 rss 峰值」。
+2. **轻量 state / 常驻基线**（次要、另一目标）：父进程 `state` 按身份轻量派生、多套对象索引合并（`ItemColumnStore` 已备）。各约百 MB 级、只在超大工程有意义。
+3. 不做：评估分片（已证伪）、装入流式化（只削可 GC 的加载尖峰）、列式双表示接入（实测零收益、已回滚）、换语言 / 引入新运行时。
 4. 任何一步落地都按 P4 分角色/分阶段真机采样验证，不再凭原型外推。
