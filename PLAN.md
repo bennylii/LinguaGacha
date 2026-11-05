@@ -66,13 +66,15 @@
 
 - 分支 `feat/agent-proofreading-auto-resume`；docs 与 PLAN 结论已推送 fork。
 - 保留成果（未接运行时，零风险）：`ItemColumnStore` 独立组件（`23a415ec`）与对照测试、`from_records` 按身份去重修复（`f0c6b7c2`）、增量等价原型结论、双表示等价的产品级验证方法。
-- **P0 双表示接入已回滚**（`3c6b5ce7` → `df1c3c7c`）：`ItemCache` 回到纯对象 Map，双表示与 parity 测试移除。原因见下。
-- **真机收益实测（P0 列式版，20:36 构建）**：列式路径确认生效（917793 行 ≥ 阈值 50000），但「加载会话后 idle」MAIN 588 MB vs 对象路径 595 MB（噪声内），`workspace_run` 峰值 MAIN 3115 MB vs 对象路径 2751/3033 MB（持平甚至略高）。**P0 对常驻与峰值均无可见收益。**
-- **根因重定向（真机数据）**：省下的是「列式常驻结构」，但 (1) `installProject` 先经 `read_items` 构造 92 万对象数组再喂 `replace`，装入期的一次性数组没省；(2) ws_run 峰值来自 `build_sync_input` 全量同步 + 校对 `state`（P1/P3 未做），列式只改 `ItemCache` 一套，挡不住。原型 178 MB 是「纯数据表示理想差」，产品里被这两处盖过。
-- 安装目录当前为 P0 列式版构建（已 `stop`、内存回落中）；下一步替换回与回滚后 HEAD 一致的干净构建。
+- **P0 双表示接入已回滚**（`3c6b5ce7` → `df1c3c7c`）：`ItemCache` 回到纯对象 Map，双表示与 parity 测试移除。
+- **真机收益实测（P0 列式版）**：列式路径确认生效（917793 行 ≥ 阈值），但 idle MAIN 588 vs 595 MB（噪声内）、ws_run 峰值 3115 vs 2751/3033 MB（持平）。P0 对常驻与峰值均无可见收益。
+- **P0′ 前提已证伪**：装入期 `get_all_items` 的 92 万 `{id,data}` 行 + parse 对象是**瞬时、可完全 GC**（显式 GC 后 heap 917→292 MB），流式化只能削加载尖峰、降不了 idle 稳态。
+- **分阶段埋点闭环（决定性，22:01 诊断构建，验完已删）**：校对 sync 链路 rss 轨迹 —— `before_build_input` 727 → `after_build_input(upsert=917793)` 874（+147）→ `after_postMessage` 1089（+215 外部克隆）→ `worker:after_evaluate` **2800（评估 66 秒，rss +1665、heap 仅 +88）** → `worker_returned` 3051 → `after_sync_state` 1856（GC 回落）。**2GB 峰值的主因是 `evaluateProofreadingSlice` 逐条评估过程产生的大对象分配/延迟回收（工作集涨、JS 堆涨得少），不是全量对象索引、不是装入数组、不是 `ItemCache` 表示。** 这条链路所有阶段均在 in_process 计算 worker（同一 pid），按进程分角色不会拆开。
+- 安装目录当前为诊断构建；下一步替换回与 HEAD 一致的干净构建。
 
-## 下一步（按真机证据重排优先级）
+## 下一步（按分阶段埋点重排优先级）
 
-1. **P0′ 装入流式化**：让 `installProject` 不经「92 万对象数组」中转 —— `ProjectDataReader.read_items` 改流式 / 分批喂列式，消除装入期全量对象数组。命中已确认根因之一，收益可测、风险低于跨层改动。
-2. **P1 / P3 校对全量同步轻量化**：`build_sync_input` / 校对 `state` 按身份从主数据读、消除 s18–s30 的 +2GB 峰值与冷启动全量同步。收益最大但跨层大改动。
-3. 任何一步落地后都按 P4 分角色真机采样验证，不再凭原型外推。
+1. **评估过程分片 / 及时释放**：`evaluateProofreadingSlice` 对 92 万条一次性 `map` 评估改为分片（每片数千条、片间可 GC），或把评估产物改成流式回传。直接命中已坐实的 +1665 MB 主因；优先做只读原型验证「分片后 rss 峰值」。
+2. **免深拷贝 + 轻量 state**（次要）：`build_sync_input` 分批 + Transferable 免 postMessage 克隆（+215）、父进程 `state` 按身份轻量派生（+129 heap）。各约百 MB 级，收益远小于第 1 项。
+3. **常驻基线**（另一目标）：多套全量对象索引合并为一份主数据 + 轻量派生索引（`ItemColumnStore` 已备）。只在超大工程有意义，与瞬时峰值是不同问题。
+4. 任何一步落地都按 P4 分角色/分阶段真机采样验证，不再凭原型外推。
