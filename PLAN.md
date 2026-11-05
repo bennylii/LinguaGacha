@@ -65,5 +65,6 @@
 ## 当前状态
 
 - 分支 `feat/agent-proofreading-auto-resume`，docs 结论已推送 fork。
-- 安装目录为与 HEAD 一致的干净构建，应用正常 idle，工作区干净。
-- 下一步：开工 P0。
+- 安装目录为与 HEAD 一致的干净构建，应用正常 idle。
+- P0 第一步已完成（提交 `23a415ec`）：新增独立组件 `ItemColumnStore`（列式只读主数据 + 按行号/身份惰性组装 + 只读迭代）与对照测试，验证与 `ItemCache` 逐字段/逐条/按 id/迭代顺序相等；尚未接入产品运行时，`ItemCache` 契约与增量写入语义不变。
+- 下一步：P0 接入 —— 决定按工程规模分流的落点（`CacheManager` 依规模选择对象路径或列式路径），并让 `ProofreadingCache.build_sync_input` 等消费者改按窗口/迭代读主数据。
