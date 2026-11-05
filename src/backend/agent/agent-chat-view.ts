@@ -97,6 +97,32 @@ function truncate_utf8(value: string, max_bytes: number): string {
   return value.slice(0, end);
 }
 
+// 瘦化时多留一个 UTF-8 码点，让投影层的 to_public_entry 能可靠识别「正文被裁剪」
+// 并标记 outputTruncated；完整正文由 read_full_entry 从存储按需读回。
+const SLIM_TOOL_OUTPUT_BYTES = AGENT_TOOL_OUTPUT_PREVIEW_BYTES + 4;
+
+/**
+ * 已提交记录只保留投影所需结构：工具结果正文裁剪到预览，其余字段（输入回执、
+ * 助手消息、工具调用参数、时间戳）原样保留。大输出不进入常驻 records，
+ * 完整内容仍可从 SDK 存储按记录身份读回。
+ */
+export function slim_entry_record(record: EntryRecord): EntryRecord {
+  const model = record.model;
+  if (model === undefined) return record;
+  let cut = false;
+  const slim = model.map((message) => {
+    if (message.role !== "toolResult") return message;
+    const content = message.content.map((part) => {
+      if (part.type !== "text") return part;
+      if (Buffer.byteLength(part.text, "utf8") <= AGENT_TOOL_OUTPUT_PREVIEW_BYTES) return part;
+      cut = true;
+      return { ...part, text: truncate_utf8(part.text, SLIM_TOOL_OUTPUT_BYTES) };
+    });
+    return { ...message, content };
+  });
+  return cut ? { ...record, model: slim } : record;
+}
+
 /** 用户输入按历史身份标记轮次起点；压缩等无输入条目据此归属轮次。 */
 type RoundMark = { id: number; roundId: string };
 
@@ -112,6 +138,13 @@ function read_round_at(marks: readonly RoundMark[], order: number): string | und
 
 /** 可重建的公开投影。原始事实和查询索引只在这里保存，正文更新不扫描历史。 */
 export class AgentChatView {
+  /** 按需从 SDK 存储读回完整记录；未注入时退回到已常驻（测试夹具）的记录。 */
+  private read_full_record: ((id: number) => Promise<EntryRecord | undefined>) | null = null;
+
+  public set_full_record_reader(reader: (id: number) => Promise<EntryRecord | undefined>): void {
+    this.read_full_record = reader;
+  }
+
   public readonly records = new Map<number, EntryRecord>(); // 已读取的 SDK 历史，供分支恢复与修订定位
   public readonly conversations = new Map<number, ConversationRecord>(); // 分支继承关系，用于计算祖先切点
   public readonly submissions = new Map<number, SubmissionRecord>(); // 产品输入与实际历史条目的关联回执
@@ -245,21 +278,21 @@ export class AgentChatView {
 
   /**
    * 按公开条目身份读取完整内容。时间线只持有工具输出预览，完整正文按需从
-   * 已提交的原始记录重建；阶段 1 改由存储窄查询提供时，本方法签名保持不变。
+   * SDK 存储读回；瘦化的常驻记录只用于测试夹具与读者缺席时的回退。
    */
-  public read_full_entry(id: string): AgentEntry | undefined {
+  public async read_full_entry(id: string): Promise<AgentEntry | undefined> {
     const row = this.rows.get(id);
     if (row === undefined || row.entry.kind !== "tool_call") return row?.entry;
     const location = this.toolResultLocations.get(id);
-    if (location === undefined) return row.entry;
+    if (location === undefined || row.entry.status === "running") return row.entry;
     // toolResult 位于发起调用之后的独立记录，位置索引只存身份，不常驻正文。
-    const result = this.records
-      .get(location.recordId)
-      ?.model?.find(
-        (message) => message.role === "toolResult" && message.toolCallId === location.toolCallId,
-      );
-    if (result === undefined || result.role !== "toolResult" || row.entry.status === "running")
-      return row.entry;
+    const record = this.read_full_record
+      ? await this.read_full_record(location.recordId)
+      : this.records.get(location.recordId);
+    const result = record?.model?.find(
+      (message) => message.role === "toolResult" && message.toolCallId === location.toolCallId,
+    );
+    if (result === undefined || result.role !== "toolResult") return row.entry;
     const output = result.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
     // 显式重建为终态工具条目，避免判别联合在展开时与 running 变体的 null 输出冲突。
     return {
@@ -296,7 +329,7 @@ export class AgentChatView {
   public observe(publication: CommitPublication): void {
     for (const change of publication.changes) {
       if (change.type === "entry") {
-        this.records.set(change.value.id, change.value);
+        this.records.set(change.value.id, slim_entry_record(change.value));
         this.pendingRecords.add(change.value.id);
       } else if (change.type === "conversation")
         this.conversations.set(change.value.id, change.value);

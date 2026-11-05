@@ -57,7 +57,7 @@ import {
   type AgentInputRecord,
 } from "./agent-chat-data";
 import { read_agent_compaction_result, type AgentCompactionResult } from "./agent-compaction";
-import { AgentChatView, assistant_entry_id } from "./agent-chat-view";
+import { AgentChatView, assistant_entry_id, slim_entry_record } from "./agent-chat-view";
 import { AgentContextBudget, read_agent_chat_context } from "./agent-chat-context";
 import { append_agent_chat_seed, type AgentChatSeed } from "./agent-chat-seed";
 import { AgentRuntimeLog, type AgentStopReason } from "./agent-runtime-log";
@@ -169,6 +169,13 @@ export class AgentChat {
   private constructor(private readonly options: ChatOptions) {
     this.models = options.models;
     this.log = options.log;
+    // 详情弹窗的完整工具输出从 SDK 存储按记录身份读回，不常驻内存。
+    // 经 readBatch 走产品队列，避免与 SDK 串行队列反向等待。
+    this.view.set_full_record_reader((id) =>
+      this.read_batch(() =>
+        this.options.storage.entry(id as EntryId, BACKGROUND_CONTEXT).then((found) => found?.entry),
+      ),
+    );
     const stream = this.models.streamSimple.bind(this.models);
     this.models.streamSimple = (model, context, request) =>
       lazyStream(model, async () => {
@@ -535,7 +542,7 @@ export class AgentChat {
       for (const entry of await scan((cursor) =>
         storage.scanEntries({ conversationId: conversation.id }, 100, cursor, BACKGROUND_CONTEXT),
       ))
-        this.view.records.set(entry.id, entry);
+        this.view.records.set(entry.id, slim_entry_record(entry));
     }
     for (const record of await scan((cursor) =>
       storage.scanSubmissions({}, 100, cursor, BACKGROUND_CONTEXT),

@@ -452,8 +452,8 @@ export class AgentService {
     const id = request["id"];
     if (typeof id !== "string" || id === "")
       throw agent_queue_validation_error("agent_timeline_entry_unavailable");
-    // 时间线只持有预览，详情弹窗按条目身份读回完整工具输出。
-    const entry = chat.view.read_full_entry(id);
+    // 时间线只持有预览，详情弹窗按条目身份从存储读回完整工具输出。
+    const entry = await chat.view.read_full_entry(id);
     if (entry === undefined) throw agent_queue_validation_error("agent_timeline_entry_unavailable");
     return { revision: this.revision, chatId: this.chat_id, entry };
   }

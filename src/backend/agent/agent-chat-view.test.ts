@@ -14,8 +14,66 @@ import type {
   SubmissionRecord,
 } from "@earendil-works/pi-durable";
 import { expect, it } from "vitest";
-import { AgentChatDoc, AGENT_INPUT_ENTRY_KIND } from "./agent-chat-data";
-import { AgentChatView } from "./agent-chat-view";
+import { AgentChatDoc, AGENT_INPUT_ENTRY_KIND, read_agent_input } from "./agent-chat-data";
+import { AgentChatView, slim_entry_record } from "./agent-chat-view";
+
+/** 读取记录里首个工具结果文本块，供瘦化断言使用。 */
+function tool_result_text(record: EntryRecord | undefined): string {
+  const message = record?.model?.find((item) => item.role === "toolResult");
+  if (message === undefined || message.role !== "toolResult") throw new Error("no tool result");
+  const part = message.content.find((item) => item.type === "text");
+  return part?.type === "text" ? part.text : "";
+}
+
+it("瘦化记录裁短工具正文并保留输入结构，提交订阅也只存瘦化值", () => {
+  const conversationId = 1 as ConversationId;
+  const state = AgentChatDoc.definition.initial(null);
+  const input: EntryRecord = {
+    id: 1 as EntryId,
+    conversationId,
+    kind: AGENT_INPUT_ENTRY_KIND,
+    data: {
+      roundId: "round-1",
+      message: { text: "任务", attachments: [] },
+      delivery: "round",
+      queuedId: null,
+    },
+  };
+  const result: EntryRecord = {
+    id: 2 as EntryId,
+    conversationId,
+    kind: "test",
+    model: [
+      {
+        role: "toolResult",
+        toolCallId: "call",
+        toolName: "query",
+        content: [{ type: "text", text: "x".repeat(3000) }],
+        isError: false,
+        timestamp: 3,
+      },
+    ],
+  };
+  const slim = slim_entry_record(result);
+  const text = tool_result_text(slim);
+  expect(Buffer.byteLength(text, "utf8")).toBeLessThan(3000);
+  expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(2048); // 多留一个码点供投影识别截断
+  // 输入结构未受影响，计数/分叉/修订仍可只读结构字段。
+  expect(read_agent_input(slim_entry_record(input), undefined, state)).toMatchObject({
+    roundId: "round-1",
+    delivery: "round",
+  });
+
+  const view = new AgentChatView();
+  view.observe({
+    seq: 1 as Seq,
+    changes: [
+      { type: "entry", value: input },
+      { type: "entry", value: result },
+    ],
+  });
+  expect(Buffer.byteLength(tool_result_text(view.records.get(2)), "utf8")).toBeLessThan(3000);
+});
 
 it("压缩起始时间可随独立文档提交补入，任务终态与恢复沿用同一时间", () => {
   const conversationId = 1 as ConversationId;
@@ -543,7 +601,7 @@ it("timeline_window 拒绝失效游标与非法页大小", () => {
   expect(() => view.timeline_window(null, 0)).toThrow("Agent timeline page size is invalid.");
 });
 
-it("常驻投影只保留工具输出预览，完整输出按条目身份按需读回", () => {
+it("常驻记录与投影都只保留工具输出预览，完整输出按条目身份按需读回", async () => {
   const conversationId = 1 as ConversationId;
   const state = AgentChatDoc.definition.initial(null);
   state.rounds.round = {
@@ -592,9 +650,10 @@ it("常驻投影只保留工具输出预览，完整输出按条目身份按需�
     },
   ];
   const view = new AgentChatView();
-  // 生产路径由 restore_records / observe 填充原始记录，测试显式补上。
-  for (const record of records) view.records.set(record.id, record);
-  view.reset(records, new Map(), [], {}, state);
+  // 生产路径由 restore_records / observe 存入瘦化记录；完整正文只由 reader 提供。
+  for (const record of records) view.records.set(record.id, slim_entry_record(record));
+  view.set_full_record_reader(async (id) => records.find((record) => record.id === id));
+  view.reset(records.map(slim_entry_record), new Map(), [], {}, state);
 
   const tool_id = "tool:2:call";
   const projection = view.entries.find((entry) => entry.kind === "tool_call");
@@ -602,15 +661,16 @@ it("常驻投影只保留工具输出预览，完整输出按条目身份按需�
     .timeline_window(null, 40)
     .entries.find((entry) => entry.kind === "tool_call");
 
-  // 常驻 rows 与分页窗口都只有预览，完整正文不重复持有。
+  // 常驻 rows、分页窗口与瘦化记录都不持有完整正文。
   expect(projection).toMatchObject({ output: ["x".repeat(2048)], outputTruncated: true });
   expect(preview).toMatchObject({ output: ["x".repeat(2048)], outputTruncated: true });
+  expect(Buffer.byteLength(tool_result_text(view.records.get(3)), "utf8")).toBeLessThan(3000);
   // 详情弹窗按身份读回完整输出，且清除截断标记。
-  expect(view.read_full_entry(tool_id)).toMatchObject({
+  await expect(view.read_full_entry(tool_id)).resolves.toMatchObject({
     output: ["x".repeat(3000)],
     outputTruncated: false,
   });
-  expect(view.read_full_entry("missing")).toBeUndefined();
+  await expect(view.read_full_entry("missing")).resolves.toBeUndefined();
 });
 
 /** 构造按记录身份排序的轮次历史，轮次头后接指定数量的助手内容。 */
