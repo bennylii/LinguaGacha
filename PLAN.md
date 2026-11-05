@@ -64,8 +64,15 @@
 
 ## 当前状态
 
-- 分支 `feat/agent-proofreading-auto-resume`，docs 结论已推送 fork。
-- 安装目录为与 HEAD 一致的干净构建，应用正常 idle。
-- P0 第一步已完成（提交 `23a415ec`）：新增独立组件 `ItemColumnStore`（列式只读主数据 + 按行号/身份惰性组装 + 只读迭代）与对照测试，验证与 `ItemCache` 逐字段/逐条/按 id/迭代顺序相等；尚未接入产品运行时，`ItemCache` 契约与增量写入语义不变。
-- 增量等价原型已验证（临时脚本，不进仓库）：「列式全量基线 + delta 覆盖层（既有键覆盖、新键追加、按基线顺序 + 追加顺序产出）」在 14 步 full/delta/clear 序列下与 `ItemCache` 的 `readItems`/`readItem`/`size`/顺序逐结果相等。关键约束：`replace` 必须对重复身份去重、保首次位置、值取最后一次（`new Map` 语义）—— 据此修复 `ItemColumnStore.from_records`（提交 `f0c6b7c2`）并补回归测试。
-- 下一步：P0 接入 —— 在 `ItemCache` 内部实现「列式基线 + delta 覆盖层」并按工程规模分流（`CacheManager` 选择对象路径或列式路径）；让 `ProofreadingCache.build_sync_input` 等消费者改按迭代读主数据。接入时须补产品级增量行为测试（full/delta/删除/新 id/顺序/duplicate_groups 失效），原型结论不替代它。
+- 分支 `feat/agent-proofreading-auto-resume`；docs 与 PLAN 结论已推送 fork。
+- 保留成果（未接运行时，零风险）：`ItemColumnStore` 独立组件（`23a415ec`）与对照测试、`from_records` 按身份去重修复（`f0c6b7c2`）、增量等价原型结论、双表示等价的产品级验证方法。
+- **P0 双表示接入已回滚**（`3c6b5ce7` → `df1c3c7c`）：`ItemCache` 回到纯对象 Map，双表示与 parity 测试移除。原因见下。
+- **真机收益实测（P0 列式版，20:36 构建）**：列式路径确认生效（917793 行 ≥ 阈值 50000），但「加载会话后 idle」MAIN 588 MB vs 对象路径 595 MB（噪声内），`workspace_run` 峰值 MAIN 3115 MB vs 对象路径 2751/3033 MB（持平甚至略高）。**P0 对常驻与峰值均无可见收益。**
+- **根因重定向（真机数据）**：省下的是「列式常驻结构」，但 (1) `installProject` 先经 `read_items` 构造 92 万对象数组再喂 `replace`，装入期的一次性数组没省；(2) ws_run 峰值来自 `build_sync_input` 全量同步 + 校对 `state`（P1/P3 未做），列式只改 `ItemCache` 一套，挡不住。原型 178 MB 是「纯数据表示理想差」，产品里被这两处盖过。
+- 安装目录当前为 P0 列式版构建（已 `stop`、内存回落中）；下一步替换回与回滚后 HEAD 一致的干净构建。
+
+## 下一步（按真机证据重排优先级）
+
+1. **P0′ 装入流式化**：让 `installProject` 不经「92 万对象数组」中转 —— `ProjectDataReader.read_items` 改流式 / 分批喂列式，消除装入期全量对象数组。命中已确认根因之一，收益可测、风险低于跨层改动。
+2. **P1 / P3 校对全量同步轻量化**：`build_sync_input` / 校对 `state` 按身份从主数据读、消除 s18–s30 的 +2GB 峰值与冷启动全量同步。收益最大但跨层大改动。
+3. 任何一步落地后都按 P4 分角色真机采样验证，不再凭原型外推。
