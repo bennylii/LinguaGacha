@@ -74,6 +74,23 @@ describe("ItemColumnStore", () => {
     expect(store.read(1.5)).toBeNull();
   });
 
+  it("重复身份去重且保首次位置、与 ItemCache.replace 对齐", () => {
+    const records = [
+      create_item(20, { src: "first" }),
+      create_item(21),
+      create_item(20, { src: "second", dst: "covered" }),
+      create_item(22),
+    ];
+    const cache = new ItemCache();
+    cache.replace(records);
+    const store = ItemColumnStore.from_records(records);
+    expect(store.size()).toBe(cache.size());
+    expect(store.read_all()).toEqual(cache.readItems());
+    expect(store.read_by_id(20)).toEqual(cache.readItem(20));
+    expect(store.read_by_id(20)?.src).toBe("second");
+    expect(store.read_all().map((item) => item.item_id)).toEqual([20, 21, 22]);
+  });
+
   it("大量记录与对象缓存逐条相等", () => {
     const records = Array.from({ length: 5000 }, (_, i) =>
       create_item(i + 1, {

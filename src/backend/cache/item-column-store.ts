@@ -58,9 +58,14 @@ export class ItemColumnStore {
     }
   }
 
-  /** 用完整记录快照建立列式主数据；重复身份由后续写入契约保证不出现。 */
+  /**
+   * 用完整记录快照建立列式主数据。
+   * 与 `ItemCache.replace` 的 Map 语义对齐：重复身份去重、保留首次出现位置、值取最后一次。
+   */
   public static from_records(records: readonly ProjectItemPublicRecord[]): ItemColumnStore {
-    return new ItemColumnStore(records);
+    const seen = new Map<number, ProjectItemPublicRecord>();
+    for (const record of records) seen.set(record.item_id, record);
+    return new ItemColumnStore([...seen.values()]);
   }
 
   public size(): number {
