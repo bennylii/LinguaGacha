@@ -68,4 +68,5 @@
 - 安装目录为与 HEAD 一致的干净构建，应用正常 idle。
 - P0 第一步已完成（提交 `23a415ec`）：新增独立组件 `ItemColumnStore`（列式只读主数据 + 按行号/身份惰性组装 + 只读迭代）与对照测试，验证与 `ItemCache` 逐字段/逐条/按 id/迭代顺序相等；尚未接入产品运行时，`ItemCache` 契约与增量写入语义不变。
 - 增量等价原型已验证（临时脚本，不进仓库）：「列式全量基线 + delta 覆盖层（既有键覆盖、新键追加、按基线顺序 + 追加顺序产出）」在 14 步 full/delta/clear 序列下与 `ItemCache` 的 `readItems`/`readItem`/`size`/顺序逐结果相等。关键约束：`replace` 必须对重复身份去重、保首次位置、值取最后一次（`new Map` 语义）—— 据此修复 `ItemColumnStore.from_records`（提交 `f0c6b7c2`）并补回归测试。
-- 下一步：P0 接入 —— 在 `ItemCache` 内部实现「列式基线 + delta 覆盖层」并按工程规模分流（`CacheManager` 选择对象路径或列式路径）；让 `ProofreadingCache.build_sync_input` 等消费者改按迭代读主数据。接入时须补产品级增量行为测试（full/delta/删除/新 id/顺序/duplicate_groups 失效），原型结论不替代它。
+- P0 接入已完成（双表示 + 阈值）：`ItemCache` 内部新增 `ItemStore` 抽象，默认 `MapItemStore`（小工程零变化），`replace` 达到 `ITEM_COLUMNAR_THRESHOLD`（50000）时切到 `ColumnarItemStore`（列式基线 + delta 覆盖层 + 已知身份 Set + 追加顺序数组）。对外 7 个方法契约不变；`duplicate_groups` 失效与 `readWriteScope` 统一在 `ItemCache` 层。`item-cache-parity.test.ts` 验证两条表示在 full/delta/新身份/重复身份/重复组/clear/3000 条规模下逐结果相等，并覆盖「同一新身份连续增量只追加一次」。400 个上下游测试通过。
+- 下一步：P1 —— 校对 `ProofreadingReaderState.item_by_id` 轻量化（按身份取正文），以及 P2 一致性/压实（覆盖层随长写入增长，需合并回新列式基线 + 原子换索引）、`ComputeWorkerClient` Transferable 免深拷贝。
