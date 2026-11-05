@@ -72,12 +72,16 @@
 - **分阶段埋点闭环（22:01 诊断构建，验完已删）**：校对 sync 链路 rss 轨迹 —— `before_build_input` 727 → `after_build_input(upsert=917793)` 874（+147）→ `after_postMessage` 1089（+215）→ `worker:after_evaluate` **2800（评估 66 秒，rss +1665、compute-worker isolate heap 仅 +88）** → `worker_returned` 3051 → `after_sync_state` 1856（GC 回落）。各线程 isolate 的 heap 增长远小于进程 rss 增长。
 - **compute worker 执行模式已核实**：生产 GUI 的 Backend runtime（`backend-runtime.ts:141`）注入 `worker_threads`，`ComputeWorkerClient` 构造时 `new Worker` —— compute worker 是**独立 worker_thread**，不是 in_process。埋点里 `pid` 全相同只是因为 `worker_threads` 共享 OS 进程 pid；之前据 pid 判断 in_process 是误判，已修正。`worker_threads` 与后端线程共享进程地址空间，故 rss 是整进程口径。
 - **分片方案已证伪**（独立原型，用产品真实 `evaluateProofreadingItem`）：2 万 / 30 万行、片大小 5000 / 20000 / 50000，逐条 `deepEqual` 全 PASS（语义等价成立，须共享 `sample_rule_cache`）；但即使片间 `setImmediate` + 显式 GC，分片 rss 峰值仍**高于**一次性版（+39~41 MB）—— `evaluations` 结果数组必须全量累积，让出与 GC 只增开销。独立原型 30 万行峰值仅 ~370 MB，远小于产品 2800 MB，反证产品的 +2GB 不是单靠评估函数、而是**跨线程全量拷贝 + 大对象空间 + 延迟 GC 的多份数据叠加**。
-- **主因收敛**：峰值大头在**跨线程 structuredClone 的序列化缓冲、V8 大对象/外部内存、延迟 GC 的未回收页**，而非任一 isolate 的 JS 对象数组。这解释了为何工具正文 / 列式 / 装入流式化 / 评估分片全部打不中。
+- **主因收敛**：峰值大头在**跨线程 structuredClone 的原生序列化缓冲、V8 大对象/外部内存、延迟 GC 的未回收页**，而非任一 isolate 的 JS 对象数组。这解释了为何工具正文 / 列式 / 装入流式化 / 评估分片全部打不中。
+- **跨线程零拷贝方案已证伪**（独立原型，真实数据双向 postMessage）：20 万行 A 现状 348 MB / B Transferable 478–548 MB / C SAB 593 MB；92 万全量 A **1051 MB** / B **1613 MB（+562）**。原因：零拷贝需 `JSON.stringify` 打包 + `JSON.parse` 解包，两步都在 JS 堆造大对象，比 V8 原生 C++ 层 `structuredClone` 更费；SAB 还额外常驻共享缓冲。**原生 `structuredClone` 已是该链路最省传输方式。**
+- **全局收口**：七次方向（stage0/1、A1、P0 列式、装入流式、评估分片、跨线程零拷贝）全部被真机/原型证伪。共同模式是「都在优化 JS 对象/数据表示，而 2GB 大头是运行时内存管理行为（大对象空间 / 延迟 GC）」。在不改 V8 运行时策略或不做架构级改造（评估移出进程、或磁盘/流式管线）的前提下，**没有低风险的显著降内存空间**。
 - 安装目录当前为与 HEAD 一致的干净构建，应用正常 idle；工作区干净。
 
-## 下一步（按最新证据重排优先级）
+## 下一步（收口）
 
-1. **减少跨线程全量拷贝（唯一有正收益候选）**：`build_sync_input` 的 92 万 `upsertItems` 经 `postMessage` structuredClone 到 compute worker，改为 **Transferable ArrayBuffer**（打包成二进制、零拷贝移交）或 **SharedArrayBuffer**（两线程共享一份）。直接命中「多份全量数据叠加」这一已坐实主因，且是 MDN/Node 文档确认的成熟手段。先做只读原型验证「零拷贝后 rss 峰值」。
-2. **轻量 state / 常驻基线**（次要、另一目标）：父进程 `state` 按身份轻量派生、多套对象索引合并（`ItemColumnStore` 已备）。各约百 MB 级、只在超大工程有意义。
-3. 不做：评估分片（已证伪）、装入流式化（只削可 GC 的加载尖峰）、列式双表示接入（实测零收益、已回滚）、换语言 / 引入新运行时。
-4. 任何一步落地都按 P4 分角色/分阶段真机采样验证，不再凭原型外推。
+1. **不建议继续按「改某个模块的数据表示」找下去** —— 已七次证伪。
+2. 若仍要解决，只剩两类**架构级**选项，均需重新评估投入产出：
+   - 减少单次同步的**输入规模**：按修订增量同步已存在，但冷启动/失效时仍全量；可探索「校对评估按文件/分片增量建立索引、不强求一次建全量 state」，代价是校对功能的查询语义与一致性重写。
+   - 改变**运行时内存管理**：GC 参数、`--max-old-space-size`、评估产物复用，属调优而非结构修复，收益不确定。
+3. 常驻基线（另一目标）：`ItemColumnStore` 组件已备但未接、实测零收益；仅在「确实想降几十~百 MB 常驻」且有超大工程场景时再启用。
+4. 本调查的产物（docs 设计意图 + 原型方法 + 全部证伪证据）已固化；建议**暂停内存专项**，需要时以「架构级重设计」重新立项，而非继续局部优化。
