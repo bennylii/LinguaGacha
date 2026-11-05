@@ -1,5 +1,20 @@
 import type { PDFDocument } from "../../shared/pdf";
 import type { Item, ItemFileType } from "../../domain/item";
+import type { SourceDiagnostic } from "./shared/game/preparation";
+
+/** 原稿字节与目录副作用独立交付，成员读取遗漏只记录诊断。 */
+export type PreparedSource = Readonly<{
+  content: Uint8Array;
+  additional_files: readonly string[];
+  directory_changed: boolean;
+  diagnostics: readonly SourceDiagnostic[];
+  read?: PreparedRead; // 缺省表示准备阶段未解析，流水线解析固化后的原稿。
+}>;
+/** 准备阶段已对固化原稿完成的解析。失败对象只在当前后端调用链内传递。 */
+export type PreparedRead = Readonly<
+  | { ok: true; result: Extract<FileFormatReadResult, { kind: "items" }> }
+  | { ok: false; error: unknown }
+>;
 
 /** 解析器语法诊断供后端日志定位，位置按脚本内 UTF-16 列计数。 */
 export type ScriptDiagnostic = Readonly<{
@@ -10,7 +25,13 @@ export type ScriptDiagnostic = Readonly<{
 
 /** 跳过的内部文件或脚本统一记录诊断，已取得的原稿仍参与保存和导出。 */
 export type SourceFileParseWarning = Readonly<{
-  code: "script_syntax_error" | "internal_file_parse_failed";
+  stage?: SourceDiagnostic["stage"];
+  error?: SourceDiagnostic["error"];
+  code:
+    | "script_syntax_error"
+    | "script_extraction_incomplete" // 语法有效，但字符串无法解码或无法建立完整写回组。
+    | "internal_file_parse_failed"
+    | "source_preparation_failed";
   rel_path: string;
   internal_file_path?: string;
   location?: string; // 格式私有定位在日志边界转成可读位置。
@@ -26,16 +47,14 @@ export type FileFormatReadResult =
       kind: "items";
       items: Item[];
       file_type: ItemFileType;
-      game_engine?: string; // TRANS 导入继承使用的文本规则上下文。
+      game_engine?: string; // TRANS 原稿的引擎上下文，供文本规则计算。
       warnings?: SourceFileParseWarning[];
     }
   | { kind: "pdf"; document: PDFDocument };
 
-/** 文件格式处理器共享配置，来源于应用设置或测试显式注入。 */
+/** 文件格式处理器共享配置，使用项目目标语言。 */
 export interface FileFormatServiceConfig {
   target_language: string; // 决定 EPUB 阅读排版等目标语言写回策略
-  deduplication_in_bilingual?: boolean; // 原译文相同时双语文件只写一份
-  write_translated_name_fields_to_file?: boolean; // 姓名字段是否使用译名写回
 }
 
 /**
@@ -63,5 +82,6 @@ export interface FileFormatWriteContext {
 
 /** 文件调度拥有源文件集合，单格式写回上下文只携带 IO。 */
 export type FileFormatServiceWriteContext = FileFormatWriteContext & {
+  additional_files?: Readonly<Record<string, readonly string[]>>; // 资产路径到附加原稿的映射，附加原稿不参与导出。
   source_files: readonly { path: string; file_type: string }[]; // 原始资产的文件集合，零条目字幕也参与导出
 };

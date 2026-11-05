@@ -76,14 +76,6 @@ export const PROJECT_SOURCE_FORMATS = [
   },
   {
     source_kind: "file",
-    id: "rpy",
-    support_status: "supported",
-    extension: ".rpy",
-    title_key: "project_page.formats.rpy",
-    description_keys: [],
-  },
-  {
-    source_kind: "file",
     id: "json",
     support_status: "supported",
     extension: ".json",
@@ -102,6 +94,24 @@ export const PROJECT_SOURCE_FORMATS = [
     extension: ".exe",
     title_key: "project_page.formats.godot",
     description_keys: ["project_page.formats.godot", "project_page.formats.action_game_maker"],
+  },
+  {
+    source_kind: "game",
+    id: "renpy",
+    file_type: "RENPY",
+    support_status: "supported",
+    extension: ".exe",
+    title_key: "project_page.formats.renpy",
+    description_keys: [],
+  },
+  {
+    source_kind: "game",
+    id: "tyrano",
+    file_type: "TYRANO",
+    support_status: "supported",
+    extension: ".exe",
+    title_key: "project_page.formats.tyrano",
+    description_keys: [],
   },
   {
     source_kind: "game",
@@ -128,6 +138,14 @@ export const PROJECT_SOURCE_FORMATS = [
     support_status: "supported",
     extension: ".exe",
     title_key: "project_page.formats.rpgmaker_rgss",
+    description_keys: [],
+  },
+  {
+    source_kind: "file",
+    id: "rpy",
+    support_status: "deprecated",
+    extension: ".rpy",
+    title_key: "project_page.formats.rpy",
     description_keys: [],
   },
   {
@@ -168,12 +186,20 @@ export type ProjectSourceFormatHitCounts = Record<ProjectSourceFormatId, number>
 
 /** 源路径发现完成后返回给 renderer 的公开摘要。 */
 export type ProjectSourceFileSummary = {
-  failed_files?: import("./source-file-parse-failure").SourceFileParseFailureRecord[];
+  godot_packs?: readonly import("./godot").GodotPackPreview[];
+  contains_game: boolean; // 原生游戏会改写游戏目录，界面据此提示完整备份。
   source_file_count: number; // 递归发现并按真实路径去重后的支持文件总数
   format_hit_counts: ProjectSourceFormatHitCounts; // 包含目录内全部格式，未命中项固定为零
 };
 
-export const GAME_FILE_TYPES = ["WOLFRPG", "RPGMAKER_MV_MZ", "RPGMAKER_RGSS", "GODOT"] as const;
+export const GAME_FILE_TYPES = [
+  "WOLFRPG",
+  "RPGMAKER_MV_MZ",
+  "RPGMAKER_RGSS",
+  "GODOT",
+  "RENPY",
+  "TYRANO",
+] as const;
 export type GameFileType = (typeof GAME_FILE_TYPES)[number];
 
 /** 识别需要独立导出目录的原生游戏文件类型。 */

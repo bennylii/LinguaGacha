@@ -22,6 +22,14 @@ export function split_text_lines_for_items(text: string): string[] {
   return lines;
 }
 
+/** 单段文本边界复用同一组 splitlines 码点，避免换行判断与切分口径漂移。 */
+export function has_text_line_break(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    if (SPLITLINES_CODE_POINTS.has(text.charCodeAt(index))) return true;
+  }
+  return false;
+}
+
 /**
  * 写文本文件前统一创建目录，格式处理器只关心内容生成
  */

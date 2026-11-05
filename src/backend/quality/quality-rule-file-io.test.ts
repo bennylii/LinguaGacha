@@ -51,18 +51,18 @@ describe("quality-rule-file-io", () => {
     const kv_path = write_temp_file("kv.json", JSON.stringify({ A: "甲", B: null }));
 
     await expect(load_quality_rule_entries_from_file(actors_path)).resolves.toEqual([
-      { src: "\\n[7]", dst: "勇者", info: "", regex: false, case_sensitive: false },
-      { src: "\\N[7]", dst: "勇者", info: "", regex: false, case_sensitive: false },
-      { src: "\\nn[7]", dst: "小勇", info: "", regex: false, case_sensitive: false },
-      { src: "\\NN[7]", dst: "小勇", info: "", regex: false, case_sensitive: false },
+      { src: "\\n[7]", dst: "勇者", info: "", evidence: "", regex: false, case_sensitive: false },
+      { src: "\\N[7]", dst: "勇者", info: "", evidence: "", regex: false, case_sensitive: false },
+      { src: "\\nn[7]", dst: "小勇", info: "", evidence: "", regex: false, case_sensitive: false },
+      { src: "\\NN[7]", dst: "小勇", info: "", evidence: "", regex: false, case_sensitive: false },
     ]);
     await expect(load_quality_rule_entries_from_file(kv_path)).resolves.toEqual([
-      { src: "A", dst: "甲", info: "", regex: false, case_sensitive: false },
-      { src: "B", dst: "", info: "", regex: false, case_sensitive: false },
+      { src: "A", dst: "甲", info: "", evidence: "", regex: false, case_sensitive: false },
+      { src: "B", dst: "", info: "", evidence: "", regex: false, case_sensitive: false },
     ]);
   });
 
-  it("从 Excel 规则文件读取前五列并跳过表头", async () => {
+  it("从旧五列 Excel 规则文件读取并跳过表头", async () => {
     const root = create_temp_root();
     const file_path = path.join(root, "rules.xlsx");
     fs.writeFileSync(
@@ -90,10 +90,44 @@ describe("quality-rule-file-io", () => {
         src: "HP",
         dst: "生命值",
         info: "术语",
+        evidence: "",
         regex: true,
         case_sensitive: true,
       },
-      { src: "MP", dst: "魔力", info: "", regex: false, case_sensitive: false },
+      { src: "MP", dst: "魔力", info: "", evidence: "", regex: false, case_sensitive: false },
+    ]);
+  });
+
+  it("从含 evidence 的六列 Excel 文件读取查证材料", async () => {
+    const root = create_temp_root();
+    const file_path = path.join(root, "rules-with-evidence.xlsx");
+    fs.writeFileSync(
+      file_path,
+      await spreadsheet_fixture({
+        A1: "src",
+        B1: "dst",
+        C1: "info",
+        D1: "evidence",
+        E1: "regex",
+        F1: "case_sensitive",
+        A2: "セラ",
+        B2: "塞拉",
+        C2: "女性角色",
+        D2: "来源：https://example.test/sera",
+        E2: false,
+        F2: false,
+      }),
+    );
+
+    await expect(load_quality_rule_entries_from_file(file_path)).resolves.toEqual([
+      {
+        src: "セラ",
+        dst: "塞拉",
+        info: "女性角色",
+        evidence: "来源：https://example.test/sera",
+        regex: false,
+        case_sensitive: false,
+      },
     ]);
   });
 
@@ -107,6 +141,7 @@ describe("quality-rule-file-io", () => {
         src: "=SUM(A1:A2)",
         dst: "爱丽丝",
         info: "人名",
+        evidence: "来源：https://example.test/term\n访问日期：2026-10-29",
         regex: false,
         case_sensitive: false,
       },
@@ -117,12 +152,15 @@ describe("quality-rule-file-io", () => {
         src: "=SUM(A1:A2)",
         dst: "爱丽丝",
         info: "人名",
+        evidence: "来源：https://example.test/term\n访问日期：2026-10-29",
         regex: false,
         case_sensitive: false,
       },
     ]);
     const cells = await spreadsheet_values(fs.readFileSync(`${base_path}.xlsx`));
     expect(cells.A2).toBe("'=SUM(A1:A2)");
+    expect(cells.D1).toBe("evidence");
+    expect(cells.D2).toContain("https://example.test/term");
   });
 });
 

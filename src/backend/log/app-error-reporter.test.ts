@@ -23,11 +23,9 @@ describe("record_app_error", () => {
       context: { request_id: "request-1" },
     });
 
+    const file = log_manager.files.list_files()[0]!;
     const file_record = JSON.parse(
-      fs.readFileSync(
-        path.join(directory.path, `app.${log_manager.files.list_dates()[0]!}.jsonl`),
-        "utf8",
-      ),
+      fs.readFileSync(path.join(directory.path, `app.${file.date}.${file.instance}.jsonl`), "utf8"),
     ) as Record<string, unknown>;
     expect(file_record["level"]).toBe("warning");
     expect(file_record["source"]).toBe("test");
@@ -42,7 +40,7 @@ describe("record_app_error", () => {
     expect(
       (
         await log_manager.files.read_page({
-          date: log_manager.files.list_dates()[0]!,
+          ...file,
           direction: "latest",
         })
       ).entries[0]?.level,
@@ -65,7 +63,7 @@ describe("record_app_error", () => {
     expect(
       (
         await log_manager.files.read_page({
-          date: log_manager.files.list_dates()[0]!,
+          ...log_manager.files.list_files()[0]!,
           direction: "latest",
         })
       ).entries[0]?.level,

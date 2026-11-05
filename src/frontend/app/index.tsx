@@ -1,4 +1,4 @@
-import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
+import { push_error_toast, push_toast } from "@frontend/app/feedback/desktop-toast";
 import { TranslationGenerationProvider } from "@frontend/app/session/translation-generation/translation-generation-provider";
 import { PageLeaveProvider } from "@frontend/app/navigation/page-leave-provider";
 import { usePageLeave } from "@frontend/app/navigation/page-leave-context";
@@ -35,6 +35,8 @@ import {
   summarize_task_snapshot_for_diagnostics,
 } from "@frontend/app/state/desktop-diagnostics";
 import { update_renderer_diagnostics_context } from "@frontend/app/diagnostics/renderer-error-reporter";
+import { RENDERER_QUIT_TIMEOUT_MS } from "@shared/shutdown-timing";
+import { with_timeout } from "@shared/utils/timeout";
 import {
   useDesktopState,
   useBatchTranslationSnapshot,
@@ -48,18 +50,19 @@ import { useI18n } from "@frontend/app/locale/locale-context";
 import { SidebarInset, SidebarProvider } from "@frontend/shadcn/sidebar";
 import { Toaster } from "@frontend/shadcn/sonner";
 import { TooltipProvider } from "@frontend/shadcn/tooltip";
+import { UpdateDialog } from "@frontend/app/shell/update-dialog";
 import { AppSidebar } from "@frontend/app/shell/app-sidebar";
 import { AppTitlebar } from "@frontend/app/shell/app-titlebar";
-import { AppActionDialog, AppConfirmDialog } from "@frontend/widgets/app-alert-dialog";
+import { ProjectSwitcher } from "@frontend/app/shell/project-switcher";
+import { format_project_settings_aligned_toast } from "@frontend/app/feedback/project-settings-alignment-feedback";
+import { open_project_in_current_window } from "@frontend/app/project/open-project";
+import { AppConfirmDialog } from "@frontend/widgets/app-alert-dialog";
 import { LogWindowPage } from "@frontend/pages/log-window-page/page";
 import {
-  is_update_dialog_open,
-  is_update_dialog_submitting,
   read_update_release,
   resolve_disabled_route_ids,
   resolve_project_route_after_snapshot,
   resolve_route_selection,
-  resolve_update_confirm_label,
   type UpdateDialogState,
 } from "@frontend/app/app-shell-state";
 import type { DesktopUpdateDownloadProgress, DesktopUpdateDownloadResult } from "@gui/bridge-types";
@@ -114,6 +117,10 @@ function AppContent(): JSX.Element {
     project_session_status,
     settings_snapshot,
     set_pending_target_route,
+    set_project_session_status,
+    refresh_project_snapshot,
+    refresh_settings,
+    refresh_batch_translation,
     update_app_language,
   } = useDesktopState();
 
@@ -499,16 +506,54 @@ function AppContent(): JSX.Element {
   /** 确认退出先收束当前编辑，再调用宿主关闭。 */
   async function handle_confirm_window_close(): Promise<void> {
     set_close_confirm_submitting(true);
+    let saved: boolean;
     try {
-      if (!(await prepare_page_leave())) {
-        set_close_confirm_submitting(false);
-        set_close_confirm_open(false);
-        return;
-      }
-      await window.desktopApp.quitApp();
+      // 页面保存动作由页面自己拥有，可能等待远端或文件写入不返回。
+      // 超时只结束这次确认：界面回到可重试状态，不会带着未保存的页面直接退出。
+      saved = await with_timeout("page_leave", prepare_page_leave(), RENDERER_QUIT_TIMEOUT_MS);
     } catch (error) {
       set_close_confirm_submitting(false);
-      push_error_toast(t("app.feedback.update_failed"), error);
+      set_close_confirm_open(false);
+      push_error_toast(t("app.feedback.save_failed"), error);
+      return;
+    }
+    if (!saved) {
+      set_close_confirm_submitting(false);
+      set_close_confirm_open(false);
+      return;
+    }
+    try {
+      await window.desktopApp.quitApp();
+    } catch (error) {
+      // 宿主受理退出后窗口会随收尾关闭；请求失败必须复位，避免停在转圈状态。
+      set_close_confirm_submitting(false);
+      set_close_confirm_open(false);
+      push_error_toast(t("app.feedback.operation_failed"), error);
+    }
+  }
+
+  /**
+   * 顶栏切换工程复用打开工程的设置对齐链路，随后由 DesktopState 监听快照变化完成会话加载。
+   */
+  async function handle_switch_project(project_path: string): Promise<void> {
+    const alignment = await open_project_in_current_window({ path: project_path });
+    set_project_session_status("warming");
+    await refresh_project_snapshot();
+    const file_name = project_path.split(/[\\/]+/u).at(-1) ?? project_path;
+    await api_fetch("/api/settings/recent-projects/add", {
+      path: project_path,
+      name: file_name.replace(/\.[^.]+$/u, ""),
+    });
+    await Promise.all([refresh_settings(), refresh_batch_translation()]);
+    if (alignment !== undefined) {
+      push_toast(
+        "info",
+        format_project_settings_aligned_toast({
+          settings: alignment.settings ?? {},
+          changed_fields: alignment.changed ?? {},
+          t,
+        }),
+      );
     }
   }
 
@@ -542,7 +587,19 @@ function AppContent(): JSX.Element {
             } as CSSProperties
           }
         >
-          <AppTitlebar title={app_title} />
+          <AppTitlebar
+            title={app_title}
+            actions={
+              <ProjectSwitcher
+                current_project_path={project_snapshot.loaded ? project_snapshot.path : ""}
+                recent_projects={settings_snapshot.recent_projects}
+                on_open_in_current_window={handle_switch_project}
+                on_create_project={() => {
+                  handle_select_route("project-home");
+                }}
+              />
+            }
+          />
           <section className="shell-body">
             <AppSidebar
               groups={visible_navigation_groups}
@@ -611,22 +668,9 @@ function AppContent(): JSX.Element {
         </main>
       </SidebarProvider>
 
-      <AppActionDialog
-        open={is_update_dialog_open(update_dialog_state)}
-        description={
-          update_release === null
-            ? ""
-            : t("app.update.confirm_description", {
-                VERSION: update_release.latest_version,
-              })
-        }
-        submitting={is_update_dialog_submitting(update_dialog_state)}
-        submittingLabel={resolve_update_confirm_label(update_dialog_state, t)}
-        submittingIcon={update_dialog_state.phase === "launching"}
-        primaryAction={{
-          label: resolve_update_confirm_label(update_dialog_state, t),
-          onSelect: handle_confirm_update_dialog,
-        }}
+      <UpdateDialog
+        state={update_dialog_state}
+        onConfirm={handle_confirm_update_dialog}
         onClose={close_update_dialog}
       />
 

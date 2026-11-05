@@ -11,7 +11,7 @@ import {
 } from "../../shared/log";
 import { sanitize_log_error_context, to_log_error } from "../../shared/error";
 import { t_main_log } from "./log-text";
-import { NativeFs, default_native_fs } from "../../native/native-fs";
+import { NativeFs } from "../../native/native-fs";
 
 // 创建时间与输出可见性在唯一写入口补齐。
 type NormalizedLogAppendPayload = Omit<LogFileRecord, "created_at" | "window">;
@@ -34,7 +34,10 @@ export class LogManager {
 
   /** 组装日志目录与输出依赖，资源生命周期由调用方管理。 */
   public constructor(options: LogManagerOptions) {
-    this.files = new LogFileStore(options.logDir, options.nativeFs ?? default_native_fs);
+    this.files = new LogFileStore({
+      directory: options.logDir,
+      ...(options.nativeFs === undefined ? {} : { fs: options.nativeFs }),
+    });
     this.targets = { console: true, window: true, ...options.targets };
     this.now = options.now ?? (() => new Date());
     this.console_writer = options.consoleWriter ?? default_console_writer;

@@ -107,7 +107,7 @@ export class AppPathService {
     return this.data_root;
   }
 
-  /** 返回版本内置资产根。发布态位于 app.asar，开发态位于仓库 builtin。 */
+  /** 返回版本内置资产根。发布态位于 resources/builtin，开发态位于仓库 builtin。 */
   public get_builtin_root(): string {
     return this.builtin_root;
   }
@@ -195,6 +195,13 @@ export class AppPathService {
    */
   public get_agent_chat_seed_path(): string {
     return this.get_builtin_path("chat_seed.json");
+  }
+
+  /**
+   * 返回内置的 Agent 完成度判定指令路径，判定线程与主会话共用资源目录。
+   */
+  public get_agent_completion_judge_prompt_path(): string {
+    return this.get_builtin_path("completion_judge.md");
   }
 
   /**

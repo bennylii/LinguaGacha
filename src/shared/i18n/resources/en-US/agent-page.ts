@@ -121,6 +121,17 @@ export const en_us_agent_page = {
     copied: "Copied",
     follow_latest: "Follow latest",
   },
+  auto_resume: {
+    waiting: "Not finished yet, continuing automatically in {seconds}s (attempt {attempt})",
+    waiting_limited:
+      "Not finished yet, continuing automatically in {seconds}s ({attempt}/{max_attempts})",
+    continuing: "Not finished yet, continuing automatically (attempt {attempt})",
+    cancel: "Cancel auto continue",
+  },
+  auto_continue: {
+    judging: "Checking whether the task is finished…",
+    continuing: "Not finished yet, continuing automatically (attempt {attempt})",
+  },
   editing: {
     user: "Editing your message",
     assistant: "Editing the model response",
@@ -129,7 +140,6 @@ export const en_us_agent_page = {
   queue: {
     no_message_text: "No message text",
     attachments: "{count} attachments",
-    reorder: "Drag to reorder",
     send_now: "Send now",
     sending: "Sending",
     delete: "Delete message",
@@ -152,6 +162,9 @@ export const en_us_agent_page = {
     details: "{tool} tool call details",
     input: "Input",
     output: "Output",
+    loading_full: "Loading full output …",
+    load_failed: "Could not load the full output.",
+    retry: "Retry",
   },
   round: {
     running: "Processing for {duration}",
@@ -159,10 +172,16 @@ export const en_us_agent_page = {
     error: "Failed · {duration}",
     stopped: "Stopped · {duration}",
   },
+  timeline: {
+    show_earlier: "Show earlier messages",
+    show_earlier_in_round: "Show earlier messages in this round",
+    loading: "Loading earlier messages …",
+    retry: "Could not load earlier messages. Retry",
+    cursor_expired: "History changed. Returned to the latest messages.",
+  },
   upload: { uploading: "Uploading", failed: "Upload failed" },
   file_saved: "File saved",
   error: {
-    activate_link: "Failed to process the link …",
     decision: "Could not submit your decision. Please try again …",
     restore: "The session could not be restored. Try again …",
     connection: "Connection interrupted. Waiting to reconnect …",

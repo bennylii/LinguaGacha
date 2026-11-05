@@ -5,8 +5,11 @@ export const ja_jp_toolbox_page = {
   title: "ツールボックス",
   entries: {
     game_font: {
+      description: "Godot · RenPy · Tyrano · WOLFRPG · RPGMAKER MV/MZ",
+    },
+    translation_transfer: {
       description:
-        "<emphasis>Godot 4</emphasis>\n<emphasis>WOLFRPG 3</emphasis>\n<emphasis>RPGMAKER MV/MZ</emphasis>",
+        "完了済みの訳文を別のプロジェクトに移行します。小説やゲームなどのアップデートによく使われます",
     },
   },
 } satisfies LocaleMessageSchema<typeof zh_cn_toolbox_page>;

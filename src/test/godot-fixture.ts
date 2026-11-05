@@ -1,5 +1,5 @@
 import { zstdCompressSync } from "node:zlib";
-import { createHash } from "node:crypto";
+import { createCipheriv, createHash } from "node:crypto";
 import { pad, string, u32, u64 } from "../backend/file/godot/binary";
 import { variant_string, variant_strings } from "../backend/file/godot/variant";
 
@@ -9,53 +9,7 @@ export function create_godot_fixture(version = "4.6"): Map<string, Buffer> {
     Buffer.concat([u32(34), u32(values.length), ...values.map((value) => string(value, true))]);
   const integers = (values: readonly number[]) =>
     Buffer.concat([u32(32), u32(values.length), ...values.map(u32)]);
-  const integer = (value: number) => Buffer.concat([u32(3), u32(value)]);
-  const bundled = new Map([
-    [
-      "names",
-      resource_strings([
-        "Control",
-        "Root",
-        "Label",
-        "Display",
-        "Unchanged",
-        "text",
-        "Inner",
-        "ui",
-        "pressed",
-        "_on_pressed",
-      ]),
-    ],
-    ["variants", Buffer.concat([u32(30), u32(1), u32(5), string("Shared", true)])],
-    ["node_count", integer(4)],
-    // 节点：parent, owner, type, name, instance, 属性数, (属性, 值)×n, 分组数, 分组×n。
-    [
-      "nodes",
-      integers([
-        -1, -1, 0, 1, -1, 0, 0, 0, 0, 2, 3, -1, 1, 5, 0, 0, 0, 0, 2, 4, -1, 1, 5, 0, 0, 1, 0, 0, 6,
-        -1, 0, 1, 7,
-      ]),
-    ],
-    ["conn_count", integer(1)],
-    ["conns", integers([3, 0, 8, 9, 0, 0, 0])], // Inner.pressed → 根节点 _on_pressed。
-    ["node_paths", Buffer.concat([u32(30), u32(0)])],
-    ["editable_instances", Buffer.concat([u32(30), u32(0)])],
-    ["version", integer(3)],
-  ]);
-  const scene = build_resource(
-    "PackedScene",
-    new Map([
-      [
-        "_bundled",
-        Buffer.concat([
-          u32(26),
-          u32(bundled.size),
-          ...[...bundled].flatMap(([name, value]) => [u32(5), string(name, true), value]),
-        ]),
-      ],
-    ]),
-    true,
-  );
+  const scene = godot_scene_fixture();
   const messages = ["Translated message", "Shared message"].map((text) => Buffer.from(text + "\0"));
   const strings = Buffer.concat(messages);
   const translation = build_resource(
@@ -140,6 +94,89 @@ export function create_godot_fixture(version = "4.6"): Map<string, Buffer> {
   ]);
 }
 
+/** 两个节点共享同一属性值，供场景提取、投影和写回契约共用。 */
+function godot_scene_fixture(
+  value = Buffer.concat([u32(5), string("Shared", true)]),
+  compressed = true,
+): Buffer {
+  const resource_strings = (values: readonly string[]) =>
+    Buffer.concat([u32(34), u32(values.length), ...values.map((value) => string(value, true))]);
+  const integers = (values: readonly number[]) =>
+    Buffer.concat([u32(32), u32(values.length), ...values.map(u32)]);
+  const integer = (value: number) => Buffer.concat([u32(3), u32(value)]);
+  const bundled = new Map([
+    [
+      "names",
+      resource_strings([
+        "Control",
+        "Root",
+        "Label",
+        "Display",
+        "Unchanged",
+        "text",
+        "Inner",
+        "ui",
+        "pressed",
+        "_on_pressed",
+      ]),
+    ],
+    ["variants", Buffer.concat([u32(30), u32(1), value])],
+    ["node_count", integer(4)],
+    // 节点：parent, owner, type, name, instance, 属性数, (属性, 值)×n, 分组数, 分组×n。
+    [
+      "nodes",
+      integers([
+        -1, -1, 0, 1, -1, 0, 0, 0, 0, 2, 3, -1, 1, 5, 0, 0, 0, 0, 2, 4, -1, 1, 5, 0, 0, 1, 0, 0, 6,
+        -1, 0, 1, 7,
+      ]),
+    ],
+    ["conn_count", integer(1)],
+    ["conns", integers([3, 0, 8, 9, 0, 0, 0])], // Inner.pressed → 根节点 _on_pressed。
+    ["node_paths", Buffer.concat([u32(30), u32(0)])],
+    ["editable_instances", Buffer.concat([u32(30), u32(0)])],
+    ["version", integer(3)],
+  ]);
+  return build_resource(
+    "PackedScene",
+    new Map([
+      [
+        "_bundled",
+        Buffer.concat([
+          u32(26),
+          u32(bundled.size),
+          ...[...bundled].flatMap(([name, value]) => [u32(5), string(name, true), value]),
+        ]),
+      ],
+    ]),
+    compressed,
+  );
+}
+
+/** 混合容器含复合字典键、标识符、噪声与普通数值。 */
+export function godot_nested_scene_fixture(compressed = true): Buffer {
+  const text = (s: string) => Buffer.concat([u32(5), string(s, true)]);
+  const array = (...values: Buffer[]) => Buffer.concat([u32(30), u32(values.length), ...values]);
+  const dictionary = (...pairs: [Buffer, Buffer][]) =>
+    Buffer.concat([u32(26), u32(pairs.length), ...pairs.flat()]);
+  return godot_scene_fixture(
+    array(
+      dictionary(
+        [text("text"), text("Token")],
+        [array(dictionary([text("Inner key"), text("Key child")])), text("Hello world")],
+        [
+          text("names"),
+          Buffer.concat([u32(34), u32(2), string("Alice", true), string("Bob Smith", true)]),
+        ],
+      ),
+      Buffer.concat([u32(44), string("Named value", true)]),
+      text("res://noise"),
+      Buffer.concat([u32(3), u32(42)]),
+      text("Shared"),
+    ),
+    compressed,
+  );
+}
+
 /** `extends RefCounted; func values(): return ["Shared", "Shared"]`，行表保留函数体缩进。 */
 function game_script_fixture(version: number): Buffer {
   const entries = [
@@ -177,10 +214,31 @@ function game_script_fixture(version: number): Buffer {
   return Buffer.concat([Buffer.from("GDSC"), u32(version), u32(0), body]);
 }
 
+/** 独立构造无 magic 的 Godot 加密块，供格式与解密边界共用。 */
+export function godot_encrypted_block_fixture(bytes: Buffer, key: Buffer): Buffer {
+  const iv = Buffer.alloc(16, 7),
+    cipher = createCipheriv("aes-256-cfb", key, iv);
+  return Buffer.concat([
+    createHash("md5").update(bytes).digest(),
+    u64(bytes.length),
+    iv,
+    cipher.update(Buffer.concat([bytes, Buffer.alloc(pad(bytes.length, 16))])),
+    cipher.final(),
+  ]);
+}
+
 /** 小包构造器故意允许非法路径，供读取边界反例使用。 */
 export function godot_pack_fixture(
   files: ReadonlyMap<string, Buffer>,
-  options: { version?: number; prefix?: Buffer | undefined; relative?: boolean } = {},
+  options: {
+    version?: number;
+    prefix?: Buffer | undefined;
+    relative?: boolean;
+    encryption_key?: Buffer;
+    resource_prefix?: boolean;
+    encrypt_directory?: boolean;
+    encrypted_members?: readonly string[];
+  } = {},
 ): Buffer {
   const version = options.version ?? 2,
     prefix = options.prefix ?? Buffer.alloc(0),
@@ -189,26 +247,39 @@ export function godot_pack_fixture(
     4 +
     [...files.keys()].reduce(
       (sum, name) =>
-        sum + 40 + Buffer.byteLength("res://" + name) + pad(Buffer.byteLength("res://" + name)),
+        sum +
+        40 +
+        Buffer.byteLength((options.resource_prefix === false ? "" : "res://") + name) +
+        pad(Buffer.byteLength((options.resource_prefix === false ? "" : "res://") + name)),
       0,
     );
-  const base = 96 + directory_size + pad(96 + directory_size, 16),
+  const stored_directory_size = options.encrypt_directory
+    ? 4 + 40 + directory_size - 4 + pad(directory_size - 4, 16)
+    : directory_size;
+  /** 包目录和成员复用同一测试加密格式。 */
+  const encrypt = (bytes: Buffer): Buffer => {
+    if (!options.encryption_key) throw new Error("Missing fixture encryption key");
+    return godot_encrypted_block_fixture(bytes, options.encryption_key);
+  };
+  const base = 96 + stored_directory_size + pad(96 + stored_directory_size, 16),
     directory: Buffer[] = [u32(files.size)],
     payload: Buffer[] = [];
   let offset = 0;
   for (const [name, bytes] of files) {
-    const key = Buffer.from("res://" + name),
+    const key = Buffer.from((options.resource_prefix === false ? "" : "res://") + name),
       padded = Buffer.concat([key, Buffer.alloc(pad(key.length))]);
+    const encrypted = options.encrypted_members?.includes(name) ?? false;
     directory.push(
       u32(padded.length),
       padded,
       u64(offset),
       u64(bytes.length),
       createHash("md5").update(bytes).digest(),
-      u32(0),
+      u32(encrypted ? 1 : 0),
     );
-    payload.push(bytes, Buffer.alloc(pad(bytes.length, 16)));
-    offset += bytes.length + pad(bytes.length, 16);
+    const stored = encrypted ? encrypt(bytes) : bytes;
+    payload.push(stored, Buffer.alloc(pad(stored.length, 16)));
+    offset += stored.length + pad(stored.length, 16);
   }
   const pack = Buffer.concat([
     Buffer.from("GDPC"),
@@ -216,11 +287,13 @@ export function godot_pack_fixture(
     u32(4),
     u32(6),
     u32(0),
-    u32(relative ? 2 : 0),
+    u32((relative ? 2 : 0) | (options.encrypt_directory ? 1 : 0)),
     u64(base + (version === 2 && !relative ? prefix.length : 0)),
     ...(version >= 3 ? [u64(96), Buffer.alloc(56)] : [Buffer.alloc(64)]),
-    ...directory,
-    Buffer.alloc(pad(96 + directory_size, 16)),
+    ...(options.encrypt_directory
+      ? [directory[0]!, encrypt(Buffer.concat(directory.slice(1)))]
+      : directory),
+    Buffer.alloc(pad(96 + stored_directory_size, 16)),
     ...payload,
   ]);
   return prefix.length
@@ -361,3 +434,41 @@ export const GODOT_COMPILED_SCRIPT_FIXTURE = {
       "R0RTQ2UAAAAcAgAAKLUv/WAcAVUIADLLIiiALWYN5rwF5n2y+wq8zYxTEKIWDiN86dABCdYRBM1VOYyiCWlpyZYp6qNMz5oa9yImnpUG4yqcJJanOGpBOApoLbVAJRiAVKUhklhjOFAF2gNr0QJrDgxBDWiSQktg/pLfQuTPUAH+jf/jHyFRnfd7/CH/xY9B/ZWJ+vwdP8cP8p+ojGqgNuqiOgE7IKACEbrzAmDwEOaNLGYwtYAPzoglAUwbWDJmC21M8way2LYwM5+ZdbShWSxm4ITMjEaWx4mw6WgrWfwGLrNlykcLZldnqylHA3cbuWVpeb57kn3L3c27ifojv91Sdiw4xHBjMMoCC5R/5Pxe4JTrvMKKn//iozqdu6YM",
   },
 } as const;
+
+/** 自有 Windows x64 PE，包含字符串引用、SIMD 密钥读取与可选扫描空间。 */
+export function godot_executable_fixture(key?: Buffer, key_offset = 1536, scan = false): Buffer {
+  const bytes = Buffer.alloc(Math.max(2048, key_offset + 32));
+  bytes.write("MZ");
+  bytes.writeUInt32LE(64, 60);
+  bytes.write("PE\0\0", 64);
+  bytes.writeUInt16LE(0x8664, 68);
+  bytes.writeUInt16LE(3, 70);
+  bytes.writeUInt16LE(240, 84);
+  bytes.writeUInt16LE(0x20b, 88);
+  bytes.writeBigUInt64LE(0x140000000n, 112);
+  const sections = [
+    [".text", 512, 512, 0x60000020],
+    [".rdata", 1024, 512, 0x40000040],
+    [".data", 1536, bytes.length - 1536, 0xc0000040],
+  ] as const;
+  sections.forEach(([name, raw, size, flags], index) => {
+    const at = 328 + index * 40;
+    bytes.write(name, at);
+    bytes.writeUInt32LE(size, at + 8);
+    bytes.writeUInt32LE(raw + 3584, at + 12);
+    bytes.writeUInt32LE(size, at + 16);
+    bytes.writeUInt32LE(raw, at + 20);
+    bytes.writeUInt32LE(flags, at + 36);
+  });
+  if (key) {
+    key.copy(bytes, key_offset);
+    if (!scan) {
+      bytes.write("Can't open encrypted pack directory.", 1024);
+      Buffer.from([0x48, 0x8d, 0x05]).copy(bytes, 512);
+      bytes.writeInt32LE(1024 - 519, 515);
+      Buffer.from([0x0f, 0x10, 0x05]).copy(bytes, 528);
+      bytes.writeInt32LE(key_offset - 535, 531);
+    }
+  }
+  return bytes;
+}

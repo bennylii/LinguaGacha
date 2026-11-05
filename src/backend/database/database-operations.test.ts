@@ -1,5 +1,9 @@
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { build } from "vite";
 import { once } from "node:events";
 import { NativeFs } from "../../native/native-fs";
 import os from "node:os";
@@ -10,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppError } from "../../shared/error";
 import { JsonTool } from "../../shared/utils/json-tool";
+import * as preview from "./project-preview";
 import * as migrations from "../migration/database-migrations";
 import { PROJECT_DATABASE_APPLIED_WRITEBACK_MIGRATIONS_META_KEY } from "../migration/database-migrations";
 import { ProjectDataReader } from "../project/project-data-reader";
@@ -25,7 +30,7 @@ function project_path(name: string): string {
 
 /** 登记真实连接，由 afterEach 先关闭再删除临时目录。 */
 function create_database(): ProjectDatabase {
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   cleanup_databases.push(database);
   return database;
 }
@@ -55,6 +60,24 @@ async function read_meta(
 /** 观察 SQLite 是否仍保留 WAL 侧文件。 */
 function has_project_sidecar(lg_path: string): boolean {
   return [`${lg_path}-wal`, `${lg_path}-shm`].some((sidecar_path) => fs.existsSync(sidecar_path));
+}
+
+/** 复制持有未检查点 WAL 的工程，模拟异常退出后遗留的主文件与 WAL，返回副本路径。 */
+function create_crashed_project(lg_path: string, name: string): string {
+  const crashed_path = project_path(name);
+  using holder = new DatabaseSync(lg_path); // 保持连接，阻止检查点合并 WAL。
+  holder.exec("PRAGMA wal_autocheckpoint=0");
+  holder.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run("wal_probe", '"wal"');
+  fs.copyFileSync(lg_path, crashed_path);
+  fs.copyFileSync(`${lg_path}-wal`, `${crashed_path}-wal`);
+  return crashed_path;
+}
+
+/** 读取承载已提交数据的主文件与 WAL，缺失记为 null。`-shm` 只是可重建的索引，不参与比较。 */
+function read_project_data(lg_path: string): Array<Buffer | null> {
+  return ["", "-wal"].map((suffix) =>
+    fs.existsSync(lg_path + suffix) ? fs.readFileSync(lg_path + suffix) : null,
+  );
 }
 
 /** 读取 SQLite 文件头中的自动回收模式，直接观察 .lg 物理契约。 */
@@ -90,7 +113,133 @@ afterEach(async () => {
   fs.rmSync(temp_dir, { recursive: true, force: true });
 });
 
+it("真实 Electron 的预览和高版本确认等待保持单文件及原始字节", async () => {
+  await build({
+    configFile: false,
+    logLevel: "silent",
+    build: {
+      outDir: path.join(temp_dir, "bundle"),
+      lib: {
+        entry: path.resolve("src/backend/database/database-operations.ts"),
+        formats: ["es"],
+        fileName: () => "database.mjs",
+      },
+      rolldownOptions: { external: [/^node:/u], platform: "node" },
+      minify: false,
+    },
+  });
+  const entry = path.join(temp_dir, "probe.mjs");
+  fs.writeFileSync(
+    entry,
+    `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import { ProjectDatabase } from ${JSON.stringify(pathToFileURL(path.join(temp_dir, "bundle/database.mjs")).href)};
+    const file = ${JSON.stringify(path.join(temp_dir, "electron.lg"))};
+    const database = new ProjectDatabase('1.0.0');
+    try {
+      await database.create_project(file, 'electron');
+      await database.transaction(file, writer => writer.set_meta(file, 'target_app_version', '2.0.0'));
+      const original = fs.readFileSync(file);
+      const check = () => {
+        assert.deepEqual(fs.readFileSync(file), original);
+        assert.equal(fs.existsSync(file + '-wal'), false);
+        assert.equal(fs.existsSync(file + '-shm'), false);
+      };
+      await database.read_project_preview(file);
+      check();
+      await assert.rejects(database.prepare(file), {code: 'project.newer_app_version'});
+      check();
+      console.log('project-query-ok', JSON.stringify(process.versions));
+    } finally {
+      await database.close();
+    }
+  `,
+  );
+  const executable = createRequire(import.meta.url)("electron") as string;
+  const result = await promisify(execFile)(executable, [entry], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    timeout: 30_000,
+    windowsHide: true,
+  });
+  expect(result.stdout).toContain("project-query-ok");
+});
+
 describe("ProjectDatabase", () => {
+  it("查询批次拒绝写 SQL，成功与失败都释放连接", async () => {
+    const { database, lg_path } = await create_database_project("query");
+    const before = fs.readFileSync(lg_path);
+    await database.read_project_preview(lg_path);
+    expect(fs.readFileSync(lg_path)).toEqual(before);
+    expect(has_project_sidecar(lg_path)).toBe(false);
+    let handle: DatabaseSync | undefined;
+    vi.spyOn(preview, "read_project_preview").mockImplementationOnce((db) => {
+      handle = db;
+      db.exec("DELETE FROM meta");
+      throw new Error("write unexpectedly allowed");
+    });
+    await expect(database.read_project_preview(lg_path)).rejects.toMatchObject({
+      cause: expect.objectContaining({ errcode: 8 }),
+    });
+    expect(handle?.isOpen).toBe(false);
+    expect(fs.readFileSync(lg_path)).toEqual(before);
+    expect(has_project_sidecar(lg_path)).toBe(false);
+  });
+
+  it("高版本确认绑定重新读取的规范版本，等待期间保持单文件和原始事实", async () => {
+    const { database, lg_path } = await create_database_project("newer");
+    await database.transaction(lg_path, (writer) =>
+      writer.set_meta(lg_path, "target_app_version", "02.001.0"),
+    );
+    {
+      using db = new DatabaseSync(lg_path);
+      db.exec("ALTER TABLE assets DROP COLUMN sort_order");
+    }
+    const original = fs.readFileSync(lg_path);
+    for (const confirmation of [undefined, true, "02.001.0", "2.0.0"]) {
+      await expect(database.prepare(lg_path, confirmation)).rejects.toMatchObject({
+        code: "project.newer_app_version",
+        severity: "expected",
+        public_details: { target_app_version: "2.1.0", current_app_version: "1.0.0" },
+      });
+      expect(fs.readFileSync(lg_path)).toEqual(original);
+      expect(has_project_sidecar(lg_path)).toBe(false);
+    }
+    await database.prepare(lg_path, "2.1.0");
+    expect(await read_meta(database, lg_path, "target_app_version", "")).toBe("02.001.0");
+    await database.transaction(lg_path, (writer) =>
+      writer.set_meta(lg_path, "target_app_version", "2.01.00"),
+    );
+    await database.prepare(lg_path, "2.1.0");
+    await database.transaction(lg_path, (writer) =>
+      writer.set_meta(lg_path, "target_app_version", "2.2.0"),
+    );
+    await expect(database.prepare(lg_path, "2.1.0")).rejects.toMatchObject({
+      code: "project.newer_app_version",
+      public_details: { target_app_version: "2.2.0" },
+    });
+    expect(has_project_sidecar(lg_path)).toBe(false);
+  });
+
+  it("无效版本字段允许准备并在事务中修正，缺失文件不会被查询创建", async () => {
+    const { database, lg_path } = await create_database_project("invalid-version");
+    {
+      using db = new DatabaseSync(lg_path);
+      db.exec("UPDATE meta SET value = 'invalid-json' WHERE key = 'target_app_version'");
+    }
+    await database.prepare(lg_path);
+    expect(await read_meta(database, lg_path, "target_app_version", "")).toBe("1.0.0");
+    const missing = project_path("missing.lg");
+    await expect(database.prepare(missing)).rejects.toMatchObject({
+      code: "project.not_found",
+      public_details: { filename: "missing.lg" },
+    });
+    await expect(database.read_project_preview(missing)).rejects.toMatchObject({
+      code: "project.not_found",
+    });
+    expect(fs.existsSync(missing)).toBe(false);
+  });
+
   it.each(["sync", "async"] as const)("%s 作用域在操作完成后释放真实连接", async (mode) => {
     const { database, lg_path } = await create_database_project("scope-timing");
     const entered = Promise.withResolvers<void>();
@@ -217,7 +366,7 @@ describe("ProjectDatabase", () => {
 
   it("新建失败且清理失败时保留两个异常与残留文件", async () => {
     const native_fs = new NativeFs();
-    const database = new ProjectDatabase(native_fs);
+    const database = new ProjectDatabase("1.0.0", native_fs);
     cleanup_databases.push(database);
     const target = project_path("cleanup-failed.lg");
     vi.spyOn(native_fs, "unlink").mockImplementationOnce(() => {
@@ -277,7 +426,7 @@ describe("ProjectDatabase", () => {
               code: "database.busy",
               severity: "warning",
               diagnostic_context: expect.objectContaining({
-                operation: "journal_mode",
+                operation: "query",
                 sqlite_code: 5,
               }),
             }),
@@ -349,6 +498,80 @@ describe("ProjectDatabase", () => {
     expect(await read_meta(database, lg_path, "name", "")).toBe("deferred-auto-vacuum");
     expect(vacuum_failed).toBe(true);
     expect(read_auto_vacuum_mode(lg_path)).toBe(0);
+  });
+
+  it("快照保留原工程字节与副文件，包含异常退出遗留 WAL 中的已提交数据", async () => {
+    const { database, lg_path } = await create_database_project("snapshot-clean");
+    const crashed_path = create_crashed_project(lg_path, "snapshot-crashed.lg");
+    const crashed_bytes = read_project_data(crashed_path);
+    const clean_bytes = read_project_data(lg_path);
+
+    await database.export_snapshot(crashed_path, project_path("crashed-copy.lg"));
+    await database.export_snapshot(lg_path, project_path("clean-copy.lg"));
+
+    expect(read_project_data(crashed_path)).toEqual(crashed_bytes);
+    expect(read_project_data(lg_path)).toEqual(clean_bytes);
+    expect(has_project_sidecar(lg_path)).toBe(false); // 无 WAL 时不留下副文件。
+    expect(await read_meta(database, project_path("crashed-copy.lg"), "wal_probe", null)).toBe(
+      "wal",
+    );
+
+    const missing_output = project_path("missing-snapshot.lg");
+    await expect(
+      database.export_snapshot(project_path("missing.lg"), missing_output),
+    ).rejects.toMatchObject({ code: "project.not_found" });
+    expect(fs.existsSync(missing_output)).toBe(false);
+  });
+
+  it("替换失败时被覆盖工程连同遗留 WAL 原样归位，成功后新工程不重放旧 WAL", async () => {
+    const { lg_path } = await create_database_project("replace-old");
+    const target_path = create_crashed_project(lg_path, "replace-target.lg");
+    const target_bytes = read_project_data(target_path);
+    const { database: next_database, lg_path: next_path } =
+      await create_database_project("replace-next");
+    await next_database.transaction(next_path, (writer) =>
+      writer.set_meta(next_path, "replace_probe", "next"),
+    );
+    const native = new NativeFs();
+    const rename = native.rename.bind(native);
+    const rename_spy = vi.spyOn(native, "rename").mockImplementation((source, destination) => {
+      if (source === next_path) throw new Error("target locked");
+      rename(source, destination);
+    });
+    const database = new ProjectDatabase("1.0.0", native);
+    cleanup_databases.push(database);
+
+    await expect(database.replace_project_file(next_path, target_path)).rejects.toThrow();
+    expect(read_project_data(target_path)).toEqual(target_bytes);
+    expect(fs.readdirSync(temp_dir).sort()).toEqual([
+      "replace-next.lg",
+      "replace-old.lg",
+      "replace-target.lg",
+      "replace-target.lg-wal",
+    ]);
+
+    rename_spy.mockRestore();
+    await database.replace_project_file(next_path, target_path);
+    expect(await read_meta(database, target_path, "replace_probe", null)).toBe("next");
+    expect(await read_meta(database, target_path, "wal_probe", null)).toBeNull();
+    expect(fs.readdirSync(temp_dir).sort()).toEqual(["replace-old.lg", "replace-target.lg"]);
+  });
+
+  it("替换后的备份清理失败仍报告已提交，并保留新工程", async () => {
+    const { lg_path: target_path } = await create_database_project("cleanup-old");
+    const { lg_path: source_path } = await create_database_project("cleanup-new");
+    const native = new NativeFs();
+    const database = new ProjectDatabase("1.0.0", native);
+    cleanup_databases.push(database);
+    vi.spyOn(native, "unlink").mockImplementation(() => {
+      throw new Error("backup locked");
+    });
+
+    await expect(database.replace_project_file(source_path, target_path)).rejects.toMatchObject({
+      code: "data.committed_sync_failed",
+      public_details: { committed: true },
+    });
+    expect(await read_meta(database, target_path, "name", null)).toBe("cleanup-new");
   });
 
   it("普通 scoped 操作结束后不常驻 WAL 副文件", async () => {
@@ -426,12 +649,19 @@ describe("ProjectDatabase", () => {
       read_finished = true;
       return meta;
     });
+    let preview_finished = false;
+    const preview = database.read_project_preview(lg_path).then((value) => {
+      preview_finished = true;
+      return value;
+    });
     await Promise.resolve();
+    expect(preview_finished).toBe(false);
     expect(read_finished).toBe(false);
     expect(has_project_sidecar(lg_path)).toBe(true);
     finish.resolve();
     await transaction;
     expect(await read).toHaveProperty("value", 42);
+    expect((await preview).file_paths).toEqual([]);
     expect(() => saved!.get_all_meta(lg_path)).toThrow();
     expect(has_project_sidecar(lg_path)).toBe(false);
   });
@@ -449,6 +679,7 @@ describe("ProjectDatabase", () => {
   it("项目数据库初始化失败时关闭连接并保留原始原因", async () => {
     const database = create_database();
     const lg_path = project_path("open-failed.lg");
+    fs.writeFileSync(lg_path, "");
     const open_failure = new Error("migration failed");
     let connection_close: ReturnType<typeof vi.spyOn> | null = null;
     vi.spyOn(migrations, "run_project_database_migrations").mockImplementationOnce((db) => {

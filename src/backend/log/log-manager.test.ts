@@ -24,7 +24,7 @@ describe("LogManager", () => {
     manager.append({ level: "info", content, source: "engine" });
     content.pairs[0]!.dst = "污染";
     const page = await manager.files.read_page({
-      date: manager.files.list_dates()[0]!,
+      ...manager.files.list_files()[0]!,
       direction: "latest",
     });
     expect(page.entries[0]?.message_preview).toContain("译文");
@@ -42,11 +42,19 @@ describe("LogManager", () => {
     });
     manager.fatal("失败", { error: new Error("boom") });
     expect(
-      (await manager.files.read_page({ date: manager.files.list_dates()[0]!, direction: "latest" }))
-        .entries,
+      (
+        await manager.files.read_page({
+          ...manager.files.list_files()[0]!,
+          direction: "latest",
+        })
+      ).entries,
     ).toEqual([]);
     await manager.shutdown();
-    const file = path.join(directory.path, `app.${manager.files.list_dates()[0]!}.jsonl`);
+    const file_ref = manager.files.list_files()[0]!;
+    const file = path.join(
+      directory.path,
+      `app.${file_ref.date}.${file_ref.instance}.jsonl`,
+    );
     const before = fs.readFileSync(file, "utf8");
     expect(JSON.parse(before)).toMatchObject({
       level: "fatal",
@@ -68,7 +76,7 @@ it("可读错误正文在控制台与摘要保持一致，详情保留异常", a
   const body = "译文生成失败 …\n原始原因";
   manager.error({ kind: "text", text: body }, { error: new Error("原始原因") });
   const page = await manager.files.read_page({
-    date: manager.files.list_dates()[0]!,
+    ...manager.files.list_files()[0]!,
     direction: "latest",
   });
   expect(page.entries[0]!.message_preview).toBe(body);

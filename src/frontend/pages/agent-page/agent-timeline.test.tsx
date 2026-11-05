@@ -11,9 +11,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AgentAssistantMessageParts,
+  AgentAutoContinueSnapshot,
+  AgentAutoResumeSnapshot,
   AgentEntry,
   AgentEntryStatus,
+  AgentRunFailure,
   AgentSkillSnapshot,
+  AgentTimelineSnapshot,
   AgentToolEntry,
 } from "@shared/agent";
 import { TooltipProvider } from "@frontend/shadcn/tooltip";
@@ -67,6 +71,7 @@ describe("AgentTimeline", () => {
   let root: Root | null = null;
   const on_edit = vi.fn();
   const on_continue = vi.fn();
+  const on_cancel_auto_resume = vi.fn();
   const on_compact = vi.fn();
   const on_add_annotation = vi.fn();
   const write_clipboard = vi.fn(async (_text: string) => undefined);
@@ -90,6 +95,7 @@ describe("AgentTimeline", () => {
     container = null;
     on_edit.mockReset();
     on_continue.mockReset();
+    on_cancel_auto_resume.mockReset();
     on_compact.mockReset();
     on_add_annotation.mockReset();
     write_clipboard.mockReset();
@@ -101,6 +107,9 @@ describe("AgentTimeline", () => {
     entries: readonly AgentEntry[],
     follow_reset_revision = 0,
     skills: readonly AgentSkillSnapshot[] = [],
+    auto_resume: AgentAutoResumeSnapshot | null = null,
+    auto_continue: AgentAutoContinueSnapshot | null = null,
+    timeline?: AgentTimelineSnapshot,
   ): Promise<HTMLDivElement> {
     if (container === null) {
       container = document.createElement("div");
@@ -108,7 +117,7 @@ describe("AgentTimeline", () => {
       root = createRoot(container);
     }
     await act(async () => {
-      timeline_store.replace(entries);
+      timeline_store.replace(entries, timeline);
       timeline_store.notify();
       root?.render(
         <AgentChatStoreContext.Provider value={timeline_session}>
@@ -117,9 +126,11 @@ describe("AgentTimeline", () => {
               skills={skills}
               compact_available
               on_compact={on_compact}
-
               follow_reset_revision={follow_reset_revision}
               on_continue={on_continue}
+              auto_resume={auto_resume}
+              on_cancel_auto_resume={on_cancel_auto_resume}
+              auto_continue={auto_continue}
               on_edit={on_edit}
               on_add_annotation={on_add_annotation}
               revision_disabled={false}
@@ -178,6 +189,7 @@ describe("AgentTimeline", () => {
     const steer: AgentEntry = {
       kind: "user_message",
       id: "user-steer",
+      roundId: "user-round",
       delivery: "steer",
       text: "立即补充",
       attachments: [],
@@ -211,8 +223,20 @@ describe("AgentTimeline", () => {
           index * 4_000,
           status === "running" ? null : (index + 1) * 4_000,
         ),
-        assistant_entry(`middle-${status}`, `${status} 中间回复`, "success", index * 4_000 + 1_000),
-        assistant_entry(`last-${status}`, `${status} 最终回复`, status, index * 4_000 + 2_000),
+        assistant_entry(
+          `middle-${status}`,
+          `${status} 中间回复`,
+          "success",
+          index * 4_000 + 1_000,
+          `user-${status}`,
+        ),
+        assistant_entry(
+          `last-${status}`,
+          `${status} 最终回复`,
+          status,
+          index * 4_000 + 2_000,
+          `user-${status}`,
+        ),
       ],
     );
     const view = await render_timeline(entries);
@@ -238,12 +262,12 @@ describe("AgentTimeline", () => {
     }
   });
 
-  it("最新失败轮次可分别修改输入与输出，且只保留一处继续入口", async () => {
+  it("历史输入均可编辑，助手修订与继续入口只属于最新失败轮次", async () => {
     const view = await render_timeline([
       user_entry("user-old-error", "旧任务", "error", 0, 2_000),
-      assistant_entry("assistant-old-error", "旧部分结果", "error", 1_000),
+      assistant_entry("assistant-old-error", "旧部分结果", "error", 1_000, "user-old-error"),
       user_entry("user-error", "最新任务", "error", 3_000, 5_000),
-      assistant_entry("assistant-error", "最新部分结果", "error", 4_000),
+      assistant_entry("assistant-error", "最新部分结果", "error", 4_000, "user-error"),
     ]);
     const assistants = view.querySelectorAll(".agent-message--assistant");
     const continue_entries = view.querySelectorAll<HTMLButtonElement>(".agent-continue-entry");
@@ -264,23 +288,152 @@ describe("AgentTimeline", () => {
     ).not.toBe(0);
     expect(error.textContent).toContain("app.feedback.model_request_failed");
     expect(error.textContent).toContain("agent_page.action.continue");
+    expect(error.querySelector(".agent-continue-entry__detail")).toBeNull();
     await act(async () => error.click());
     expect(on_continue).toHaveBeenCalledOnce();
     const edits = [
       ...view.querySelectorAll<HTMLButtonElement>(".agent-message-actions button"),
     ].filter((button) => button.textContent === "agent_page.action.edit");
-    expect(edits).toHaveLength(2);
     expect(latest_footer.querySelector("button")).toBeNull();
-    await act(async () => edits[0]?.click());
-    expect(on_edit).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ kind: "user_message", id: "user-error" }),
+    for (const button of edits) await act(async () => button.click());
+    expect(on_edit.mock.calls.map(([entry]) => entry.id)).toEqual([
+      "user-old-error",
+      "user-error",
+      "assistant-error",
+    ]);
+  });
+
+  it("失败轮次的行内入口直接显示报错码与供应商说明", async () => {
+    const view = await render_timeline([
+      user_entry("user-error", "最新任务", "error", 0, 2_000, [], {
+        status: 400,
+        detail: "Upstream request failed: [security_audit_fail]",
+      }),
+    ]);
+    expect(view.querySelector(".agent-continue-entry__detail")?.textContent).toBe(
+      "HTTP 400 · Upstream request failed: [security_audit_fail]",
     );
-    await act(async () => edits[1]?.click());
-    expect(on_edit).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ kind: "assistant_message", id: "assistant-error" }),
+
+    const transport = await render_timeline([
+      user_entry("user-transport", "最新任务", "error", 0, 2_000, [], {
+        status: null,
+        detail: "Connection error.",
+      }),
+    ]);
+    expect(transport.querySelector(".agent-continue-entry__detail")?.textContent).toBe(
+      "Connection error.",
     );
+  });
+
+  it("失败轮次的自动重试等待显示倒计时并允许取消", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const view = await render_timeline(
+      [user_entry("user-error", "最新任务", "error", 0, 2_000)],
+      0,
+      [],
+      { roundId: "user-error", attempt: 2, maxAttempts: 5, phase: "waiting", retryAt: 5_000 },
+    );
+
+    const waiting = view.querySelector(".agent-auto-resume-entry");
+    expect(waiting?.textContent).toContain("agent_page.auto_resume.waiting_limited:2,5,5");
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(waiting?.textContent).toContain("agent_page.auto_resume.waiting_limited:2,5,4");
+
+    const cancel = view.querySelector<HTMLButtonElement>(".agent-auto-resume-entry button");
+    expect(cancel?.textContent).toContain("agent_page.auto_resume.cancel");
+    await act(async () => cancel?.click());
+    expect(on_cancel_auto_resume).toHaveBeenCalledOnce();
+  });
+
+  it("不限次数时只显示当前重试次数", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const view = await render_timeline(
+      [user_entry("user-error", "最新任务", "error", 0, 2_000)],
+      0,
+      [],
+      { roundId: "user-error", attempt: 7, maxAttempts: null, phase: "waiting", retryAt: 5_000 },
+    );
+
+    expect(view.querySelector(".agent-auto-resume-entry")?.textContent).toContain(
+      "agent_page.auto_resume.waiting:7,5",
+    );
+  });
+
+  it("自动重试续跑中显示当前未完成，不显示失败行与取消入口", async () => {
+    const view = await render_timeline(
+      [
+        user_entry("user-error", "最新任务", "running", 0, null, [], {
+          status: 503,
+          detail: "Service Unavailable",
+        }),
+      ],
+      0,
+      [],
+      { roundId: "user-error", attempt: 3, maxAttempts: null, phase: "continuing", retryAt: null },
+    );
+
+    // 续跑中轮次按运行中展示，保留「当前未完成」状态行，失败行与取消入口消失。
+    expect(view.querySelector(".agent-continue-entry")).toBeNull();
+    expect(view.querySelector(".agent-auto-resume-entry")?.textContent).toContain(
+      "agent_page.auto_resume.continuing:3",
+    );
+    expect(view.querySelector(".agent-auto-resume-entry button")).toBeNull();
+    expect(view.querySelector(".agent-round-footer")?.textContent).toContain(
+      "agent_page.round.running",
+    );
+  });
+
+  it("自动续跑等待只挂在对应失败轮次上", async () => {
+    const view = await render_timeline(
+      [
+        user_entry("user-old", "旧任务", "error", 0, 2_000),
+        user_entry("user-latest", "最新任务", "error", 3_000, 5_000),
+      ],
+      0,
+      [],
+      { roundId: "user-latest", attempt: 1, maxAttempts: 5, phase: "waiting", retryAt: 5_000 },
+    );
+    expect(view.querySelectorAll(".agent-auto-resume-entry")).toHaveLength(1);
+  });
+
+  it("自动继续状态区分判定与继续两个相位", async () => {
+    const judging = await render_timeline(
+      [user_entry("user-1", "任务", "success", 0, 1_000)],
+      0,
+      [],
+      null,
+      { roundId: "user-1", attempt: 1, phase: "judging" },
+    );
+    expect(judging.querySelector(".agent-auto-continue-entry")?.textContent).toContain(
+      "agent_page.auto_continue.judging",
+    );
+
+    const continuing = await render_timeline(
+      [user_entry("user-1", "任务", "success", 0, 1_000)],
+      0,
+      [],
+      null,
+      { roundId: "user-1", attempt: 2, phase: "continuing" },
+    );
+    expect(continuing.querySelector(".agent-auto-continue-entry")?.textContent).toContain(
+      "agent_page.auto_continue.continuing:2",
+    );
+  });
+
+  it("自动继续状态只挂在对应轮次上", async () => {
+    const view = await render_timeline(
+      [
+        user_entry("user-old", "旧任务", "success", 0, 1_000),
+        user_entry("user-latest", "最新任务", "success", 1_000, 2_000),
+      ],
+      0,
+      [],
+      null,
+      { roundId: "user-latest", attempt: 1, phase: "judging" },
+    );
+    expect(view.querySelectorAll(".agent-auto-continue-entry")).toHaveLength(1);
   });
 
   it("成功轮次只允许修改最终助手回复，状态行不提供回合重试", async () => {
@@ -356,8 +509,8 @@ describe("AgentTimeline", () => {
     ];
     const view = await render_timeline([
       ...round,
-      { kind: "context_compaction", createdAt: null, id: "old-compaction", status: "error" },
-      { kind: "context_compaction", createdAt: null, id: "compaction-1", status: "error" },
+      { kind: "context_compaction", createdAt: null, id: "old-compaction", roundId: "user-error", status: "error" },
+      { kind: "context_compaction", createdAt: null, id: "compaction-1", roundId: "user-error", status: "error" },
     ]);
     expect(view.querySelector('.agent-process-entry [role="status"]')?.textContent).toContain(
       "agent_page.compaction.error",
@@ -370,7 +523,7 @@ describe("AgentTimeline", () => {
     expect(on_compact).toHaveBeenCalledOnce();
     await act(async () => {
       timeline_store.update([
-        { kind: "context_compaction", createdAt: null, id: "retry", status: "running" },
+        { kind: "context_compaction", createdAt: null, id: "retry", roundId: "user-error", status: "running" },
       ]);
       timeline_store.notify();
     });
@@ -687,6 +840,40 @@ describe("AgentTimeline", () => {
     );
     expect(view.querySelector(".agent-round-footer")?.textContent).toContain("2s");
   });
+
+  it("时间线渲染 Store 提供的完整窗口，不再自行截断轮次", async () => {
+    const entries = Array.from({ length: 45 }, (_, index) =>
+      user_entry(`user-${index}`, `任务 ${index}`, "success", index * 1_000, index * 1_000 + 500),
+    );
+    const view = await render_timeline(entries);
+    expect(view.querySelectorAll(".agent-round-footer")).toHaveLength(45);
+    expect(view.querySelector(".agent-message__user-text")?.textContent).toBe("任务 0");
+  });
+
+  it("顶部与轮次内更早入口按窗口状态显示", async () => {
+    const view = await render_timeline(
+      [user_entry("user-1", "任务 1", "success", 0, 500)],
+      0,
+      [],
+      null,
+      null,
+      {
+        hasEarlier: true,
+        nextCursor: "older-1",
+        rounds: [{ id: "user-1", hasEarlier: true }],
+      },
+    );
+    const earlier = [...view.querySelectorAll<HTMLButtonElement>(".agent-page__timeline-earlier")];
+    expect(earlier).toHaveLength(2);
+    expect(earlier[0]?.textContent).toBe("agent_page.timeline.show_earlier");
+    expect(earlier[1]?.classList.contains("agent-page__timeline-earlier--in-round")).toBe(true);
+    expect(earlier[1]?.textContent).toBe("agent_page.timeline.show_earlier_in_round");
+  });
+
+  it("无更早历史时不显示加载入口", async () => {
+    const view = await render_timeline([user_entry("user-1", "任务", "success", 0, 500)]);
+    expect(view.querySelector(".agent-page__timeline-earlier")).toBeNull();
+  });
 });
 
 /** 补入轮次起点，使条目分组和耗时经过真实时间线投影。 */
@@ -708,10 +895,12 @@ function user_entry(
   createdAt: number,
   endedAt: number | null,
   images: string[] = [],
+  failure: AgentRunFailure | null = null,
 ) {
   return {
     kind: "user_message" as const,
     id,
+    roundId: id,
     delivery: "round" as const,
     averageTokensPerSecond: null,
     text,
@@ -719,12 +908,19 @@ function user_entry(
     status,
     createdAt,
     endedAt,
+    failure,
   };
 }
 
 /** 纯文本场景复用分段消息夹具。 */
-function assistant_entry(id: string, text: string, status: AgentEntryStatus, createdAt: number) {
-  return assistant_parts_entry(id, [{ kind: "text", text }], status, createdAt);
+function assistant_entry(
+  id: string,
+  text: string,
+  status: AgentEntryStatus,
+  createdAt: number,
+  roundId = "",
+) {
+  return assistant_parts_entry(id, [{ kind: "text", text }], status, createdAt, roundId);
 }
 
 /** 保留分段结构供正文、思考和媒体渲染场景组合。 */
@@ -733,10 +929,12 @@ function assistant_parts_entry(
   parts: AgentAssistantMessageParts,
   status: AgentEntryStatus,
   createdAt: number,
+  roundId = "",
 ) {
   return {
     kind: "assistant_message" as const,
     id,
+    roundId,
     parts,
     status,
     createdAt,
@@ -751,8 +949,17 @@ function tool_entry(
   output: string | null,
   createdAt: number,
   input = "{}",
+  roundId = "",
 ): AgentToolEntry {
-  const base = { kind: "tool_call" as const, id, toolName, input, createdAt };
+  const base = {
+    kind: "tool_call" as const,
+    id,
+    roundId,
+    toolName,
+    input,
+    outputTruncated: false as const,
+    createdAt,
+  };
   if (status === "running" || status === "stopped") {
     if (output !== null) throw new Error("开放或停止工具不得携带输出");
     return { ...base, status, output: null };

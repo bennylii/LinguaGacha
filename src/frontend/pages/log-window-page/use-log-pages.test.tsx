@@ -1,18 +1,18 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LOG_POLL_INTERVAL_MS, type LogPage } from "@shared/log";
+import { LOG_POLL_INTERVAL_MS, type LogFileRef, type LogPage } from "@shared/log";
 import { useLogPages } from "./use-log-pages";
 
 const mocks = vi.hoisted(() => ({
   page: vi.fn(),
-  dates: vi.fn(),
+  files: vi.fn(),
   toast: vi.fn(),
   text: (key: string) => key,
 }));
 vi.mock("@frontend/app/desktop/desktop-api", () => ({
   read_log_page: mocks.page,
-  read_log_dates: mocks.dates,
+  read_log_files: mocks.files,
 }));
 
 vi.mock("@frontend/app/feedback/desktop-toast", () => ({
@@ -21,14 +21,23 @@ vi.mock("@frontend/app/feedback/desktop-toast", () => ({
 }));
 vi.mock("@frontend/app/locale/locale-context", () => ({ useI18n: () => ({ t: mocks.text }) }));
 
-/** 构造单日期分页响应，保留前后游标约束。 */
-function page(line: number, date = "20260913"): LogPage {
+const INSTANCE = "1234";
+const OTHER = "5678";
+
+/** 构造文件引用，默认由当前实例写入。 */
+function file(date: string, instance = INSTANCE, current = true): LogFileRef {
+  return { date, instance, current };
+}
+
+/** 构造单文件分页响应，保留前后游标约束。 */
+function page(line: number, date = "20260913", instance = INSTANCE): LogPage {
   return {
     status: "ready",
     entries: [
       {
-        id: `${date}:${String(line)}`,
+        id: `${date}:${instance}:${String(line)}`,
         date,
+        instance,
         line,
         revision: "rev",
         created_at: "2026-09-13T00:00:00Z",
@@ -38,8 +47,8 @@ function page(line: number, date = "20260913"): LogPage {
         message_length: 1,
       },
     ],
-    before: { date, line: line - 1, revision: "rev" },
-    after: { date, line, revision: "rev" },
+    before: { date, instance, line: line - 1, revision: "rev" },
+    after: { date, instance, line, revision: "rev" },
     has_more: false,
   };
 }
@@ -65,23 +74,23 @@ describe("useLogPages", () => {
     expect(current.loading).toBe(false);
   });
 
-  it("没有可选文件时不发分页请求，首次发现文件后才选择日期", async () => {
+  it("没有可选文件时不发分页请求，首次发现文件后才选择当前实例", async () => {
     await mount([]);
-    expect(current.date).toBeNull();
+    expect(current.file).toBeNull();
     expect(current.loading).toBe(false);
     expect(mocks.page).not.toHaveBeenCalled();
-    mocks.dates.mockResolvedValue(["20260913"]);
+    mocks.files.mockResolvedValue([file("20260913", OTHER, false), file("20260913")]);
     await act(async () => {
-      await current.refresh_dates();
+      await current.refresh_files();
     });
-    expect(current.date).toBe("20260913");
+    expect(current.file).toEqual(file("20260913"));
     expect(mocks.page).toHaveBeenCalledExactlyOnceWith(
-      { date: "20260913", direction: "latest" },
+      { date: "20260913", instance: INSTANCE, direction: "latest" },
       expect.any(AbortSignal),
     );
   });
 
-  it("旧日期历史请求取消后失败不会改变新日期跟随状态或显示 Toast", async () => {
+  it("旧文件历史请求取消后失败不会改变新文件跟随状态或显示 Toast", async () => {
     await mount();
     let reject_old: ((error: Error) => void) | undefined;
     mocks.page.mockImplementationOnce(
@@ -95,7 +104,7 @@ describe("useLogPages", () => {
     });
     mocks.page.mockResolvedValue(page(7, "20260912"));
     await act(async () => {
-      current.select_date("20260912");
+      current.select_file(file("20260912"));
     });
     await act(async () => {
       reject_old!(new Error("cancelled"));
@@ -104,40 +113,55 @@ describe("useLogPages", () => {
     expect(current.entries[0]?.date).toBe("20260912");
     expect(mocks.toast).not.toHaveBeenCalled();
   });
-  it("首次选择最新实际日期，刷新目录和恢复可见都不自动跨日", async () => {
+  it("首次选择当前实例的最新文件，刷新目录和恢复可见都不自动跨日", async () => {
     await mount();
-    expect(current.date).toBe("20260913");
+    expect(current.file).toEqual(file("20260913"));
     expect(mocks.page).toHaveBeenCalledWith(
-      { date: "20260913", direction: "latest" },
+      { date: "20260913", instance: INSTANCE, direction: "latest" },
       expect.any(AbortSignal),
     );
-    mocks.dates.mockResolvedValue(["20260914", "20260913", "20260912"]);
+    mocks.files.mockResolvedValue([file("20260914"), file("20260913"), file("20260912")]);
     await act(async () => {
-      await current.refresh_dates();
+      await current.refresh_files();
     });
-    expect(current.date).toBe("20260913");
-    expect(current.dates[0]).toBe("20260914");
+    expect(current.file?.date).toBe("20260913");
+    expect(current.files[0]?.date).toBe("20260914");
     await act(async () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
     expect(mocks.page.mock.calls.every(([request]) => request.date === "20260913")).toBe(true);
     mocks.page.mockResolvedValue(page(7, "20260912"));
     await act(async () => {
-      current.select_date("20260912");
+      current.select_file(file("20260912"));
     });
     expect(current.entries.map((entry) => entry.date)).toEqual(["20260912"]);
     await act(async () => {
       current.refresh();
     });
     expect(mocks.page).toHaveBeenLastCalledWith(
-      { date: "20260912", direction: "latest" },
+      { date: "20260912", instance: INSTANCE, direction: "latest" },
       expect.any(AbortSignal),
     );
   });
 
-  it("所选文件过期后保留日期供用户重新选择，目录刷新不隐式切换", async () => {
+  it("同一天的不同实例各自请求，切换实例不会复用旧页面", async () => {
     await mount();
-    mocks.dates.mockResolvedValue(["20260914"]);
+    mocks.page.mockResolvedValue(page(10, "20260913", OTHER));
+    await act(async () => {
+      current.select_file(file("20260913", OTHER, false));
+    });
+    // 日期相同也不算同一文件，必须按实例重新读取。
+    expect(mocks.page).toHaveBeenLastCalledWith(
+      { date: "20260913", instance: OTHER, direction: "latest" },
+      expect.any(AbortSignal),
+    );
+    expect(current.file).toEqual(file("20260913", OTHER, false));
+    expect(current.entries.map((entry) => entry.instance)).toEqual([OTHER]);
+  });
+
+  it("所选文件过期后保留选择供用户重新选择，目录刷新不隐式切换", async () => {
+    await mount();
+    mocks.files.mockResolvedValue([file("20260914")]);
     mocks.page.mockResolvedValue({
       status: "expired",
       entries: [],
@@ -149,8 +173,8 @@ describe("useLogPages", () => {
       await vi.advanceTimersByTimeAsync(LOG_POLL_INTERVAL_MS);
     });
     expect(current.expired).toBe(true);
-    expect(current.date).toBe("20260913");
-    expect(current.dates).toEqual(["20260914"]);
+    expect(current.file?.date).toBe("20260913");
+    expect(current.files).toEqual([file("20260914")]);
     expect(current.entries).toEqual([]);
   });
   it("历史加载失败只提示 Toast，保留游标等待下一次滚动重试", async () => {
@@ -178,7 +202,12 @@ describe("useLogPages", () => {
       current.load_older();
     });
     expect(mocks.page).toHaveBeenLastCalledWith(
-      { date: "20260913", direction: "before", cursor: page(10).before },
+      {
+        date: "20260913",
+        instance: INSTANCE,
+        direction: "before",
+        cursor: page(10).before,
+      },
       expect.any(AbortSignal),
     );
     expect(current.entries.map((entry) => entry.line)).toEqual([1, 10]);
@@ -259,10 +288,10 @@ describe("useLogPages", () => {
     return <div>{current.entries.map((entry) => entry.id).join(",")}</div>;
   }
   /** 挂载 Hook 并隔离计时器、可见性与 API 响应。 */
-  async function mount(available_dates = ["20260913", "20260912"]): Promise<void> {
+  async function mount(available: LogFileRef[] = [file("20260913"), file("20260912")]): Promise<void> {
     vi.useFakeTimers();
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
-    mocks.dates.mockResolvedValue(available_dates);
+    mocks.files.mockResolvedValue(available);
     mocks.page.mockResolvedValue(page(10));
     container = document.createElement("div");
     document.body.append(container);
@@ -292,7 +321,7 @@ describe("useLogPages", () => {
       await vi.advanceTimersByTimeAsync(LOG_POLL_INTERVAL_MS);
     });
     expect(mocks.page).toHaveBeenLastCalledWith(
-      { date: "20260913", direction: "after", cursor: page(10).after },
+      { date: "20260913", instance: INSTANCE, direction: "after", cursor: page(10).after },
       expect.any(AbortSignal),
     );
     await act(async () => {
@@ -315,7 +344,7 @@ describe("useLogPages", () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
     expect(mocks.page).toHaveBeenLastCalledWith(
-      { date: "20260913", direction: "after", cursor: page(20).after },
+      { date: "20260913", instance: INSTANCE, direction: "after", cursor: page(20).after },
       expect.any(AbortSignal),
     );
   });
@@ -333,7 +362,12 @@ describe("useLogPages", () => {
       current.load_older();
     });
     expect(mocks.page).toHaveBeenLastCalledWith(
-      { date: "20260913", direction: "before", cursor: page(10).before },
+      {
+        date: "20260913",
+        instance: INSTANCE,
+        direction: "before",
+        cursor: page(10).before,
+      },
       expect.any(AbortSignal),
     );
     expect(current.entries.map((entry) => entry.line)).toEqual([1, 10]);
@@ -350,12 +384,12 @@ describe("useLogPages", () => {
       current.refresh();
     });
     expect(mocks.page).toHaveBeenLastCalledWith(
-      { date: "20260913", direction: "latest" },
+      { date: "20260913", instance: INSTANCE, direction: "latest" },
       expect.any(AbortSignal),
     );
   });
 
-  it("切换日期取消旧请求，忽略迟到结果，卸载取消新请求", async () => {
+  it("切换文件取消旧请求，忽略迟到结果，卸载取消新请求", async () => {
     await mount();
     let finish: ((result: LogPage) => void) | undefined;
     mocks.page.mockImplementationOnce(
@@ -370,7 +404,7 @@ describe("useLogPages", () => {
     const old_signal = mocks.page.mock.calls.at(-1)![1] as AbortSignal;
     mocks.page.mockResolvedValue(page(30, "20260912"));
     await act(async () => {
-      current.select_date("20260912");
+      current.select_file(file("20260912"));
     });
     expect(old_signal.aborted).toBe(true);
     await act(async () => {

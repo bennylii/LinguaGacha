@@ -55,6 +55,49 @@ describe("preview_quality_rule_import", () => {
     ]);
   });
 
+  it("重复合并更新非空 evidence，并保留旧导入文件对应的已有证据", () => {
+    const with_evidence = preview_quality_rule_import({
+      rule_type: QualityRuleImportRuleTypeValue.GLOSSARY,
+      existing: [
+        {
+          src: "艾琳",
+          dst: "Erin",
+          info: "角色名",
+          evidence: "旧来源",
+          case_sensitive: false,
+        },
+      ],
+      incoming: [
+        {
+          src: "艾琳",
+          dst: "Eileen",
+          info: "角色名",
+          evidence: "新来源",
+          case_sensitive: false,
+        },
+      ],
+    });
+    expect(with_evidence.overwrite_entries[0]).toMatchObject({ evidence: "新来源" });
+
+    const legacy_import = preview_quality_rule_import({
+      rule_type: QualityRuleImportRuleTypeValue.GLOSSARY,
+      existing: [
+        {
+          src: "艾琳",
+          dst: "Erin",
+          info: "角色名",
+          evidence: "旧来源",
+          case_sensitive: false,
+        },
+      ],
+      incoming: [{ src: "艾琳", dst: "Eileen", info: "角色名", case_sensitive: false }],
+    });
+    expect(legacy_import.overwrite_entries[0]).toMatchObject({
+      dst: "Eileen",
+      evidence: "旧来源",
+    });
+  });
+
   it("旧目标为空时将重复分类为 existing-target-empty", () => {
     const preview = preview_quality_rule_import({
       rule_type: QualityRuleImportRuleTypeValue.GLOSSARY,

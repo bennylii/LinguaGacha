@@ -8,6 +8,22 @@ import { script_path, read_rgss_game, discover_rgss_source } from "./source";
 import { read_game_container } from "../shared/game/format";
 import { write_zip } from "../../../test/zip-fixture";
 
+it("通过目录或 EXE 发现归档，配置和归档不能作为入口", () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-rgss-input-"));
+  const native = new NativeFs();
+  const ini = path.join(temp.path, "Game.ini");
+  const archive = path.join(temp.path, "Game.rgss3a");
+  fs.writeFileSync(ini, "[Game]\nScripts=Data/Scripts.rvdata2");
+  fs.writeFileSync(archive, rgss_archive_fixture(3, new Map()));
+  const game = discover_rgss_source(temp.path, native);
+  expect(game).toEqual({ root: temp.path, version: "ace", archive: "Game.rgss3a" });
+  const exe = path.join(temp.path, "Game.EXE");
+  fs.writeFileSync(exe, "");
+  expect(discover_rgss_source(exe, native)).toEqual(game);
+  expect(discover_rgss_source(ini, native)).toBeNull();
+  expect(discover_rgss_source(archive, native)).toBeNull();
+});
+
 it.each(["read", "decode", "header", "missing"])("RGSS %s 失败保留候选与具体原因", (failure) => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-rgss-discovery-"));
   const root = path.join(temp.path, "game");
@@ -52,7 +68,7 @@ it.each(["../Scripts.rvdata2", "C:\\Scripts.rvdata2", "Data/Scripts.rxdata"])(
     expect(() => script_path(Buffer.from("[Game]\nScripts=" + value), "ace")).toThrow();
   },
 );
-it("容器版本由原稿核对，混合版本不能继续解析", async () => {
+it("容器按当前系统确定代际，附带旧代际资源仍可保留", async () => {
   const { members: files } = await read_game_container(
     await write_zip(
       new Map([
@@ -63,5 +79,5 @@ it("容器版本由原稿核对，混合版本不能继续解析", async () => {
     ),
     "game.zip",
   );
-  await expect(read_rgss_game(files)).rejects.toThrow("Mixed RGSS");
+  await expect(read_rgss_game(files)).resolves.toMatchObject({ version: "ace" });
 });

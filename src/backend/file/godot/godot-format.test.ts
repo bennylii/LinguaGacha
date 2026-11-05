@@ -1,7 +1,9 @@
+import { GameDirectoryOperations } from "../shared/game/game-directory-operations";
 import JSZip from "jszip";
 import { expect, it } from "vitest";
 import {
   create_godot_fixture,
+  godot_nested_scene_fixture,
   godot_project_fixture,
   build_resource,
 } from "../../../test/godot-fixture";
@@ -13,10 +15,12 @@ import { read_translation } from "./translation";
 import { read_project } from "./project";
 import { read_gdsc } from "./gdsc";
 import { resource_string, read_resource } from "./resource";
+import { read_scene, scene_strings } from "./scene";
 import { read_po } from "./po";
 import { variant_strings } from "./variant";
 import { u32 } from "./binary";
 
+/** 用真实 ZIP 成员创建本次容器操作的处理器。 */
 async function handler_for(files: ReadonlyMap<string, Buffer>) {
   const zip = new JSZip();
   for (const [name, bytes] of files) zip.file(name, bytes);
@@ -29,7 +33,11 @@ it.each(["4.3", "4.6"])(
     const files = create_godot_fixture(engine),
       zip = new JSZip();
     for (const [name, bytes] of files) zip.file(name, bytes);
-    const format = new GameFormat(create_godot_adapter(), new NativeFs());
+    const format = new GameFormat(
+      new GameDirectoryOperations(),
+      create_godot_adapter(),
+      new NativeFs(),
+    );
     const result = await format.read_from_stream(
       await zip.generateAsync({ type: "uint8array" }),
       "game.zip",
@@ -51,7 +59,9 @@ it.each(["4.3", "4.6"])(
       { ...item, status: "PROCESSED", dst: "中文译文" },
     ]);
     expect(
-      read_translation(Buffer.from(output)).slots.some((slot) => slot.text === "中文译文"),
+      read_translation(read_resource(Buffer.from(output))).slots.some(
+        (slot) => slot.text === "中文译文",
+      ),
     ).toBe(true);
     expect(
       Buffer.from(await handler.render(original, "messages.translation", [])).equals(original),
@@ -115,7 +125,11 @@ it.each(["broken", "empty-hash"])("语言表 %s 独立处理，正常成员仍�
   ]);
   const zip = new JSZip();
   for (const [name, bytes] of files) zip.file(name, bytes);
-  const format = new GameFormat(create_godot_adapter(), new NativeFs());
+  const format = new GameFormat(
+    new GameDirectoryOperations(),
+    create_godot_adapter(),
+    new NativeFs(),
+  );
   const parsed = await format.read_from_stream(
     await zip.generateAsync({ type: "uint8array" }),
     "game.zip",
@@ -232,4 +246,48 @@ it.each([
   expect(after.properties.find((property) => property.name === metadata.name)!.value.value).toEqual(
     metadata.value.value,
   );
+});
+
+it("两种场景坐标均可导出，人工放行与重复坐标、NUL 边界一致", async () => {
+  const files = new Map([
+    ["scene.scn", create_godot_fixture().get("scene.scn")!],
+    ["nested.scn", godot_nested_scene_fixture()],
+  ]);
+  const handler = await handler_for(files);
+  for (const [file, bytes] of files) {
+    const parsed = await handler.read_file(bytes, file);
+    const items = parsed.items
+      .filter((item) => {
+        const loc = read_godot_metadata(item.extra_field).location;
+        return (loc.kind === "scene" || loc.kind === "scene_value") && loc.node === 1;
+      })
+      .map((item) => ({ ...item, status: "PROCESSED" as const, dst: `译文 ${item.src}` }));
+    const after = read_scene(read_resource(Buffer.from(await handler.render(bytes, file, items))));
+    const strings = [...scene_strings(after.properties[0]!)].map((s) => s.value.value);
+    for (const item of items) expect(strings).toContain(item.dst);
+    const item = items[0]!;
+    for (const invalid of [[item, item], [{ ...item, dst: "a\0b" }], [{ ...item, src: "stale" }]])
+      await expect(handler.render(bytes, file, invalid)).rejects.toMatchObject({
+        code: "file.invalid_structure",
+      });
+    // 旧坐标与偏移坐标若指向同一个标量，也必须拒绝重复修改。
+    if (file === "scene.scn") {
+      const metadata = read_godot_metadata(item.extra_field);
+      const value = read_scene(read_resource(bytes)).properties[0]!.value;
+      await expect(
+        handler.render(bytes, file, [
+          item,
+          {
+            ...item,
+            extra_field: {
+              godot: {
+                ...metadata,
+                location: { kind: "scene_value", node: 1, property: "text", offset: value.start },
+              },
+            },
+          },
+        ]),
+      ).rejects.toMatchObject({ code: "file.invalid_structure" });
+    }
+  }
 });

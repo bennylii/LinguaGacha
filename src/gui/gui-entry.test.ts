@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 
 import type { BackendRuntimeReady } from "../shared/backend-runtime";
+import { WORKER_STOP_TIMEOUT_MS } from "../shared/shutdown-timing";
 import type { DesktopUpdateServiceOptions } from "./shell/desktop-update-service";
 import type { DesktopIpcHandlerOptions } from "./shell/desktop-ipc-host";
 import { run_gui_entry } from "./gui-entry";
@@ -14,6 +15,8 @@ const mocks = vi.hoisted(() => {
     apiBaseUrl: "http://127.0.0.1:4567",
     berserkerUpdateRootDir: "E:/userdata/berserker",
     appVersion: "1.2.3",
+    logDir: "E:/userdata/log",
+    networkProxy: { mode: "proxy", address: "127.0.0.1:6789" },
   };
   const backend_start = vi.fn(async () => ready);
   const backend_stop = vi.fn(async () => undefined);
@@ -67,7 +70,9 @@ const mocks = vi.hoisted(() => {
     dispose_pdf,
     app_exit: vi.fn(),
     app_quit: vi.fn(),
+    configure_proxy: vi.fn(async (): Promise<void> => undefined),
     resolve_proxy: vi.fn(async () => "DIRECT"),
+    set_proxy: vi.fn(async () => undefined),
     session_fetch: vi.fn(async () => new Response()),
     open_path: vi.fn(async () => ""),
     show_save_dialog: vi.fn(),
@@ -95,7 +100,11 @@ vi.mock("electron", () => ({
   },
   BrowserWindow: { getAllWindows: vi.fn(() => []) },
   session: {
-    defaultSession: { fetch: mocks.session_fetch, resolveProxy: mocks.resolve_proxy },
+    defaultSession: {
+      fetch: mocks.session_fetch,
+      resolveProxy: mocks.resolve_proxy,
+      setProxy: mocks.set_proxy,
+    },
   },
   shell: { openPath: mocks.open_path },
   dialog: { showSaveDialog: mocks.show_save_dialog },
@@ -103,6 +112,7 @@ vi.mock("electron", () => ({
 vi.mock("../native/pdf-host", () => ({
   create_pdf_host: () => Object.assign(vi.fn(), { dispose: mocks.dispose_pdf }),
 }));
+vi.mock("../native/app-proxy", () => ({ configure_app_proxy: mocks.configure_proxy }));
 vi.mock("./runtime/backend-runtime-client", () => ({
   BackendRuntimeClient: mocks.BackendRuntimeClient,
 }));
@@ -140,6 +150,38 @@ describe("run_gui_entry", () => {
     mocks.backend_start.mockResolvedValue(mocks.ready);
     mocks.backend_stop.mockResolvedValue(undefined);
     mocks.dispose_pdf.mockResolvedValue(undefined);
+    mocks.configure_proxy.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("等待代理配置完成才启动 Backend", async () => {
+    const configured = Promise.withResolvers<void>();
+    mocks.configure_proxy.mockReturnValueOnce(configured.promise);
+    run_gui_entry({
+      desktopBundleDir: "E:/app/dist-electron",
+      backendRuntimeWorkerEntryUrl: new URL("file:///worker.js"),
+    });
+    await vi.waitFor(() => expect(mocks.configure_proxy).toHaveBeenCalledOnce());
+    expect(mocks.backend_start).not.toHaveBeenCalled();
+    configured.resolve();
+    await vi.waitFor(() => expect(mocks.create_main_window).toHaveBeenCalledOnce());
+  });
+
+  it("代理配置失败阻止 Backend 启动并显示启动错误", async () => {
+    mocks.configure_proxy.mockRejectedValueOnce(new Error("LG_PROXY invalid"));
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    run_gui_entry({
+      desktopBundleDir: "E:/app/dist-electron",
+      backendRuntimeWorkerEntryUrl: new URL("file:///worker.js"),
+    });
+    await vi.waitFor(() => expect(mocks.app_exit).toHaveBeenCalledWith(1));
+    expect(mocks.backend_start).not.toHaveBeenCalled();
+    expect(mocks.create_main_window).not.toHaveBeenCalled();
+    expect(mocks.show_native_error).toHaveBeenCalledWith(
+      "LinguaGacha 启动失败",
+      "LG_PROXY invalid",
+    );
+    expect(stderr).toHaveBeenCalledWith("[startup] LG_PROXY invalid\n");
+    expect(mocks.dispose_pdf).toHaveBeenCalledOnce();
   });
 
   it("Backend ready 后以 Electron 默认会话装配更新器、IPC 和窗口", async () => {
@@ -151,6 +193,17 @@ describe("run_gui_entry", () => {
     });
     await vi.waitFor(() => expect(mocks.create_main_window).toHaveBeenCalledOnce());
 
+    expect(mocks.set_proxy).toHaveBeenCalledWith({
+      mode: "fixed_servers",
+      proxyRules: "127.0.0.1:6789",
+      proxyBypassRules: "localhost,127.0.0.1,[::1]",
+    });
+    expect(mocks.set_proxy.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mocks.backend_start.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(mocks.set_proxy.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.create_main_window.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     expect(mocks.backend_instances[0]).toMatchObject({
       workerEntryUrl: worker_url,
       appRoot: process.cwd(),
@@ -181,6 +234,30 @@ describe("run_gui_entry", () => {
       readAppLanguage: () => Promise<unknown>;
     };
     await expect(ipc_options.readAppLanguage()).resolves.toBe("ZH");
+  });
+
+  it.each([
+    ["system", { mode: "system" as const, address: "127.0.0.1:6789" }, { mode: "system" }],
+    [
+      "proxy",
+      { mode: "proxy" as const, address: "10.0.0.5:1080" },
+      {
+        mode: "fixed_servers",
+        proxyRules: "10.0.0.5:1080",
+        proxyBypassRules: "localhost,127.0.0.1,[::1]",
+      },
+    ],
+    ["direct", { mode: "direct" as const, address: "127.0.0.1:6789" }, { mode: "direct" }],
+  ])("按 ready 的 %s 代理模式配置默认会话", async (_name, networkProxy, expected) => {
+    mocks.backend_start.mockResolvedValueOnce({ ...mocks.ready, networkProxy });
+
+    run_gui_entry({
+      desktopBundleDir: "E:/app/dist-electron",
+      backendRuntimeWorkerEntryUrl: new URL("file:///backend-runtime-worker-entry.js"),
+    });
+    await vi.waitFor(() => expect(mocks.create_main_window).toHaveBeenCalledOnce());
+
+    expect(mocks.set_proxy).toHaveBeenCalledExactlyOnceWith(expected);
   });
 
   it("宿主打开目录并用主窗口弹出保存对话框，回传选择和取消", async () => {
@@ -251,6 +328,29 @@ describe("run_gui_entry", () => {
     expect(mocks.backend_stop.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.app_exit.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
+  });
+
+  it("退出卡死时在时限后强制结束进程并留下追踪", async () => {
+    mocks.backend_stop.mockReturnValueOnce(new Promise<never>(() => undefined));
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    run_gui_entry({
+      desktopBundleDir: "E:/app/dist-electron",
+      backendRuntimeWorkerEntryUrl: new URL("file:///worker.js"),
+    });
+    await vi.waitFor(() => expect(mocks.create_main_window).toHaveBeenCalledOnce());
+    vi.useFakeTimers();
+    try {
+      mocks.app_listeners.get("before-quit")?.({ preventDefault: vi.fn() });
+      await vi.advanceTimersByTimeAsync(WORKER_STOP_TIMEOUT_MS);
+      expect(mocks.app_exit).toHaveBeenCalledWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // 退出超时不再弹同步原生框，否则会连带阻塞事件循环与看门狗。
+    expect(mocks.show_native_error).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('"timed_out":true'));
+    expect(mocks.app_exit).toHaveBeenCalledWith(1);
   });
 
   it("更新等待业务收尾，重复退出不能提前结束应用", async () => {

@@ -1,0 +1,18 @@
+.function-settings-page {
+  min-height: 100%;
+}
+
+.function-settings-page__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-list-gap-dense);
+}
+
+.function-settings-page__number-field {
+  display: flex;
+  align-items: center;
+}
+
+.function-settings-page__save-location-row .setting-card-row__description {
+  white-space: pre-line;
+}

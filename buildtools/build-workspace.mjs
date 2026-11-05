@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, copyFile } from "node:fs/promises";
 import { builtinModules } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,12 @@ import { deploy_workspace_dependencies } from "./workspace-dependencies.mjs";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const output = path.resolve(process.argv[2] ?? path.join(root, "build/resources/workspace")); // 测试可在仓库外使用同一部署流程
 await deploy_workspace_dependencies(root, output);
+await mkdir(path.join(output, "python"), { recursive: true });
+for (const name of ["tree-sitter-python.wasm", "LICENSE"])
+  await copyFile(
+    path.join(root, "node_modules/tree-sitter-python", name),
+    path.join(output, "python", name),
+  );
 
 await build_package(
   "@lg/workspace",
@@ -15,11 +21,13 @@ await build_package(
     bootstrap: "src/backend/agent/workspace/runtime/bootstrap.ts",
     "item-contexts": "src/backend/agent/workspace/runtime/item-contexts.ts",
     "page-updates": "src/backend/agent/workspace/page-updates.ts",
+    "term-search": "src/backend/agent/workspace/runtime/term-search.ts",
   },
   {
     "./bootstrap": "./bootstrap.mjs",
     "./item-contexts": "./item-contexts.mjs",
     "./page-updates": "./page-updates.mjs",
+    "./term-search": "./term-search.mjs",
   },
   ["mupdf"],
 );

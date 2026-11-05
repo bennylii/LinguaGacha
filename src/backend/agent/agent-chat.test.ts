@@ -288,7 +288,7 @@ async function project() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lg-chat-"));
   roots.push(root);
   const file = path.join(root, "project.lg");
-  const database = new ProjectDatabase();
+  const database = new ProjectDatabase("1.0.0");
   await database.create_project(file, "持久化");
   return { database, file };
 }
@@ -317,8 +317,12 @@ async function open(store: AgentChatStorage) {
   });
   return { chat, provider, models, append };
 }
-/** 经产品轮次入口提交并结算，供内存与磁盘场景共用。 */
-async function talk(chat: AgentChat, text: string) {
+/** 经产品轮次入口提交并运行，结算由调用方决定。 */
+async function start_round(
+  chat: AgentChat,
+  text: string,
+  delivery: "round" | "auto_continue" = "round",
+) {
   const execution: AgentExecution = {
     controller: new AbortController(),
     stop_reason: null,
@@ -338,13 +342,38 @@ async function talk(chat: AgentChat, text: string) {
     { text, attachments: [] },
     { text, images: [] },
     execution,
-    "round",
+    delivery,
   );
   await chat.run(input, execution);
-  await chat.finish_round(execution, "success", null);
+  return execution;
+}
+
+/** 经产品轮次入口提交并结算，供内存与磁盘场景共用。 */
+async function talk(chat: AgentChat, text: string) {
+  const execution = await start_round(chat, text);
+  await chat.finish_round(execution, "success", null, null);
   chat.execution = null;
   return execution;
 }
+
+it("失败轮次保存原因摘要，后续成功结算清空", async () => {
+  const { chat, provider } = await create_chat();
+  provider.setResponses([fauxAssistantMessage("回答"), fauxAssistantMessage("再答")]);
+  const failure = { status: 400, detail: "Upstream request failed: [security_audit_fail]" };
+  const execution = await start_round(chat, "第一问");
+  await chat.finish_round(execution, "error", null, failure);
+  expect(chat.state.rounds[execution.roundId!]).toMatchObject({ status: "error", failure });
+  expect(chat.entries.find((entry) => entry.kind === "user_message")).toMatchObject({
+    status: "error",
+    failure,
+  });
+
+  chat.execution = null;
+  const next = await start_round(chat, "第二问");
+  await chat.finish_round(next, "success", null, null);
+  expect(chat.state.rounds[next.roundId!]).toMatchObject({ status: "success", failure: null });
+  chat.execution = null;
+});
 
 it("既有身份重开恢复历史，无模型时可修订助手，后续请求采用修订内容", async () => {
   const { database, file } = await project();
@@ -451,6 +480,7 @@ it("压缩状态依赖 SDK 任务，重开保留起始时间、身份顺序和�
       expect(entry).toEqual({
         kind: "context_compaction",
         id: expect.any(String),
+        roundId: expect.any(String),
         status: "success",
         createdAt: expect.any(Number),
       });
@@ -551,6 +581,7 @@ it("遗留工具任务只执行 SDK 取消收尾，恢复后保留公开工具�
         status: "running",
         endedAt: null,
         averageTokensPerSecond: null,
+        failure: null,
       };
     },
   });
@@ -618,10 +649,69 @@ it("完整轮次分叉保留前缀，清空后续意图并拒绝旧分支目标"
   await expect(chat.fork_round(later.id)).rejects.toThrow();
 });
 
-it("用户修订在 SDK 受理后切换历史，采用本次模型与思考等级", async () => {
+it("自动继续提交新建轮次并记录 continue 运行日志", async () => {
+  const { chat, provider, append } = await create_chat();
+  provider.setResponses([fauxAssistantMessage("第一答"), fauxAssistantMessage("继续答")]);
+  await talk(chat, "第一问");
+
+  const execution = await start_round(chat, "继续", "auto_continue");
+  await chat.finish_round(execution, "success", null, null);
+  chat.execution = null;
+
+  const rounds = chat.entries.filter((entry) => entry.kind === "user_message");
+  expect(rounds).toHaveLength(2);
+  expect(rounds[0]).toMatchObject({ text: "第一问", delivery: "round" });
+  expect(rounds[1]).toMatchObject({ text: "继续", delivery: "auto_continue", status: "success" });
+  expect(execution.roundId).toBe(rounds[1]!.id);
+  expect(chat.state.rounds[execution.roundId!]).toMatchObject({ status: "success" });
+  const run_start = append.mock.calls
+    .map(([payload]) => payload.content)
+    .findLast((content) => content.event === "run_start");
+  expect(run_start).toMatchObject({ mode: "continue" });
+});
+
+it("自动继续轮次允许编辑并作为分叉前缀", async () => {
   const { chat, provider } = await create_chat();
-  provider.setResponses([fauxAssistantMessage("原答"), fauxAssistantMessage("新答")]);
+  provider.setResponses([fauxAssistantMessage("第一答"), fauxAssistantMessage("继续答")]);
+  await talk(chat, "第一问");
+  const execution = await start_round(chat, "继续", "auto_continue");
+  await chat.finish_round(execution, "success", null, null);
+  chat.execution = null;
+  const auto_round = chat.entries.findLast((entry) => entry.kind === "user_message")!;
+  expect(auto_round).toMatchObject({ delivery: "auto_continue" });
+
+  // 编辑自动继续轮次与普通轮次共用候选分支，提交前不改动活动历史。
+  await chat.change((state) => {
+    state.commands.revision = {
+      kind: "revise",
+      request: {},
+      status: "pending",
+      conversationId: null,
+      requestId: null,
+    };
+  });
+  const active = chat.state.activeConversationId;
+  await chat.revise_user(auto_round, provider.getModel(), "off", "revision");
+  expect(chat.state.activeConversationId).toBe(active);
+  expect(chat.state.commands.revision!.conversationId).not.toBeNull();
+
+  // 自动继续轮次属于可保留的完整前缀，分叉普通轮次会一并截断它之后的历史。
+  await chat.fork_round(chat.entries[0]!.id);
+  expect(chat.entries.filter((entry) => entry.kind === "user_message")).toHaveLength(1);
+});
+
+it("压缩后修订早期输入在受理时切换历史与旧意图，并采用本次模型配置", async () => {
+  const { chat, provider } = await create_chat();
+  provider.setResponses([fauxAssistantMessage("原答")]);
   await talk(chat, "原问");
+  provider.setResponses([
+    fauxAssistantMessage("待移除回答一"),
+    fauxAssistantMessage("待移除回答二"),
+    fauxAssistantMessage("待移除摘要"),
+  ]);
+  await talk(chat, "历史内容 ".repeat(16_000));
+  const previous = await talk(chat, "后续内容 ".repeat(16_000));
+  expect(await chat.compact("manual", previous)).toEqual({ status: "success" });
   const before = structuredClone(chat.entries);
   const active = chat.state.activeConversationId;
   await chat.change((state) => {
@@ -632,7 +722,9 @@ it("用户修订在 SDK 受理后切换历史，采用本次模型与思考等�
       conversationId: null,
       requestId: null,
     };
+    state.doing = "旧任务";
   });
+  await chat.change_queue((queue) => queue.enqueue({ text: "旧队列", attachments: [] }));
   const replacement = fauxProvider({
     models: [{ id: "replacement", reasoning: true, contextWindow: 256_000 }],
   });
@@ -642,6 +734,7 @@ it("用户修订在 SDK 受理后切换历史，采用本次模型与思考等�
   await chat.revise_user(before[0]!, replacement.getModel(), "high", "revision");
   expect(chat.state.activeConversationId).toBe(active);
   expect(chat.entries).toEqual(before);
+  expect(chat.state.doing).toBe("旧任务");
   const execution: AgentExecution = {
     controller: new AbortController(),
     stop_reason: null,
@@ -666,12 +759,20 @@ it("用户修订在 SDK 受理后切换历史，采用本次模型与思考等�
   );
   expect(chat.state.commands.revision!.status).toBe("accepted");
   expect(chat.state.activeConversationId).not.toBe(active);
+  expect(chat.state.doing).toBeNull();
+  expect(chat.queue.read_snapshot(false).items).toEqual([]);
   await chat.run(accepted, execution);
-  await chat.finish_round(execution, "success", null);
+  await chat.finish_round(execution, "success", null, null);
   chat.execution = null;
   expect(respond).toHaveBeenCalledOnce();
   expect(respond.mock.calls[0]![1]?.reasoning).toBe("high");
   expect(respond.mock.calls[0]![3].id).toBe("replacement");
+  const context = JSON.stringify(respond.mock.calls[0]![0].messages);
+  expect(context).toContain("新问");
+  expect(context).not.toContain("原问");
+  expect(context).not.toContain("待移除");
+  expect(context).not.toContain("历史内容");
+  expect(context).not.toContain("后续内容");
   expect(chat.entries).toMatchObject([{ text: "新问" }, { parts: [{ text: "新答" }] }]);
 });
 
@@ -693,7 +794,9 @@ it.each([false, true])("SQLite 重开按修订输入回执恢复分支：已受�
       conversationId: null,
       requestId: null,
     };
+    state.doing = "旧任务";
   });
+  await first.chat.change_queue((queue) => queue.enqueue({ text: "旧队列", attachments: [] }));
   await first.chat.revise_user(original[0]!, first.provider.getModel(), "off", "revision");
   if (admitted) {
     execution.commandId = "revision";
@@ -722,6 +825,10 @@ it.each([false, true])("SQLite 重开按修订输入回执恢复分支：已受�
   try {
     expect(restored.chat.state.commands.revision!.status).toBe(admitted ? "accepted" : "cancelled");
     expect(restored.chat.entries[0]).toMatchObject({ text: admitted ? "新问" : "原问" });
+    expect(restored.chat.state.doing).toBe(admitted ? null : "旧任务");
+    expect(restored.chat.queue.read_snapshot(false).items.map((item) => item.text)).toEqual(
+      admitted ? [] : ["旧队列"],
+    );
     expect(restored.provider.state.callCount).toBe(0);
   } finally {
     await restored.chat.close();

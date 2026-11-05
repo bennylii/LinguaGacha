@@ -14,17 +14,22 @@ vi.mock("@frontend/app/locale/locale-context", () => ({
   useI18n: () => ({ t: (key: string) => key }),
 }));
 
-type RoundEntry = Extract<AgentEntry, { delivery: "round" }>;
+type RoundEntry = Extract<
+  AgentEntry,
+  { kind: "user_message"; delivery: "round" | "auto_continue" }
+>;
 const running: RoundEntry = {
   kind: "user_message",
   delivery: "round",
   id: "current",
+  roundId: "current",
   text: "开始",
   attachments: [],
   status: "running",
   createdAt: 0,
   endedAt: null,
   averageTokensPerSecond: null,
+  failure: null,
 };
 let root: Root;
 let container: HTMLDivElement;

@@ -37,6 +37,26 @@ export function load_agent_personality(
   );
 }
 
+type AgentCompletionJudgePromptPaths = Pick<
+  AppPathService,
+  "get_agent_completion_judge_prompt_path"
+>;
+
+/**
+ * 读取内置的完成度判定指令；自动继续默认关闭，指令缺失只让该功能不可用，
+ * 不阻断 Agent 启动，调用方负责记录原因。
+ */
+export function load_agent_completion_judge_prompt(
+  paths: AgentCompletionJudgePromptPaths,
+  native_fs: AgentSystemPromptNativeFs = default_native_fs,
+): string | null {
+  try {
+    return load_prompt(paths.get_agent_completion_judge_prompt_path(), native_fs);
+  } catch {
+    return null;
+  }
+}
+
 /** 默认人格和系统模板共用资源校验，读取失败保留路径与原始异常。 */
 function load_prompt(file_path: string, native_fs: AgentSystemPromptNativeFs): string {
   let system_prompt: string;

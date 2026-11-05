@@ -16,6 +16,7 @@ import {
   LiveDoc,
   UsageDoc,
   type Conversation,
+  type ConversationId,
   type EntryId,
   type Submission,
   type TaskId,
@@ -37,10 +38,12 @@ import type {
   AgentContextSnapshot,
   AgentEntry,
   AgentMessageInput,
+  AgentRunFailure,
   AgentUsageSnapshot,
   AgentEntryStatus,
 } from "../../shared/agent";
 import type { RuntimeLease } from "../runtime-operation-gate";
+import { create_agent_model_error, describe_run_failure } from "./agent-run-failure";
 import { AGENT_COMPACTION_RESERVE_TOKENS } from "../../domain/model-agent";
 import { AppError } from "../../shared/error";
 import type { PreparedAgentMessage } from "./agent-message-input";
@@ -50,10 +53,11 @@ import {
   AGENT_INPUT_ENTRY_KIND,
   read_agent_input,
   type AgentChatData,
+  type AgentInputDelivery,
   type AgentInputRecord,
 } from "./agent-chat-data";
 import { read_agent_compaction_result, type AgentCompactionResult } from "./agent-compaction";
-import { AgentChatView, assistant_entry_id } from "./agent-chat-view";
+import { AgentChatView, assistant_entry_id, slim_entry_record } from "./agent-chat-view";
 import { AgentContextBudget, read_agent_chat_context } from "./agent-chat-context";
 import { append_agent_chat_seed, type AgentChatSeed } from "./agent-chat-seed";
 import { AgentRuntimeLog, type AgentStopReason } from "./agent-runtime-log";
@@ -70,6 +74,25 @@ type SubmittedInput = {
   input: AgentInputRecord;
   prepared: PreparedAgentMessage;
 };
+/** 轮次分叉与用户修订共用事务内更新，避免旧意图进入新分支。 */
+function switch_branch(state: AgentChatData, conversationId: ConversationId): void {
+  state.activeConversationId = conversationId;
+  state.queue = { items: [], paused: false };
+  state.doing = null;
+}
+
+/** 正常受理与回执恢复共用状态更新。调用者只提交首次受理。 */
+function accept_input_command(
+  state: AgentChatData,
+  commandId: string,
+  conversationId: ConversationId,
+): void {
+  const command = state.commands[commandId]!;
+  command.status = "accepted";
+  // 助手修订直接提交历史，只有用户修订经过 SDK 输入受理。
+  if (command.kind === "revise") switch_branch(state, conversationId);
+}
+
 /** 唯一执行对象同时承担迟到身份校验和资源所有权，恢复时沿用同一租约。 */
 export type AgentExecution = {
   readonly controller: AbortController;
@@ -146,6 +169,13 @@ export class AgentChat {
   private constructor(private readonly options: ChatOptions) {
     this.models = options.models;
     this.log = options.log;
+    // 详情弹窗的完整工具输出从 SDK 存储按记录身份读回，不常驻内存。
+    // 经 readBatch 走产品队列，避免与 SDK 串行队列反向等待。
+    this.view.set_full_record_reader((id) =>
+      this.read_batch(() =>
+        this.options.storage.entry(id as EntryId, BACKGROUND_CONTEXT).then((found) => found?.entry),
+      ),
+    );
     const stream = this.models.streamSimple.bind(this.models);
     this.models.streamSimple = (model, context, request) =>
       lazyStream(model, async () => {
@@ -309,7 +339,7 @@ export class AgentChat {
     void chat.harness.closed.then((end) => {
       if (end.reason === "failed") chat.failure ??= end.error;
       if (chat.failure !== undefined) {
-        chat.view.fail_round(chat.failedRound, chat.failedAt);
+        chat.view.fail_round(chat.failedRound, chat.failedAt, describe_run_failure(chat.failure));
       }
       options.onChange();
     });
@@ -512,7 +542,7 @@ export class AgentChat {
       for (const entry of await scan((cursor) =>
         storage.scanEntries({ conversationId: conversation.id }, 100, cursor, BACKGROUND_CONTEXT),
       ))
-        this.view.records.set(entry.id, entry);
+        this.view.records.set(entry.id, slim_entry_record(entry));
     }
     for (const record of await scan((cursor) =>
       storage.scanSubmissions({}, 100, cursor, BACKGROUND_CONTEXT),
@@ -620,11 +650,9 @@ export class AgentChat {
           : await tx.submissionByRequest(saved.conversationId, saved.requestId);
       const state = await tx.doc(AgentChatDoc, this.options.chatId, null);
       const command = state.commands[commandId]!;
-      if (command.status === "pending") {
-        command.status = submission === undefined ? "cancelled" : "accepted";
-        if (submission !== undefined && command.kind === "revise")
-          state.activeConversationId = submission.conversationId;
-      }
+      if (command.status !== "pending") return;
+      if (submission === undefined) command.status = "cancelled";
+      else accept_input_command(state, commandId, submission.conversationId);
     }, BACKGROUND_CONTEXT);
     // 未受理的候选分支退出后，后续请求重新使用已提交的活动身份。
     this.conversation = (await this.harness.conversation(
@@ -673,7 +701,7 @@ export class AgentChat {
     message: AgentMessageInput,
     prepared: PreparedAgentMessage,
     execution: AgentExecution,
-    delivery: "round" | "steer" | "hidden",
+    delivery: AgentInputDelivery,
     queuedId: string | null = null,
     commandId: string | undefined = execution.commandId,
   ): Promise<SubmittedInput> {
@@ -681,7 +709,7 @@ export class AgentChat {
     execution.controller.signal.throwIfAborted();
     const requestId = uuidv7();
     const conversation = this.conversation; // 提交意图与 SDK 调用使用同一分支
-    if (delivery === "round") {
+    if (delivery === "round" || delivery === "auto_continue") {
       execution.roundId = requestId;
       this.reset_recovery(execution);
     }
@@ -697,17 +725,21 @@ export class AgentChat {
         command.requestId = requestId;
         command.conversationId = conversation.id;
       }
-      if (delivery === "round")
+      if (delivery === "round" || delivery === "auto_continue")
         state.rounds[requestId] = {
           status: "running",
           checkpoint,
           endedAt: null,
           averageTokensPerSecond: null,
+          failure: null,
         };
     });
     execution.controller.signal.throwIfAborted();
-    if (delivery === "round")
-      this.log.begin_run(execution.roundId, queuedId === null ? "prompt" : "queued");
+    if (delivery === "round" || delivery === "auto_continue")
+      this.log.begin_run(
+        execution.roundId,
+        delivery === "auto_continue" ? "continue" : queuedId === null ? "prompt" : "queued",
+      );
     const submission = await conversation.submit(
       {
         type: "input",
@@ -719,10 +751,7 @@ export class AgentChat {
       withAbortSignal(execution.controller.signal, BACKGROUND_CONTEXT),
     );
     if (commandId !== undefined) {
-      await this.change((state) => {
-        state.commands[commandId]!.status = "accepted";
-        state.activeConversationId = conversation.id;
-      });
+      await this.change((state) => accept_input_command(state, commandId, conversation.id));
       delete execution.commandId;
     }
     const accepted = { submission, input, prepared };
@@ -832,7 +861,7 @@ export class AgentChat {
               if (result.status === "error") throw result.error;
             }
           }
-          throw new Error(
+          throw create_agent_model_error(
             typeof unanswered.detail === "string" ? unanswered.detail : unanswered.reason,
           );
         }
@@ -930,6 +959,7 @@ export class AgentChat {
     execution: AgentExecution,
     status: Extract<AgentEntryStatus, "success" | "error" | "stopped">,
     average: number | null,
+    failure: AgentRunFailure | null,
   ): Promise<void> {
     const roundId = execution.roundId;
     if (roundId === null) return;
@@ -939,6 +969,7 @@ export class AgentChat {
         round.status = status;
         round.endedAt = Date.now();
         round.averageTokensPerSecond = average;
+        round.failure = status === "error" ? failure : null;
       }
     });
   }
@@ -961,7 +992,7 @@ export class AgentChat {
       queue.cancel_send();
       queue.pause();
     });
-    await this.finish_round(execution, "stopped", average);
+    await this.finish_round(execution, "stopped", average, null);
     this.finish_recovery(execution);
     execution.steer = null;
   }
@@ -970,12 +1001,16 @@ export class AgentChat {
     const entries = this.entries;
     const index = entries.findIndex(
       (entry) =>
-        entry.kind === "user_message" && entry.delivery === "round" && entry.id === roundId,
+        entry.kind === "user_message" &&
+        (entry.delivery === "round" || entry.delivery === "auto_continue") &&
+        entry.id === roundId,
     );
     const user = entries[index];
     const nextIndex = entries.findIndex(
       (entry, position) =>
-        position > index && entry.kind === "user_message" && entry.delivery === "round",
+        position > index &&
+        entry.kind === "user_message" &&
+        (entry.delivery === "round" || entry.delivery === "auto_continue"),
     );
     const end = nextIndex < 0 ? entries.length : nextIndex;
     if (
@@ -998,9 +1033,7 @@ export class AgentChat {
         ownership: { kind: "ownerless" },
         init: async (tx, id) => {
           const state = await tx.doc(AgentChatDoc, this.options.chatId, null);
-          state.activeConversationId = id;
-          state.queue = { items: [], paused: false };
-          state.doing = null;
+          switch_branch(state, id);
           if (commandId !== undefined) state.commands[commandId]!.status = "accepted";
         },
       },
@@ -1010,14 +1043,17 @@ export class AgentChat {
     await this.flush();
   }
 
-  /** 候选分支固定本轮配置，输入受理后才替换活动历史。 */
+  /** 候选分支从目标轮次开始前分叉并固定本轮配置，输入受理后才替换活动历史。 */
   public async revise_user(
     entry: AgentEntry,
     model: Model<Api>,
     thinkingLevel: ModelThinkingLevel,
     commandId: string,
   ): Promise<void> {
-    if (entry.kind !== "user_message" || entry.delivery !== "round")
+    if (
+      entry.kind !== "user_message" ||
+      (entry.delivery !== "round" && entry.delivery !== "auto_continue")
+    )
       throw new AppError("request.validation_failed");
     this.model = model;
     this.conversation = await this.conversation.fork(

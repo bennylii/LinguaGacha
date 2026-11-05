@@ -121,6 +121,17 @@ export const de_de_agent_page = {
     copied: "Kopiert",
     follow_latest: "Neueste verfolgen",
   },
+  auto_resume: {
+    waiting: "Noch nicht abgeschlossen, automatische Fortsetzung in {seconds}s (Versuch {attempt})",
+    waiting_limited:
+      "Noch nicht abgeschlossen, automatische Fortsetzung in {seconds}s ({attempt}/{max_attempts})",
+    continuing: "Noch nicht abgeschlossen, automatische Fortsetzung läuft (Versuch {attempt})",
+    cancel: "Automatische Fortsetzung abbrechen",
+  },
+  auto_continue: {
+    judging: "Es wird geprüft, ob die Aufgabe abgeschlossen ist…",
+    continuing: "Noch nicht abgeschlossen, automatische Fortsetzung läuft (Versuch {attempt})",
+  },
   editing: {
     user: "Deine Nachricht wird bearbeitet",
     assistant: "Modellantwort wird bearbeitet",
@@ -129,7 +140,6 @@ export const de_de_agent_page = {
   queue: {
     no_message_text: "Kein Nachrichtentext",
     attachments: "{count} Anhänge",
-    reorder: "Zum Sortieren ziehen",
     send_now: "Jetzt senden",
     sending: "Wird gesendet",
     delete: "Nachricht löschen",
@@ -152,6 +162,9 @@ export const de_de_agent_page = {
     details: "Werkzeugaufrufdetails für {tool}",
     input: "Eingabe",
     output: "Ausgabe",
+    loading_full: "Vollständige Ausgabe wird geladen …",
+    load_failed: "Die vollständige Ausgabe konnte nicht geladen werden.",
+    retry: "Erneut versuchen",
   },
   round: {
     running: "Wird seit {duration} verarbeitet",
@@ -159,13 +172,19 @@ export const de_de_agent_page = {
     error: "Fehlgeschlagen · {duration}",
     stopped: "Gestoppt · {duration}",
   },
+  timeline: {
+    show_earlier: "Frühere Nachrichten anzeigen",
+    show_earlier_in_round: "Frühere Nachrichten dieser Runde anzeigen",
+    loading: "Frühere Nachrichten werden geladen …",
+    retry: "Frühere Nachrichten konnten nicht geladen werden. Erneut versuchen",
+    cursor_expired: "Der Verlauf hat sich geändert. Zu den neuesten Nachrichten zurückgekehrt.",
+  },
   upload: {
     uploading: "Wird hochgeladen",
     failed: "Upload fehlgeschlagen",
   },
   file_saved: "Datei gespeichert",
   error: {
-    activate_link: "Der Link konnte nicht verarbeitet werden …",
     decision: "Die Entscheidung konnte nicht gesendet werden. Bitte erneut versuchen …",
     restore: "Die Sitzung konnte nicht wiederhergestellt werden. Bitte erneut versuchen …",
     connection: "Verbindung unterbrochen. Wiederverbindung wird abgewartet …",

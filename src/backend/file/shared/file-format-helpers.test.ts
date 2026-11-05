@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { create_item } from "../../../domain/item";
-import { group_items, split_text_lines_for_items } from "./file-format-helpers";
+import {
+  group_items,
+  has_text_line_break,
+  split_text_lines_for_items,
+} from "./file-format-helpers";
 
 describe("file-format-helpers", () => {
   it("按历史 splitlines 口径处理尾随换行", () => {
@@ -12,6 +16,13 @@ describe("file-format-helpers", () => {
       ),
     ).toEqual(["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸", "子", "丑"]);
     expect(split_text_lines_for_items("")).toEqual([]);
+  });
+
+  it("单段换行判断与 splitlines 使用同一组边界", () => {
+    expect(has_text_line_break("普通段落")).toBe(false);
+    expect(has_text_line_break("甲\r\n乙")).toBe(true);
+    expect(has_text_line_break("甲\u2028乙")).toBe(true);
+    expect(has_text_line_break("甲\x85乙")).toBe(true);
   });
 
   it("按文件类型和文件路径分组条目", () => {

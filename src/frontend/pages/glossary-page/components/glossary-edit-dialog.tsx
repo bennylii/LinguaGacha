@@ -2,6 +2,7 @@ import type { JSX } from "react";
 import { CaseSensitive } from "lucide-react";
 
 import { useI18n } from "@frontend/app/locale/locale-context";
+import { Card } from "@frontend/shadcn/card";
 import type { GlossaryDialogMode, GlossaryEntryDraft } from "@frontend/pages/glossary-page/types";
 import { BooleanSegmentedToggle } from "@frontend/widgets/boolean-segmented-toggle";
 import { AppEditor } from "@frontend/widgets/app-editor/app-editor";
@@ -41,7 +42,7 @@ export function GlossaryEditDialog(props: GlossaryEditDialogProps): JSX.Element 
     >
       <div className="glossary-page__dialog-scroll">
         <div className="glossary-page__dialog-form">
-          <div className="glossary-page__dialog-main-panel">
+          <Card variant="group" render={<div />} className="glossary-page__dialog-main-panel">
             <div className="glossary-page__dialog-main-panel-content">
               <div className="glossary-page__dialog-section">
                 <span className="glossary-page__dialog-section-title font-medium">
@@ -75,14 +76,14 @@ export function GlossaryEditDialog(props: GlossaryEditDialogProps): JSX.Element 
                 />
               </div>
 
-              <div className="glossary-page__dialog-section glossary-page__dialog-section--description">
+              <div className="glossary-page__dialog-section glossary-page__dialog-section--info">
                 <span className="glossary-page__dialog-section-title font-medium">
-                  {t("glossary_page.fields.description")}
+                  {t("glossary_page.fields.info")}
                 </span>
                 <AppEditor
                   class_name="glossary-page__dialog-editor"
                   value={props.entry.info}
-                  aria_label={t("glossary_page.fields.description")}
+                  aria_label={t("glossary_page.fields.info")}
                   read_only={disabled}
                   indent_with_tab={false}
                   on_change={(next_value) => {
@@ -90,11 +91,27 @@ export function GlossaryEditDialog(props: GlossaryEditDialogProps): JSX.Element 
                   }}
                 />
               </div>
+
+              <div className="glossary-page__dialog-section glossary-page__dialog-section--description">
+                <span className="glossary-page__dialog-section-title font-medium">
+                  {t("glossary_page.fields.evidence")}
+                </span>
+                <AppEditor
+                  class_name="glossary-page__dialog-editor"
+                  value={props.entry.evidence}
+                  aria_label={t("glossary_page.fields.evidence")}
+                  read_only={disabled}
+                  indent_with_tab={false}
+                  on_change={(next_value) => {
+                    props.on_change({ evidence: next_value });
+                  }}
+                />
+              </div>
             </div>
-          </div>
+          </Card>
 
           <div className="glossary-page__dialog-rule-grid">
-            <div className="glossary-page__dialog-rule-item">
+            <Card variant="group" render={<div />} className="glossary-page__dialog-rule-item">
               <div className="glossary-page__dialog-rule-copy">
                 <span className="glossary-page__rule-badge-wrap" aria-hidden="true">
                   <span
@@ -118,7 +135,7 @@ export function GlossaryEditDialog(props: GlossaryEditDialogProps): JSX.Element 
                   });
                 }}
               />
-            </div>
+            </Card>
           </div>
         </div>
       </div>

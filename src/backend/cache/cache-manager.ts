@@ -1,6 +1,5 @@
 import type { PDFSummary } from "../../shared/pdf";
 import { AppError } from "../../shared/error";
-import type { AppSettingService } from "../app/app-setting-service";
 import type { ProjectDatabase } from "../database/database-operations";
 import type { LogManager } from "../log/log-manager";
 import {
@@ -12,6 +11,10 @@ import type { ProjectCommittedChange } from "../project/project-committed-change
 import type { ComputeWorkerClient } from "../worker/compute-worker-client";
 import { type QualityRuleBlock } from "../../shared/quality/quality-rule-state";
 import { create_empty_project_prompts, type ProjectPrompts } from "../../domain/prompt";
+import {
+  DEFAULT_PROJECT_LANGUAGE_SETTINGS,
+  type ProjectLanguageSettings,
+} from "../../domain/project-settings";
 import { createProofreadingReader } from "../../shared/proofreading/proofreading-reader";
 import type { ProjectDataSectionRevisions } from "../../shared/project-event";
 import type { CacheFreshness, CacheReadPort, CacheSnapshot } from "./cache-types";
@@ -21,10 +24,10 @@ import { ProofreadingCache } from "./proofreading-cache";
 import { QualityRuleStatisticsCache } from "./quality-rule-statistics-cache";
 
 /**
- * CacheManager 内部的小型数据块缓存；只隔离顶层对象，嵌套 JSON 按不可变值使用。
+ * 数据块缓存只隔离顶层对象，嵌套 JSON 按不可变值使用。
  */
 class ProjectDataBlockCache<T extends object> {
-  private block: T; // 当前完整块；替换与清理均由此缓存拥有。
+  private block: T; // 当前块的替换与清理由本缓存拥有。
 
   /** 恢复钩子由组合根提供，每次读取先确认热缓存可用。 */
   public constructor(
@@ -75,6 +78,10 @@ export class CacheManager implements CacheReadPort {
     () => this.recover_if_needed(),
     create_empty_project_prompts,
   );
+  public readonly languages = new ProjectDataBlockCache<ProjectLanguageSettings>(
+    () => this.recover_if_needed(),
+    () => DEFAULT_PROJECT_LANGUAGE_SETTINGS,
+  );
 
   public readonly proofreading: ProofreadingCache;
   public readonly qualityStatistics: QualityRuleStatisticsCache;
@@ -85,14 +92,12 @@ export class CacheManager implements CacheReadPort {
   public constructor(options: {
     database: ProjectDatabase;
     logManager: Pick<LogManager, "warning" | "error"> | null;
-    appSettingService: AppSettingService;
     workerClient: ComputeWorkerClient;
   }) {
     this.database = options.database;
     this.log_manager = options.logManager;
     this.proofreading = new ProofreadingCache({
       cache: this,
-      appSettingService: options.appSettingService,
       workerClient: options.workerClient,
       reader: createProofreadingReader(),
       readPages: (projectPath) => this.database.read_pdf_documents(projectPath),
@@ -120,6 +125,7 @@ export class CacheManager implements CacheReadPort {
     this.pdf.replace(snapshot.pdf);
     this.quality.replace(snapshot.quality);
     this.prompts.replace(snapshot.prompts);
+    this.languages.replace(snapshot.languages);
     this.qualityStatistics.clear();
     this.proofreading.clearProject();
     this.section_revisions = { ...snapshot.section_revisions };
@@ -127,7 +133,7 @@ export class CacheManager implements CacheReadPort {
   }
 
   /**
-   * 清理当前项目缓存；传入其它项目路径时忽略迟到卸载事件。
+   * 只清理当前项目，避免迟到卸载事件清除新工程缓存。
    */
   public clearProject(project_path?: string): void {
     if (
@@ -145,6 +151,7 @@ export class CacheManager implements CacheReadPort {
     this.pdf.clear();
     this.quality.clear();
     this.prompts.clear();
+    this.languages.clear();
     this.qualityStatistics.clear();
     this.proofreading.clearProject(project_path);
     this.section_revisions = {};
@@ -161,6 +168,7 @@ export class CacheManager implements CacheReadPort {
       if (committed.pdf !== undefined) this.pdf.replace(committed.pdf);
       if (committed.quality !== undefined) this.quality.replace(committed.quality);
       if (committed.prompts !== undefined) this.prompts.replace(committed.prompts);
+      if (committed.languages !== undefined) this.languages.replace(committed.languages);
       // 基础事实、修订与视图失效同步切换，读取不会跨越两次提交。
       this.section_revisions = { ...committed.sectionRevisions };
       this.proofreading.applyChange(committed);

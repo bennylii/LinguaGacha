@@ -1,10 +1,64 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { NativeFs } from "../../../native/native-fs";
 import { godot_pack_fixture } from "../../../test/godot-fixture";
 import { read_pack, extract_pack_member } from "./pack";
+
+it.each([true, false])("完整载荷区间复用要求一致的成员声明：%s", async (matching) => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-shared-payload-"));
+  const bytes = godot_pack_fixture(
+    new Map([
+      ["a", Buffer.from("same")],
+      ["b", Buffer.from(matching ? "same" : "diff")],
+    ]),
+    { version: 3 },
+  );
+  const first = 104 + bytes.readUInt32LE(100);
+  const second_name = first + 36;
+  const second = second_name + 4 + bytes.readUInt32LE(second_name);
+  bytes.writeBigUInt64LE(bytes.readBigUInt64LE(first), second);
+  const file = path.join(temp.path, "source");
+  fs.writeFileSync(file, bytes);
+  const native = new NativeFs(),
+    handle = await native.open_file(file, "r");
+  try {
+    if (!matching) await expect(read_pack(handle)).rejects.toThrow("Overlapping PCK payload");
+    else {
+      const pack = await read_pack(handle);
+      const target = path.join(temp.path, "shared");
+      await extract_pack_member(handle, pack.members[1]!, target, native);
+      expect(fs.readFileSync(target, "utf8")).toBe("same");
+    }
+  } finally {
+    await handle.close();
+  }
+});
+
+it("PCK 同名目录记录保留原始顺序和载荷边界", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-duplicate-"));
+  const bytes = godot_pack_fixture(
+    new Map([
+      ["a.txt", Buffer.from("first")],
+      ["b.txt", Buffer.from("second")],
+    ]),
+  );
+  bytes.write("a.txt", bytes.indexOf("b.txt"));
+  const native = new NativeFs(),
+    source = path.join(temp.path, "source");
+  fs.writeFileSync(source, bytes);
+  const handle = await native.open_file(source, "r");
+  try {
+    const pack = await read_pack(handle);
+    expect(pack.members.map(({ name, size }) => ({ name, size }))).toEqual([
+      { name: "a.txt", size: 5 },
+      { name: "a.txt", size: 6 },
+    ]);
+  } finally {
+    await handle.close();
+  }
+});
 
 it.each([2, 3, 4])("PCK v%s 读取相对和绝对 file_base、内嵌尾部并按 MD5 展开", async (version) => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-pack-"));
@@ -31,6 +85,49 @@ it.each([2, 3, 4])("PCK v%s 读取相对和绝对 file_base、内嵌尾部并按
         await handle.close();
       }
     }
+});
+
+it.each(["window", "long-record", "truncated"])("明文目录窗口处理 %s", async (kind) => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-directory-window-"));
+  const files =
+    kind === "long-record"
+      ? new Map([["a".repeat(65532), Buffer.from("payload")]])
+      : new Map(
+          Array.from({ length: 1800 }, (_, index) => [
+            `members/${index}.txt`,
+            Buffer.from(String(index)),
+          ]),
+        );
+  const bytes = godot_pack_fixture(files, { resource_prefix: false }),
+    native = new NativeFs(),
+    source = path.join(temp.path, "game.pck");
+  native.write_file_sync(source, bytes);
+  const handle = await native.open_file(source, "r+");
+  try {
+    const read = vi.spyOn(handle, "read");
+    if (kind === "truncated") {
+      // 保留有效包头，只截断目录记录，不能让头部预检代替目录校验。
+      await handle.truncate(110);
+      await expect(read_pack(handle)).rejects.toThrow("PCK directory exceeds processing limit");
+    } else {
+      const pack = await read_pack(handle);
+      expect(pack.members.map((member) => member.name)).toEqual([...files.keys()]);
+      if (kind === "window") {
+        expect(read.mock.calls.length).toBeLessThan(files.size);
+        await extract_pack_member(
+          handle,
+          pack.members.at(-1)!,
+          path.join(temp.path, "last"),
+          native,
+        );
+        expect(native.read_file(path.join(temp.path, "last"))).toEqual(
+          files.get("members/1799.txt"),
+        );
+      }
+    }
+  } finally {
+    await handle.close();
+  }
 });
 
 it.each(["../escape", "a\\b", "a:b", "NUL.txt", "a.", "a/../b", "/root", "backup_lg/a", "a\0x"])(
@@ -113,6 +210,38 @@ it.each(["md5", "cancel", "short-read"])("展开 %s 失败关闭句柄并删除�
       ),
     ).rejects.toThrow();
     expect(fs.existsSync(destination)).toBe(false);
+  } finally {
+    await handle.close();
+  }
+});
+
+it.each([false, true])("标准加密目录=%s，混合成员按目录解密展开", async (encrypt_directory) => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-encrypted-"));
+  const native = new NativeFs(),
+    key = Buffer.alloc(32, 37);
+  const files = new Map([
+    ["a", Buffer.from("encrypted member")],
+    ["b", Buffer.from("plain")],
+  ]);
+  const source = path.join(temp.path, "encrypted.pck");
+  fs.writeFileSync(
+    source,
+    godot_pack_fixture(files, {
+      version: 4,
+      encryption_key: key,
+      encrypt_directory,
+      encrypted_members: ["a"],
+    }),
+  );
+  const handle = await native.open_file(source, "r+");
+  try {
+    const pack = await read_pack(handle, undefined, key),
+      member = pack.members[0]!;
+    const output = path.join(temp.path, "output");
+    await extract_pack_member(handle, member, output, native, undefined, key);
+    expect(fs.readFileSync(output).equals(files.get("a")!)).toBe(true);
+    if (encrypt_directory)
+      await expect(read_pack(handle, undefined, Buffer.alloc(32, 1))).rejects.toThrow("MD5");
   } finally {
     await handle.close();
   }

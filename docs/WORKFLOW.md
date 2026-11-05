@@ -30,6 +30,7 @@
 |---|---|
 |Agent 会话与指令|[Agent](../src/backend/agent/)、[公开会话类型](../src/shared/agent.ts)、[运行时资源](../builtin/)|
 |工具与工作区|[工具](../src/backend/agent/tools/)、[工作区](../src/backend/agent/workspace/)|
+|术语检索与查证|[工程内检索](../src/backend/agent/workspace/runtime/term-search.ts)、[查证服务](../src/backend/agent/term-lookup-service.ts)、[JMdict](../src/backend/agent/jmdict-provider.ts)|
 |模型可读契约|[Schema](../src/backend/agent/workspace/schema.ts)、[契约生成](../src/backend/agent/tools/contract.ts)|
 |宿主桥与传输|[GUI](../src/gui/)、[桌面传输](../src/frontend/app/desktop/)|
 |前端运行态|[共享状态](../src/frontend/app/state/)、[会话](../src/frontend/app/session/)|
@@ -103,6 +104,9 @@ Markdown 与 YAML 使用文本或元数据检查，项目格式化脚本不处�
 |格式化脚本支持的文件变化|`npm run format -- --check <文件路径...>`|
 
 - 已运行 `npm run build` 时，使用其内置 TypeScript 检查结果。
+- `npm run typecheck` 使用固定版本的 `tsrs`，通过 `-b` 检查 renderer、node 和 test 三个项目，并复用各自的增量缓存。显式关闭 `--fast`，保持默认检查行为。声明契约测试使用同一编译器。
+- 升级 `tsrs` 时，对照其对应 TypeScript 版本的全量诊断，并验证增量检查、声明契约测试和构建。升级前后分别测量全量与增量耗时，避免把缓存失效计为日常开销。
+- `tsrs` 当前提供 Windows x64 命令行包，尚不支持 Windows `--watch` 和项目本地编辑器 SDK。编辑器继续使用其现有 TypeScript 服务。
 - lint 包含前端 `react/only-export-components` 检查。
 - `npm run check` 覆盖分层、迁移、错误、文案和样式边界。
 - 格式修复使用 `npm run format -- <文件路径...>`，随后复查。
@@ -136,8 +140,10 @@ npm test -- --project renderer <测试文件路径...>
 
 GUI、preload、native 或 Backend Runtime worker 变化时，先运行相关目标测试。
 
+- 应用代理变化：运行 [app-proxy.test.ts](../src/native/app-proxy.test.ts)。它用真实 Electron 与本地代理验证 Chromium 和 Undici 的路由及传输。
 - 共享资源或生命周期变化：运行 `BackendResources` 与 `GuiBackendBootstrap` 的真实集成测试。
 - 文件删除或清理变化：运行 `src/native/native-fs.test.ts` 与调用者测试。前者在 Windows 用真实 Electron 验证只读文件与目录删除。
+- 用户文件语义变化：运行 `src/native/native-fs.test.ts`。它在 Electron 主进程、后端线程与 `ELECTRON_RUN_AS_NODE` 中验证 ASAR 档案按普通文件处理。普通 Node 测试不识别 ASAR。
 - 加载、资源定位或跨进程启动契约变化：低层测试不足时，追加对应真实 Electron 集成或 smoke 验证。
 
 端到端 UI 冒烟在用户明确要求，或存在具体高风险且低层验证不足时执行。真机应用通过 `npm run dev` 启动。
@@ -157,18 +163,33 @@ GUI、preload、native 或 Backend Runtime worker 变化时，先运行相关目
 
 发行包入口或资源定位见 [发行包运行验证](#发行包运行验证)。
 
+术语检索、外部查证或证据字段变化时，按影响选择测试：
+
+|变化|测试|
+|---|---|
+|工具参数、默认来源、取消与错误传播|`tools/lookup-term.test.ts`|
+|来源编排、语言映射、缓存键、局部失败与结果预算|`term-lookup-service.test.ts`|
+|缓存有效期、损坏载荷、哈希路径与值隔离|`term-lookup-cache.test.ts`|
+|JMdict 下载、哈希、版本、索引、并发与许可证|`jmdict-provider.test.ts`|
+|工程内匹配、聚合、排序、确认与异步输入|`workspace/runtime/term-search.test.ts`|
+|开关默认值与设置提交|`setting.test.ts`、`use-expert-settings-state.test.ts`|
+|`evidence` 导入导出、旧载荷与 `.lg` 持久化|`quality-rule-file-io.test.ts`、`quality-rule-import.test.ts`、`project-write-store.test.ts`|
+|工具注册开关|`agent-service.test.ts`|
+
+外部来源在单测中使用 mock；真实网络、代理和首次词包下载不在常规单测中，按发行包运行验证处理。
+
 ### 原生游戏
 
 格式目录位于 `src/backend/file/`，按变化选择测试：
 
 |变化|测试|
 |---|---|
-|格式、来源发现或默认排除|对应的 `rpgmaker-mv-mz/`、`rpgmaker-rgss/`、`wolfrpg/` 或 `godot/` 测试，以及 `project-content-service.test.ts`|
+|格式、来源发现或默认排除|对应的 `rpgmaker-mv-mz/`、`rpgmaker-rgss/`、`wolfrpg/`、`godot/`、`renpy/` 或 `tyrano/` 测试，以及 `project-content-service.test.ts`|
 |引擎登记表与共享容器|各原生格式的测试、来源发现、校对缓存、Agent 工作区原稿，以及 `shared/game/` 下的对应测试|
 |文件身份与迁移|数据库迁移、工程打开迁移、解析流水线和译文生成测试|
 |文本规则计算|`text-rule-type.test.ts`、翻译译前流程和校对评估|
 |来源或失败边界|`source-discovery.test.ts`、解析流水线、新建与追加导入测试|
-|准备与归档|对应引擎的准备测试，以及 `shared/` 下受影响的协议、IO 与目录事务测试|
+|准备、归档与游戏资产输出提交|对应引擎的准备或导出测试，以及 [目录事务](../src/backend/file/shared/game/directory.test.ts)、`shared/` 下受影响的协议与 IO 测试|
 |准备线程|`shared/game/prepare-worker.test.ts`，它使用正式构建入口验证退出与句柄释放|
 |字体工具与引擎字体能力|`game-font-service.test.ts`、`shared/game/font-replace.test.ts`、`shared/game/engines.test.ts` 和对应引擎的字体测试|
 |取消或关闭顺序|`runtime-operation-gate.test.ts` 与 `gui-backend-bootstrap.test.ts`|
@@ -178,11 +199,15 @@ GUI、preload、native 或 Backend Runtime worker 变化时，先运行相关目
 
 真实样本使用独立副本与输出目录，WOLF 样本在仓库外验收。外部研究探针和样本不作为构建或自动化测试依赖。
 
-- 对照原稿哈希检查提取、解密、备份、重复导入和失败恢复。
+- 对照原稿哈希检查提取、解密、重复导入和失败恢复。
 - RGSS 同时覆盖保留与移除散装数据的情况。定位变化后从原稿重建条目，再验证译文生成。
 - WOLF 核对解包哈希、原稿字节和独立 LZ4 解码。游戏运行覆盖中文、选项分支、数据库显示及保留主标题时的存档身份。
-- Godot 核对外置与内嵌 PCK 展开、载体备份和重复导入，再将产品导出的译文拷回启动。运行时验收覆盖语言表 `fallback`、控件中文、脚本加载和系统字体回退。
+- Godot 核对外置与内嵌 PCK 展开、PE 修正、启动 PCK 移除和重复导入，再将产品导出的译文拷回启动。运行时验收覆盖语言表 `fallback`、控件中文、脚本加载、系统字体回退、补丁副作用和资源目录枚举。禁用 `--path` 的样本从副本游戏目录直接启动。
 - Godot 字体工具按换字体与拷回译文的两种先后顺序验收，启动后核对资产字体控件与未指定字体的控件都取得所选字体。
+- Ren’Py 准备变化使用 `input/renpy_01` 至 `input/renpy_04` 的独立副本与隔离存档，通过 `prepare_game_source` 验证准备和重复准备。记录版本与启动日志，保留 6.x 启动证据。核对 `renpy_03` 场景笔记的原字节和 `renpy_04` 业务对象加载。验收探针只加入副本，每个样本独立记录失败归因。
+- Ren’Py 字体与译文变化通过 `GameFontService.inspect/apply` 和格式导出入口验证两种覆盖顺序。核对原路径字体与默认正文字体的哈希。启动后检查文本、语句身份、中文渲染、语言初始化和语言切换后的断行设置。比较启动前后的编译文件哈希，确认生成资源未进入原稿。
+- Ren’Py 引擎兼容性由真实游戏验收，另查 `lock.txt` 与只读目录中的生成资源首次编译。文本保护变化运行 `renpy-boundaries.test.ts`、`text-preserve-rules.test.ts` 和 `renpy-rpy/` 格式测试。
+- TyranoScript 解析变化用游戏自带 `kag.parser.js` 对照扫描结果。通过产品入口验证导入、导出和拷回重导入。准备覆盖散装与 `app.asar` 两种布局。启动后核对正文、选项、姓名框和字体工具覆盖的文字控件。
 - 协议测试与游戏启动分别验收。Windows 启动须确认所选入口读取外部数据和明文素材。
 
 交付时注明未验证的布局、游戏流程和宿主平台。
@@ -229,12 +254,16 @@ Windows 启动器或更新器变化时，在对应的 `win-cli` 或 `win-berserk
 
 - 使用 `npm exec -- asar list <app.asar 路径>` 检查应用入口、前端资源及文件范围。用户数据、项目源码和原始应用依赖树应排除。
 - Electron 语言资源与 `LOCALES` 一致。
-- 内置资源随应用部署。
-- 工作区包含实际依赖清单、标准 `node_modules`、内部包和运行资源。
+- `builtin/`、`fonts/`、`workspace/` 和 `pdf-print.css` 位于发行 `resources/`。`app.asar` 不含 `builtin/` 和字体。
+- 工作区包含实际依赖清单、标准 `node_modules`、内部包和运行资源；术语检索发布时确认 `@lg/workspace/term-search` 存在。
 - `runAsNode` fuse 保持开启，供工作区启动 Electron Node 子进程。
 - Windows 启动器和更新器完成对应 Go module 的测试与构建。
 
+运行 Ren’Py 解析测试前执行 `node buildtools/build-workspace.mjs`。发行解析资源使用下方 `prepare-worker.test.ts` 入口验证。
+
 根安装使用 `npm ci`，保证依赖来源可复现。
+
+安装时保留 optional dependencies，`tsrs` 需要其中与构建宿主匹配的原生包。选择原生包依据宿主 Node 架构，与 Electron 的打包目标架构无关。
 
 `afterPack` 中的测试、构建或复制失败都会终止打包。
 
@@ -253,9 +282,36 @@ Windows 启动器或更新器变化时，在对应的 `win-cli` 或 `win-berserk
 
 |变量|指向|使用的测试|
 |---|---|---|
+|`LINGUAGACHA_TEST_RESOURCES`|发行包 `resources` 目录|`app-resources.test.ts`|
 |`LINGUAGACHA_TEST_ELECTRON`|发行包可执行文件|`bootstrap.test.ts`、`javascript.test.ts`、`ruby.test.ts`、`prepare-worker.test.ts`|
-|`LINGUAGACHA_TEST_WORKSPACE_RUNTIME`|发行包工作区运行目录|`bootstrap.test.ts`、`javascript.test.ts`、`ruby.test.ts`、`pdf-host.test.ts`|
+|`LINGUAGACHA_TEST_WORKSPACE_RUNTIME`|发行包工作区运行目录|`bootstrap.test.ts`、`javascript.test.ts`、`ruby.test.ts`、`pdf-host.test.ts`、`prepare-worker.test.ts`|
 |`LINGUAGACHA_TEST_GAME_WORKER`|发行 ASAR 内的 `build/dist-electron/game-prepare-worker-entry.js`|`prepare-worker.test.ts`|
 
 - `pdf-host.test.ts` 只设置工作区运行目录，使用默认开发 Electron。
-- 脚本解析器部署还须核对发行工作区中的 `oxc-parser` 平台绑定与 `@ruby/prism` WASM。
+- 资源部署或字体路径变化时，按上表指向发行包运行 `app-resources.test.ts` 与 `pdf-host.test.ts`。两者分别验证界面与 PDF 加载同一份字体。
+- 脚本解析器部署还须核对发行工作区中的 `oxc-parser` 平台绑定与 `@ruby/prism` WASM，以及 `web-tree-sitter` 和 `python/tree-sitter-python.wasm`、许可证。Python 语法包的原生 addon 不部署。
+- 术语检索部署还须核对 `resources/workspace/node_modules/@lg/workspace/term-search.mjs`，并在发行工作区执行一次聚合查询；`bootstrap.test.ts` 覆盖该导入路径。
+
+### 便携版替换与数据保留
+
+构建产物位于 `build/release/<package version>/win-unpacked`。应用版本由安装根目录的 `version.txt` 决定，`package.json` 版本只参与打包目录和压缩包命名，两者职责不同。
+
+替换已安装的便携版时，程序文件与用户数据分开处理：
+
+- 需要替换：`app.exe`、`resources/app.asar`、`resources/workspace`、`locales`、DLL、pak、`cli.exe` 和 `berserker.exe`。
+- 必须保留：`userdata/`，其中包含配置、模型设置、Agent 会话、技能、规则预设和 Agent 工作材料。
+- 还应保留：`log/` 与根目录诊断文件。
+- 工程 `.lg` 文件通常位于安装目录之外，替换安装文件不处理工程数据。
+- `userdata/workspace` 是用户工作材料，`resources/workspace` 是发行程序依赖树，二者不能混用。
+- `userdata` 中的 `node_modules` 可能是指向 `resources/workspace/node_modules` 的目录联接。递归复制会把联接展开成真实文件，导致体积膨胀；替换时应保留联接，或直接移动数据目录。
+
+推荐步骤：
+
+1. 关闭应用，确认 `app.exe`、`cli.exe` 和 `berserker.exe` 没有运行。
+2. 将完整安装目录改名为带时间戳的备份；备份保留程序与用户数据。
+3. 将新 `win-unpacked` 复制为安装目录。
+4. 从备份复制或移动回 `userdata/`、`log/` 和必要的诊断文件，不复制旧程序文件，并保留 `userdata` 中的目录联接。
+5. 首次启动前对比 `userdata` 的文件数量、总大小和 `config.json` 哈希，确认数据未改变；启动后新版本可能补充默认设置字段或实例注册文件，检查没有键或文件缺失即可。
+6. 启动应用做冒烟验证；失败时将新目录改名，恢复备份目录。
+
+不要在应用运行时覆盖 `resources` 或 `userdata`。回滚前保留新目录或备份，避免同时删除两套程序。

@@ -16,10 +16,40 @@ import { wolf_archive_fixture } from "../../../../test/wolf-archive-fixture";
 import { rgss_archive_fixture } from "../../../../test/rgss-archive-fixture";
 import { NativeFs } from "../../../../native/native-fs";
 import { encrypted_media, MEDIA_KEY, png_fixture } from "../../../../test/media-fixture";
-import { godot_pack_fixture, create_godot_fixture } from "../../../../test/godot-fixture";
+import {
+  godot_pack_fixture,
+  godot_executable_fixture,
+  create_godot_fixture,
+} from "../../../../test/godot-fixture";
 import { discover_godot_source } from "../../godot/source";
+import { create_renpy_fixture, archive_fixture } from "../../../../test/renpy-fixture";
+import { discover_renpy_source } from "../../renpy/source";
 
 let runtime: string;
+it("RenPy 通过正式准备线程展开并释放归档句柄", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-renpy-worker-"));
+  const native = create_renpy_fixture(temp.path),
+    staging = path.join(temp.path, "stage");
+  native.write_file_sync(
+    path.join(temp.path, "game/archive.rpa"),
+    archive_fixture(new Map([["resource.txt", Buffer.from("resource")]])),
+  );
+  const game = (await discover_renpy_source(temp.path, native))!;
+  const worker = new GamePrepareWorker(
+    pathToFileURL(path.join(runtime, "main/game-prepare-worker-entry.js")),
+    undefined,
+    undefined,
+    path.resolve("build/resources/workspace"),
+  );
+  try {
+    const result = await worker.run({ kind: "game", file_type: "RENPY", game, staging });
+    expect(result.changes!.removes).toEqual(["game/archive.rpa"]);
+    expect(native.read_text_file(path.join(staging, "game/resource.txt"))).toBe("resource");
+    fs.renameSync(path.join(temp.path, "game/archive.rpa"), path.join(temp.path, "released.rpa"));
+  } finally {
+    await worker.dispose();
+  }
+}, 30000);
 
 it.each(["external", "embedded"])(
   "Godot %s 载体通过正式准备线程展开，原件保持只读",
@@ -33,14 +63,14 @@ it.each(["external", "embedded"])(
     });
     const source = path.join(temp.path, kind === "embedded" ? "game.exe" : "game.pck");
     fs.writeFileSync(source, bytes);
-    const game = (await discover_godot_source(source, native))!;
+    const game = (await discover_godot_source(kind === "embedded" ? source : temp.path, native))!;
     const worker = new GamePrepareWorker(
       pathToFileURL(path.join(runtime, "main/game-prepare-worker-entry.js")),
     );
     try {
       const result = await worker.run({ kind: "game", file_type: "GODOT", game, staging });
-      expect(result.backups).toEqual([path.basename(source)]);
-      expect(result.writes).toContain("project.binary");
+      expect(result.changes!.removes).toEqual(kind === "external" ? ["game.pck"] : []); // 内嵌 EXE 已由 writes 覆盖。
+      expect(result.changes!.writes).toContain("project.binary");
       expect(fs.existsSync(path.join(staging, "project.binary"))).toBe(true);
       if (kind === "embedded")
         expect(fs.readFileSync(path.join(staging, "game.exe")).equals(Buffer.alloc(128, 42))).toBe(
@@ -53,6 +83,40 @@ it.each(["external", "embedded"])(
   },
   30000,
 );
+it("Godot 密钥扫描收到取消后协作退出并释放载体句柄", async () => {
+  using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-godot-worker-cancel-"));
+  const native = new NativeFs(),
+    staging = path.join(temp.path, "stage"),
+    executable = path.join(temp.path, "game.exe");
+  fs.mkdirSync(staging);
+  const key = Buffer.alloc(32, 73),
+    prefix = godot_executable_fixture(undefined, 1536 + 2 * 1024 * 1024, true);
+  const bytes = godot_pack_fixture(create_godot_fixture(), {
+    prefix,
+    encryption_key: key,
+    encrypt_directory: true,
+    resource_prefix: false,
+  });
+  fs.writeFileSync(executable, bytes);
+  const game = (await discover_godot_source(executable, native))!;
+  const worker = new GamePrepareWorker(
+    pathToFileURL(path.join(runtime, "main/game-prepare-worker-entry.js")),
+  );
+  const controller = new AbortController(),
+    timer = globalThis.setTimeout(() => controller.abort(), 250);
+  try {
+    await expect(
+      worker.run({ kind: "game", file_type: "GODOT", game, staging }, controller.signal),
+    ).rejects.toThrow();
+    expect(fs.readdirSync(staging)).toEqual([]);
+    expect(fs.readFileSync(executable).equals(bytes)).toBe(true);
+    fs.renameSync(executable, executable + ".released");
+  } finally {
+    globalThis.clearTimeout(timer);
+    await worker.dispose();
+  }
+}, 30000);
+
 beforeAll(() => {
   runtime = fs.mkdtempSync(path.join(os.tmpdir(), "lg-game-runtime-"));
   execFileSync(
@@ -133,12 +197,12 @@ it("发行线程完成暂存后退出，取消也等到句柄释放，随后仍�
     fs.rmSync(staging, { recursive: true }); // Windows 文件句柄仍占用时，此处会失败。
     fs.mkdirSync(staging);
     const result = await worker.run(task);
-    expect(result.writes).toContain("Game.exe");
-    expect(result.removes).toEqual(expect.arrayContaining([...loose.keys()]));
-    expect(result.removes).toHaveLength(loose.size);
+    expect(result.changes!.writes).toContain("Game.exe");
+    expect(result.changes!.removes).toEqual(expect.arrayContaining([...loose.keys()]));
+    expect(result.changes!.removes).toHaveLength(loose.size);
     for (const name of ["a", "b", "packed"]) {
-      expect(result.writes).toContain("img/" + name + ".png");
-      expect(result.writes).not.toContain("img/" + name + ".png_");
+      expect(result.changes!.writes).toContain("img/" + name + ".png");
+      expect(result.changes!.writes).not.toContain("img/" + name + ".png_");
       expect(
         fs.readFileSync(path.join(staging, "img/" + name + ".png")).equals(png_fixture()),
         name,
@@ -217,9 +281,9 @@ it.each(["rgss", "wolfrpg"] as const)(
     );
     try {
       const result = await next.run(task);
-      expect(result.removes).toEqual([archive]);
+      expect(result.changes!.removes).toEqual([archive]);
       if (kind === "wolfrpg") {
-        expect(result.directories).toEqual(
+        expect(result.changes!.directories).toEqual(
           expect.arrayContaining(["Data", "Data/Empty", "Data/BasicData", "Data/MapData"]),
         );
         expect(fs.existsSync(path.join(staging, "Data/Empty"))).toBe(false);
@@ -251,7 +315,14 @@ it("同进程入口保留显式注入的 NativeFs", async () => {
         game: { root, data_root: root, engine: "mz" },
         staging: temp.path,
       }),
-    ).rejects.toThrow("injected filesystem");
+    ).resolves.toMatchObject({
+      changes: null,
+      diagnostics: [
+        expect.objectContaining({
+          error: expect.objectContaining({ message: "injected filesystem" }),
+        }),
+      ],
+    });
   } finally {
     await worker.dispose();
   }
@@ -259,6 +330,13 @@ it("同进程入口保留显式注入的 NativeFs", async () => {
 
 it("仓库外真实 Electron 加载部署准备线程并等待退出", async () => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-game-electron-"));
+  const renpy_root = path.join(temp.path, "renpy");
+  const renpy_fs = create_renpy_fixture(renpy_root);
+  renpy_fs.write_file_sync(
+    path.join(renpy_root, "game/archive.rpa"),
+    archive_fixture(new Map([["resource.txt", Buffer.from("resource")]])),
+  );
+  const renpy = await discover_renpy_source(renpy_root, renpy_fs);
   const entry = path.join(temp.path, "entry.ts"),
     staging = path.join(temp.path, "stage");
   fs.mkdirSync(staging);
@@ -291,9 +369,17 @@ it("仓库外真实 Electron 加载部署准备线程并等待退出", async () 
     } finally { await worker.dispose(); }
     fs.rmSync(task.staging,{recursive:true}); fs.mkdirSync(task.staging);
     const next=new GamePrepareWorker(pathToFileURL(process.argv[2]));
-    try { const result=await next.run(task); assert(result.writes.includes('Data/BasicData/Game.dat')); assert.deepEqual(result.removes,['Data.wolf']); assert(result.directories.includes('Data/Empty')); assert(!fs.existsSync(path.join(task.staging,'Data/Empty'))); }
+    try { const result=await next.run(task); assert(result.changes!.writes.includes('Data/BasicData/Game.dat')); assert.deepEqual(result.changes!.removes,['Data.wolf']); assert(result.changes!.directories.includes('Data/Empty')); assert(!fs.existsSync(path.join(task.staging,'Data/Empty'))); }
     finally { await next.dispose(); }
     fs.rmSync(task.staging,{recursive:true});
+    const renpy = new GamePrepareWorker(pathToFileURL(process.argv[2]), undefined, undefined, process.argv[3]);
+    try {
+      const game = ${JSON.stringify(renpy)};
+      const staging = path.join(game.root, 'stage');
+      const result = await renpy.run({kind:'game',file_type:'RENPY',game,staging});
+      assert(result.changes!.removes.includes('game/archive.rpa'));
+      assert.equal(fs.readFileSync(path.join(staging,'game/resource.txt'),'utf8'),'resource');
+    } finally { await renpy.dispose(); }
     console.log('game-worker-deployment-ok');
   `,
   );
@@ -316,7 +402,12 @@ it("仓库外真实 Electron 加载部署准备线程并等待退出", async () 
     path.join(runtime, "main/game-prepare-worker-entry.js");
   const result = await promisify(execFile)(
     electron,
-    [path.join(temp.path, "bundle/smoke.mjs"), worker_entry],
+    [
+      path.join(temp.path, "bundle/smoke.mjs"),
+      worker_entry,
+      process.env["LINGUAGACHA_TEST_WORKSPACE_RUNTIME"] ??
+        path.resolve("build/resources/workspace"),
+    ],
     {
       cwd: temp.path,
       windowsHide: true,

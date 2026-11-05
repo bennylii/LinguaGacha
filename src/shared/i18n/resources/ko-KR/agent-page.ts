@@ -123,6 +123,16 @@ export const ko_kr_agent_page = {
     copied: "복사됨",
     follow_latest: "최신 내용 따라가기",
   },
+  auto_resume: {
+    waiting: "완료되지 않아 {seconds}초 후 자동으로 계속합니다({attempt}회째)",
+    waiting_limited: "완료되지 않아 {seconds}초 후 자동으로 계속합니다({attempt}/{max_attempts})",
+    continuing: "완료되지 않아 자동으로 계속 진행 중입니다({attempt}회째)",
+    cancel: "자동 계속 취소",
+  },
+  auto_continue: {
+    judging: "작업 완료 여부를 확인하는 중…",
+    continuing: "완료되지 않아 자동으로 계속 진행 중입니다({attempt}회째)",
+  },
   editing: {
     user: "내 메시지 수정 중",
     assistant: "모델 응답 수정 중",
@@ -131,7 +141,6 @@ export const ko_kr_agent_page = {
   queue: {
     no_message_text: "메시지 본문 없음",
     attachments: "첨부 파일 {count}개",
-    reorder: "드래그하여 순서 변경",
     send_now: "지금 전송",
     sending: "전송 중",
     delete: "메시지 삭제",
@@ -148,6 +157,9 @@ export const ko_kr_agent_page = {
     details: "{tool} 도구 호출 상세 정보",
     input: "입력",
     output: "출력",
+    loading_full: "전체 출력을 불러오는 중 …",
+    load_failed: "전체 출력을 불러오지 못했습니다.",
+    retry: "다시 시도",
   },
   round: {
     running: "처리 중 {duration}",
@@ -155,10 +167,16 @@ export const ko_kr_agent_page = {
     error: "실패 · {duration}",
     stopped: "중지됨 · {duration}",
   },
+  timeline: {
+    show_earlier: "이전 메시지 표시",
+    show_earlier_in_round: "이 라운드의 이전 메시지 표시",
+    loading: "이전 메시지를 불러오는 중 …",
+    retry: "이전 메시지를 불러오지 못했습니다. 다시 시도",
+    cursor_expired: "기록이 변경되어 최신 메시지로 돌아왔습니다.",
+  },
   upload: { uploading: "업로드 중", failed: "업로드 실패" },
   file_saved: "파일을 저장했습니다",
   error: {
-    activate_link: "링크를 처리하지 못했습니다 …",
     decision: "결정을 제출하지 못했습니다. 다시 시도해 주세요 …",
     restore: "세션을 복원하지 못했습니다. 다시 시도해 주세요 …",
     connection: "연결이 끊어졌습니다. 재연결을 기다리고 있습니다 …",

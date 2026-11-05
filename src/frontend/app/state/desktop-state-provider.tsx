@@ -27,6 +27,8 @@ import {
 import { useProjectEventPipeline } from "@frontend/app/state/project-event-pipeline";
 import { normalize_project_change_event } from "@frontend/app/state/desktop-project-change-normalizer";
 import { normalize_setting_snapshot } from "@domain/setting";
+import { read_project_language_settings } from "@domain/project-settings";
+import { is_json_record } from "@domain/json";
 import type { AppLanguage } from "@domain/app-language";
 import { PROJECT_DATA_SECTIONS } from "@shared/project-event";
 import { AppError } from "@shared/error";
@@ -76,15 +78,28 @@ type ProjectManifestPayload = {
 const DEFAULT_PROJECT_SNAPSHOT: ProjectSnapshot = {
   path: "",
   loaded: false,
+  languages: null,
 };
 
 /** 将后端项目载荷收口为主窗口项目快照。 */
 function normalize_project_snapshot(payload: ProjectSnapshotPayload): ProjectSnapshot {
   const snapshot = payload.project ?? {};
+  const loaded = Boolean(snapshot.loaded);
   return {
     path: String(snapshot.path ?? ""),
-    loaded: Boolean(snapshot.loaded),
+    loaded,
+    languages:
+      loaded && is_json_record(snapshot.languages)
+        ? read_project_language_settings(snapshot.languages)
+        : null,
   };
+}
+
+/** project 分区变化表示项目设置已提交，项目快照需要补读。 */
+function has_project_settings_change(
+  events: readonly Pick<ProjectChangeEventForState, "updatedSections">[],
+): boolean {
+  return events.some((event) => event.updatedSections.includes("project"));
 }
 
 /** 汇总写入回流涉及的 section，用于页面刷新信号。 */
@@ -143,7 +158,6 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
   });
   const [project_session_status, set_project_session_status] =
     useState<ProjectSessionStatus>("idle");
-  const [project_session_stage, set_project_session_stage] = useState<ProjectStage | null>(null);
   const [pending_target_route, set_pending_target_route] = useState<RouteId | null>(null);
   const [is_app_language_updating, set_is_app_language_updating] = useState(false);
   const refresh_scheduler_ref = useRef<DesktopRefreshScheduler | null>(null); // 本地操作和项目刷新通过 ref 先冲刷 SSE pending 队列
@@ -153,6 +167,7 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
     ...EMPTY_PROJECT_STATE_IDENTITY,
   });
   const pending_session_project_changes_ref = useRef<ProjectChangeEventForState[]>([]); // 当前项目 query 首刷完成前暂存事件，避免 session 初始化窗口漏同步
+  const project_snapshot_request_ref = useRef(0); // 同一工程的并发补读只应用最新请求。
 
   const settings_language = useRef(settings_snapshot.app_language); // LocaleProvider 位于内层，初始化失败从这里读取最新语言。
   settings_language.current = settings_snapshot.app_language;
@@ -318,12 +333,22 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
     [begin_project_state_session, clear_project_state_identity],
   );
 
+  // HTTP 回流和 SSE 都可补读，按请求顺序与会话身份隔离迟到响应。
   const refresh_project_snapshot = useCallback(async (): Promise<ProjectSnapshot> => {
+    const request_id = ++project_snapshot_request_ref.current;
+    const identity = read_project_state_identity();
     const payload = await api_fetch<ProjectSnapshotPayload>("/api/session/project/snapshot", {});
     const next_snapshot = normalize_project_snapshot(payload);
-    sync_project_snapshot(next_snapshot);
+    const current = read_project_state_identity();
+    if (
+      request_id === project_snapshot_request_ref.current &&
+      current.path === identity.path &&
+      current.epoch === identity.epoch
+    ) {
+      sync_project_snapshot(next_snapshot);
+    }
     return next_snapshot;
-  }, [sync_project_snapshot]);
+  }, [read_project_state_identity, sync_project_snapshot]);
 
   // 主动刷新与初始化共用批量翻译快照，并由 Store 裁决 revision
   const refresh_batch_translation = useCallback(async (): Promise<BatchTranslationSnapshot> => {
@@ -438,17 +463,20 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
     [has_applied_project_event, read_project_state_identity],
   );
 
+  // 返回事件是否在本次调用中应用；排队或去重的事件由其它入口负责后续刷新。
   const apply_project_change_event_immediately = useCallback(
-    async (change_event: ProjectChangeEventForState): Promise<void> => {
+    async (change_event: ProjectChangeEventForState): Promise<boolean> => {
       if (queue_project_state_change_during_session_warming(change_event)) {
-        return;
+        return false;
       }
       if (!should_apply_project_state_change(change_event)) {
-        return;
+        return false;
       }
 
       flush_refresh_scheduler();
+      if (!should_apply_project_state_change(change_event)) return false;
       apply_project_state_change(change_event);
+      return true;
     },
     [
       apply_project_state_change,
@@ -463,14 +491,12 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
 
     if (!project_snapshot.loaded || project_snapshot.path.trim() === "") {
       clear_project_state_identity();
-      set_project_session_stage(null);
       set_project_session_status("idle");
       return;
     }
 
     const chat_identity = begin_project_state_session(project_snapshot.path.trim());
     set_project_session_status("warming");
-    set_project_session_stage(null);
     const manifest = await api_fetch<ProjectManifestPayload>("/api/session/project/manifest", {});
     if (!is_current_project_session_warming(chat_identity)) {
       return;
@@ -480,7 +506,6 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
     const manifest_project_path = String(manifest.projectPath ?? "").trim();
     if (!next_project_snapshot.loaded || manifest_project_path === "") {
       sync_project_snapshot(next_project_snapshot);
-      set_project_session_stage(null);
       set_project_session_status("idle");
       return;
     }
@@ -515,7 +540,8 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
       },
     ]);
     for (const queued_change of queued_project_changes) {
-      await apply_project_change_event_immediately(queued_change);
+      const applied = await apply_project_change_event_immediately(queued_change);
+      if (applied && has_project_settings_change([queued_change])) await refresh_project_snapshot();
     }
     set_project_session_status("ready");
   }, [
@@ -528,6 +554,7 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
     project_snapshot.loaded,
     project_snapshot.path,
     publish_project_change_results,
+    refresh_project_snapshot,
     set_project_session_status,
     sync_project_snapshot,
   ]);
@@ -541,13 +568,36 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
     });
 
   // HTTP 写入结果与 SSE 共用同一项目事件入口，保持事件顺序和去重语义一致。
+  // 写入方等待项目快照补读完成，失败交给写入恢复流程。
   const apply_project_write_changes = useCallback(
     async (result: ProjectWriteResult): Promise<void> => {
       for (const change_event of result.changes) {
         await apply_project_change_event_immediately(change_event);
+        if (
+          has_project_settings_change([change_event]) &&
+          change_event.projectPath === read_project_state_identity().path
+        ) {
+          // 事件可以去重，写入方仍须确认已提交快照后再撤下草稿。
+          await refresh_project_snapshot();
+        }
       }
     },
-    [apply_project_change_event_immediately],
+    [apply_project_change_event_immediately, read_project_state_identity, refresh_project_snapshot],
+  );
+
+  // SSE 批量事件由调度器同步应用，项目快照补读在后台完成并报告失败。
+  const apply_project_change_batch_with_snapshot = useCallback(
+    (change_events: readonly ProjectChangeEventForState[]): void => {
+      apply_project_state_change_batch(change_events);
+      if (!has_project_settings_change(change_events)) return;
+      void refresh_project_snapshot().catch((error: unknown) => {
+        report_state_error(error, {
+          source: "sse",
+          context: { stage: "refresh_project_snapshot" },
+        });
+      });
+    },
+    [apply_project_state_change_batch, refresh_project_snapshot, report_state_error],
   );
 
   const commit_project_write = useProjectWriteCommitter({
@@ -611,7 +661,6 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
   useEffect(() => {
     if (!project_snapshot.loaded || project_snapshot.path.trim() === "") {
       clear_project_state_identity();
-      set_project_session_stage(null);
       return;
     }
 
@@ -647,15 +696,9 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
     report_state_error,
   ]);
 
-  useEffect(() => {
-    if (project_session_status === "ready") {
-      set_project_session_stage(null);
-    }
-  }, [project_session_status]);
-
   const project_event_pipeline = useProjectEventPipeline({
     projectSnapshot: project_snapshot,
-    applyProjectChangeBatch: apply_project_state_change_batch,
+    applyProjectChangeBatch: apply_project_change_batch_with_snapshot,
     shouldApplyProjectChange: should_apply_project_state_change,
     queueProjectChangeDuringSessionWarming: queue_project_state_change_during_session_warming,
     normalizeProjectChangeEvent: normalize_project_change_event,
@@ -688,7 +731,6 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
       settings_snapshot,
       project_snapshot,
       project_session_status,
-      project_session_stage,
       pending_target_route,
       is_app_language_updating,
       set_project_session_status,
@@ -708,7 +750,6 @@ export function DesktopStateProvider(props: { children: ReactNode }): JSX.Elemen
     settings_snapshot,
     project_snapshot,
     project_session_status,
-    project_session_stage,
     pending_target_route,
     is_app_language_updating,
     apply_settings_snapshot,

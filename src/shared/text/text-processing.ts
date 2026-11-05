@@ -9,7 +9,6 @@ import {
   type ConfiguredSourceLanguageCode,
   type TargetLanguageCode,
 } from "../../domain/language";
-import { normalize_setting_snapshot } from "../../domain/setting";
 import {
   QualityRule,
   type GlossaryEntry,
@@ -24,14 +23,12 @@ export interface TextProcessingConfig {
   file_contexts?: Readonly<Record<string, TextFileContext>>;
   source_language: ConfiguredSourceLanguageCode; // 源/目标语言在快照恢复时完成归一与校验
   target_language: TargetLanguageCode;
-  clean_ruby: boolean; // 只控制字面文本注音标记，结构化格式组装留在导入器
 }
 
 /** 将外部设置收窄为翻译与校对共享的规范语言配置。 */
 export function normalize_text_processing_config(args: {
   source_language: string;
   target_language: string;
-  clean_ruby: boolean;
 }): TextProcessingConfig {
   const source_language = normalize_source_language_code(args.source_language);
   if (source_language === null) {
@@ -51,7 +48,6 @@ export function normalize_text_processing_config(args: {
   return {
     source_language,
     target_language,
-    clean_ruby: args.clean_ruby,
   };
 }
 
@@ -128,12 +124,12 @@ export function read_text_quality_snapshot(value: unknown): TextQualitySnapshot 
   };
 }
 
-/** 从配置快照提取文本处理字段，并在任务入口校验语言。 */
+/** 从执行快照提取文本处理字段，并在任务入口校验语言。 */
 export function read_text_processing_config(value: JsonValue | undefined): TextProcessingConfig {
-  const snapshot = normalize_setting_snapshot(value);
+  // 语言来自项目而非应用设置，应用设置归一化会丢弃它们，因此直接读取原始执行快照。
+  const record = read_json_record(value);
   return normalize_text_processing_config({
-    source_language: snapshot.source_language,
-    target_language: snapshot.target_language,
-    clean_ruby: snapshot.clean_ruby,
+    source_language: String(record["source_language"] ?? ""),
+    target_language: String(record["target_language"] ?? ""),
   });
 }

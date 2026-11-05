@@ -33,6 +33,10 @@ vi.mock("@frontend/app/feedback/desktop-toast", async (importOriginal) => ({
 
 const api_fetch_mock = vi.mocked(api_fetch);
 
+vi.mock("@frontend/app/locale/locale-context", () => ({
+  useI18n: () => ({ t: (key: string) => key }),
+}));
+
 vi.mock("@frontend/app/desktop/desktop-api", async (importOriginal) => {
   return {
     ...(await importOriginal<typeof import("@frontend/app/desktop/desktop-api")>()),
@@ -41,6 +45,52 @@ vi.mock("@frontend/app/desktop/desktop-api", async (importOriginal) => {
 });
 
 describe("useWorkbenchImportFilesFlow", () => {
+  it.each(["backup", "order", null])("游戏确认取消于 %s，完成确认后才导入", async (cancel) => {
+    const game_root = "C:/games/demo",
+      orders = [{ game_root, ordered_pcks: ["patch.pck", "base.pck"] }];
+    api_fetch_mock
+      .mockResolvedValueOnce({
+        files_revision: 1,
+        files: [{ source_path: game_root, target_rel_path: "demo.godot", conflict: false }],
+        contains_game: true,
+        godot_packs: [{ game_root, game_name: "demo", external_pcks: ["base.pck", "patch.pck"] }],
+      })
+      .mockResolvedValueOnce({ accepted: true, changes: [] });
+    const snapshots = await mount_hook();
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = latest_snapshot(snapshots).flow.request_add_files_from_paths([game_root]);
+    });
+    expect(latest_snapshot(snapshots).flow.godot_pack_order.dialog_props.games).toHaveLength(0);
+    await act(async () => {
+      latest_snapshot(snapshots).flow.game_backup_confirm.finish(cancel !== "backup");
+    });
+    if (cancel === "backup") {
+      await pending;
+      expect(latest_snapshot(snapshots).dialog_state.kind).toBeNull();
+      expect(api_fetch_mock).toHaveBeenCalledTimes(1);
+      return;
+    }
+    expect(latest_snapshot(snapshots).flow.godot_pack_order.dialog_props.games).toHaveLength(1);
+    expect(api_fetch_mock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      latest_snapshot(snapshots).flow.godot_pack_order.finish(cancel ? null : orders);
+      await pending;
+    });
+    if (cancel) {
+      expect(latest_snapshot(snapshots).dialog_state.kind).toBeNull();
+      expect(api_fetch_mock).toHaveBeenCalledTimes(1);
+    } else {
+      await act(async () => {
+        await latest_snapshot(snapshots).flow.confirm_dialog();
+      });
+      expect(api_fetch_mock).toHaveBeenLastCalledWith(
+        "/api/workbench/files/import",
+        expect.objectContaining({ godot_pack_orders: orders }),
+      );
+    }
+  });
+
   it.each(["empty", "invalid", "error"])(
     "重新准备失败退出旧确认，恢复后只提交新请求：%s",
     async (failure) => {
@@ -300,11 +350,6 @@ describe("useWorkbenchImportFilesFlow", () => {
         files: [{ source_path: "C:/source/ new.txt ", target_rel_path: " new.txt" }],
         conflict_action: "skip",
         inheritance_mode: "none",
-        project_settings: {
-          source_language: "JA",
-          mtool_optimizer_enable: true,
-          skip_duplicate_source_text_enable: false,
-        },
         expected_section_revisions: {
           files: 1,
           items: 2,
@@ -447,14 +492,9 @@ describe("useWorkbenchImportFilesFlow", () => {
     expect(api_fetch_mock).toHaveBeenCalledOnce();
   });
 
-  it.each(["partial", "all"])(
-    "正式导入 %s 失败只在操作结束后提示一次，保留重试入口",
+  it.each(["success", "failed"])(
+    "正式导入 %s 只在操作结束后提示一次，失败保留重试入口",
     async (mode) => {
-      const failure = {
-        filename: "broken.json",
-        code: "file.parse_failed",
-        message: "Parser rejected the file",
-      };
       api_fetch_mock.mockResolvedValueOnce({
         files_revision: 1,
         files: [
@@ -480,26 +520,15 @@ describe("useWorkbenchImportFilesFlow", () => {
       expect(latest_snapshot(snapshots).dialog_state.submitting).toBe(true);
       expect(read_progress_toast()).toMatchObject({ presentation: "modal" });
       await act(async () => {
-        if (mode === "all")
-          pending.reject(
-            new DesktopApiError({
-              code: "file.parse_failed",
-              details: { failed_files: [failure] },
-            }),
-          );
-        else
-          pending.resolve({
-            accepted: true,
-            changes: [],
-            failed_files: [failure],
-          } as unknown as ProjectWriteResultPayload);
+        if (mode === "failed") pending.reject(new DesktopApiError({ code: "file.parse_failed" }));
+        else pending.resolve({ accepted: true, changes: [] });
         await submission;
       });
       expect(read_progress_toast()).toBeNull();
-      if (mode === "all") {
+      if (mode === "failed") {
         expect(error_toast).toHaveBeenCalledExactlyOnceWith(
           "app.feedback.operation_failed",
-          "broken.json - Parser rejected the file",
+          expect.objectContaining({ code: "file.parse_failed" }),
         );
         expect(latest_snapshot(snapshots).dialog_state).toMatchObject({
           kind: "inherit-import-files",
@@ -508,8 +537,8 @@ describe("useWorkbenchImportFilesFlow", () => {
         expect(push_toast).not.toHaveBeenCalled();
       } else {
         expect(push_toast).toHaveBeenCalledExactlyOnceWith(
-          "warning",
-          "broken.json - Parser rejected the file",
+          "success",
+          "app.feedback.operation_success",
         );
         expect(latest_snapshot(snapshots).dialog_state.kind).toBeNull();
         expect(error_toast).not.toHaveBeenCalled();
@@ -517,6 +546,7 @@ describe("useWorkbenchImportFilesFlow", () => {
     },
   );
 
+  /** 挂载导入流程并记录每次对话框和请求状态。 */
   async function mount_hook(
     options: {
       state?: WorkbenchCommandPlanningState;
@@ -551,6 +581,7 @@ describe("useWorkbenchImportFilesFlow", () => {
   }
 });
 
+/** 连接真实 Hook 与本地对话框状态，按用例注入写入结果。 */
 function HookProbe(props: {
   state: WorkbenchCommandPlanningState;
   run_project_file_write?: (
@@ -566,11 +597,6 @@ function HookProbe(props: {
     project_identity: "E:/demo/project.lg",
     dialog_state,
     get_planning_state: () => props.state,
-    planner_settings: {
-      source_language: "JA",
-      mtool_optimizer_enable: true,
-      skip_duplicate_source_text_enable: false,
-    },
     run_modal_progress_toast,
     run_project_file_write:
       props.run_project_file_write ??
@@ -596,6 +622,7 @@ function HookProbe(props: {
   return null;
 }
 
+/** 从 React 更新记录中取得最新公开状态。 */
 function latest_snapshot(snapshots: HookSnapshot[]): HookSnapshot {
   const snapshot = snapshots.at(-1);
   if (snapshot === undefined) {
@@ -604,6 +631,7 @@ function latest_snapshot(snapshots: HookSnapshot[]): HookSnapshot {
   return snapshot;
 }
 
+/** 提供已有文件与修订，使冲突处理使用一致的工程基线。 */
 function create_project_store_state(): WorkbenchCommandPlanningState {
   return {
     files: [

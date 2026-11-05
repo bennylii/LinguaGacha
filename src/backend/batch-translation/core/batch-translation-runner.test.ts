@@ -9,7 +9,10 @@ import { TASK_PIPELINE_COMMIT_INTERVAL_MS } from "./translation-pipeline";
 import { TranslationWorkerPool } from "../work-unit/translation-worker-pool";
 import { log_error_from_message } from "../../../shared/error";
 import { Model } from "../../../domain/model";
-import { normalize_setting_snapshot } from "../../../domain/setting";
+import {
+  build_project_execution_settings,
+  read_project_language_settings,
+} from "../../../domain/project-settings";
 import { read_text_quality_snapshot } from "../../../shared/text/text-processing";
 import { type BatchTranslationProgress } from "../../../domain/batch-translation";
 import fs from "node:fs";
@@ -105,6 +108,68 @@ describe("BatchTranslationRunner", () => {
     },
   );
 
+  it("前后文贯通规划和请求，只有目标条目写回", async () => {
+    const builtin_root = create_template_root();
+    const pool = new TranslationWorkerPool({
+      builtinRoot: builtin_root,
+      execution: { kind: "in_process" },
+    });
+    const runtime = create_task_runtime();
+    const items = [1, 2, 3].map((id) => create_pending_item(id, "demo.txt", `原文${id}。`));
+    const original = structuredClone(items);
+    const committed: MutableJsonRecord[] = [];
+    const request: BatchTranslationRunnerOptions["llmClient"]["request"] = vi.fn(async (body) => {
+      const prompt = String(body.messages[1]?.content);
+      expect(prompt).toContain("原文1。");
+      expect(prompt).toContain("原文3。");
+      expect(prompt.split("```jsonline")[1]).toBe('\n{"id":0,"text":"原文2。"}\n```');
+      return {
+        response_result: '{"id":0,"text":"译文2。"}',
+        response_think: "",
+        input_tokens: 1,
+        reasoning_tokens: 0,
+        output_tokens: 1,
+        cancelled: false,
+        timeout: false,
+      };
+    });
+    const runner = new BatchTranslationRunner({
+      llmClient: { request },
+      builtinRoot: builtin_root,
+      taskRuntime: runtime,
+      executorClient: pool,
+      taskPlanner: create_test_task_planner(),
+      logManager: create_log_manager(),
+      taskStore: create_task_store({
+        get_translation_items: () => items,
+        commit_translation_batch: async (updated) => {
+          committed.push(...updated);
+          return { changed_item_ids: [], section_revisions: {} };
+        },
+      }),
+    });
+    try {
+      const handle = runtime.begin_standalone("translate");
+      await runtime.execute(handle, () =>
+        runner.run(
+          handle,
+          { operation: "translate", mode: "continue", item_ids: [2], item_statuses: ["NONE"] },
+          create_run_context(1, 512, {
+            preceding_lines_threshold: 1,
+            following_lines_threshold: 1,
+          }),
+        ),
+      );
+      await handle.completion;
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(committed.map((item) => [item.id, item.dst])).toEqual([[2, "译文2。"]]);
+      expect(items).toEqual(original);
+    } finally {
+      await runtime.dispose();
+      await pool.dispose();
+    }
+  });
+
   it("翻译单条重试超限后提交 ERROR 且不回填原文", async () => {
     const committed_batches: MutableJsonRecord[] = [];
     const done = create_status_waiter("done");
@@ -165,7 +230,7 @@ describe("BatchTranslationRunner", () => {
       const retranslate = operation === "retranslate";
       const builtin_root = create_template_root();
       const project_path = path.join(builtin_root, "task.lg");
-      const database = new ProjectDatabase();
+      const database = new ProjectDatabase("1.0.0");
       await database.create_project(project_path, "test");
       await database.transaction(project_path, (writer) =>
         writer.set_items(project_path, [
@@ -191,9 +256,6 @@ describe("BatchTranslationRunner", () => {
       const cache = new CacheManager({
         database,
         logManager: null,
-        appSettingService: {
-          read_setting: () => ({ source_language: "JA", target_language: "ZH" }),
-        } as never,
         workerClient: { run: vi.fn(), dispose: vi.fn() } as unknown as ComputeWorkerClient,
       });
       const publish_change = vi.fn(() => null);
@@ -886,7 +948,7 @@ describe("BatchTranslationRunner", () => {
   }
 
   /**
-   * 提供 BatchTranslationRunner 必需的完整项目端口；用例只覆盖与目标分支相关的方法。
+   * 提供本用例所需的 `BatchTranslationRunner` 项目端口。
    */
   function create_task_store(
     overrides: Partial<BatchTranslationRunnerOptions["taskStore"]> = {},
@@ -948,7 +1010,7 @@ describe("BatchTranslationRunner", () => {
       },
     };
     return {
-      config_snapshot: normalize_setting_snapshot(setting_overrides),
+      config_snapshot: create_execution_settings(setting_overrides),
       model: { ...Model.from_json(model, model.id) },
     };
   }
@@ -981,3 +1043,8 @@ describe("BatchTranslationRunner", () => {
     };
   }
 });
+
+/** 测试执行快照与生产一致：应用设置组合项目语言，语言缺省时使用项目默认值。 */
+function create_execution_settings(value: Record<string, unknown>) {
+  return build_project_execution_settings(value, read_project_language_settings(value));
+}

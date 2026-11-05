@@ -1,8 +1,11 @@
 import { push_error_toast } from "@frontend/app/feedback/desktop-toast";
 import {
+  useAgentChatActions,
+  useAgentChatId,
   useAgentEntry,
   useAgentRound,
   useAgentTimeline,
+  useAgentTimelineStatus,
 } from "@frontend/app/session/agent/agent-chat-context";
 import { find_agent_mention_ranges } from "./agent-mention";
 import {
@@ -19,10 +22,13 @@ import { Check, CircleAlert, Copy, GitFork, Pencil } from "lucide-react";
 
 import type {
   AgentEntry,
+  AgentRunFailure,
   AgentSkillSnapshot,
   AgentEntryStatus,
   AgentAssistantMessagePart,
   AgentResponseAnnotationAttachment,
+  AgentAutoResumeSnapshot,
+  AgentAutoContinueSnapshot,
 } from "@shared/agent";
 import { useI18n } from "@frontend/app/locale/locale-context";
 import { AppButton } from "@frontend/widgets/app-button";
@@ -54,6 +60,9 @@ type AgentTimelineProps = {
 
   follow_reset_revision: number;
   on_continue: () => void;
+  auto_resume: AgentAutoResumeSnapshot | null;
+  on_cancel_auto_resume: () => void;
+  auto_continue: AgentAutoContinueSnapshot | null;
   on_edit: (entry: UserEntry | AssistantEntry) => void;
   render_entry_editor?: ((entry: UserEntry | AssistantEntry) => ReactNode | null) | undefined;
   on_add_annotation: (annotation: AgentResponseAnnotationAttachment) => void;
@@ -64,22 +73,58 @@ type AgentTimelineProps = {
   annotation_disabled: boolean;
 };
 
-/** 时间线订阅轮次顺序，仅在本地保存工具详情选择。 */
+/** 时间线订阅已加载窗口，仅在本地保存工具详情选择。 */
 export function AgentTimeline(props: AgentTimelineProps): JSX.Element {
   const { t } = useI18n();
   const [selected_tool_id, set_selected_tool_id] = useState<string | null>(null);
+  const { roundIds, latestCompactionId, hasEarlier, roundHasEarlier } = useAgentTimeline();
+  const timeline_status = useAgentTimelineStatus();
+  const actions = useAgentChatActions();
+  const chat_id = useAgentChatId();
+  const selected = useAgentEntry(selected_tool_id);
+  const selected_tool = selected?.kind === "tool_call" ? selected : null;
+
+  // 换会话后关闭旧详情，避免把上一段对话的工具身份带到新历史。
   useEffect(() => {
     if (props.active === false) set_selected_tool_id(null);
   }, [props.active]);
-  const { roundIds, latestCompactionId } = useAgentTimeline();
-  const selected = useAgentEntry(selected_tool_id);
-  const selected_tool = selected?.kind === "tool_call" ? selected : null;
+  useEffect(() => {
+    set_selected_tool_id(null);
+  }, [chat_id]);
+
+  const load_earlier = (): void => {
+    void actions.loadEarlier();
+  };
+  const retry_load_earlier = (): void => {
+    void actions.retryLoadEarlier();
+  };
+
   return (
     <>
       <AgentResponseAnnotationSelection
         disabled={props.annotation_disabled}
         on_add={props.on_add_annotation}
       >
+        {hasEarlier ? (
+          <div className="agent-page__timeline-earlier">
+            {timeline_status.loading ? (
+              <span role="status">{t("agent_page.timeline.loading")}</span>
+            ) : timeline_status.error === "failed" ? (
+              <AppButton type="button" size="xs" variant="ghost" onClick={retry_load_earlier}>
+                {t("agent_page.timeline.retry")}
+              </AppButton>
+            ) : (
+              <AppButton type="button" size="xs" variant="ghost" onClick={load_earlier}>
+                {t("agent_page.timeline.show_earlier")}
+              </AppButton>
+            )}
+          </div>
+        ) : null}
+        {timeline_status.error === "cursor_expired" ? (
+          <div className="agent-page__timeline-earlier" role="status">
+            {t("agent_page.timeline.cursor_expired")}
+          </div>
+        ) : null}
         {roundIds.map((roundId, index) => (
           <AgentRound
             key={roundId}
@@ -88,17 +133,23 @@ export function AgentTimeline(props: AgentTimelineProps): JSX.Element {
             compact_available={props.compact_available}
             on_compact={props.on_compact}
             latest_compaction_id={latestCompactionId}
+            has_earlier_in_round={roundHasEarlier.get(roundId) ?? false}
+            load_earlier_disabled={timeline_status.loading}
+            on_load_earlier={load_earlier}
 
             follow_reset_revision={props.follow_reset_revision}
             t={t}
-            revision_available={index === roundIds.length - 1}
+            is_latest_round={index === roundIds.length - 1}
             on_continue={props.on_continue}
+            auto_resume={props.auto_resume}
+            on_cancel_auto_resume={props.on_cancel_auto_resume}
+            auto_continue={props.auto_continue}
             on_fork={props.on_fork}
             fork_disabled={props.fork_disabled}
             on_edit={props.on_edit}
             render_entry_editor={props.render_entry_editor}
-            revision_disabled={index === roundIds.length - 1 ? props.revision_disabled : false}
-            continue_disabled={index === roundIds.length - 1 ? props.continue_disabled : false}
+            revision_disabled={props.revision_disabled}
+            continue_disabled={props.continue_disabled}
             on_open_tool={set_selected_tool_id}
           />
         ))}
@@ -116,11 +167,17 @@ type AgentRoundProps = {
   on_compact: () => void;
   latest_compaction_id: string | null;
   roundId: string;
+  has_earlier_in_round: boolean;
+  load_earlier_disabled: boolean;
+  on_load_earlier: () => void;
 
   follow_reset_revision: number;
   t: Translate;
-  revision_available: boolean;
+  is_latest_round: boolean;
   on_continue: () => void;
+  auto_resume: AgentAutoResumeSnapshot | null;
+  on_cancel_auto_resume: () => void;
+  auto_continue: AgentAutoContinueSnapshot | null;
   on_edit: (entry: UserEntry | AssistantEntry) => void;
   render_entry_editor?: ((entry: UserEntry | AssistantEntry) => ReactNode | null) | undefined;
   on_fork?: ((roundId: string) => void) | undefined;
@@ -134,21 +191,30 @@ type AgentRoundProps = {
 const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
   const user = useAgentEntry(props.roundId);
   const { entryIds, latestAssistantId } = useAgentRound(props.roundId);
-  if (user?.kind !== "user_message" || user.delivery !== "round") return null;
+  if (
+    user?.kind !== "user_message" ||
+    (user.delivery !== "round" && user.delivery !== "auto_continue")
+  )
+    return null;
   const mention_ranges = find_agent_mention_ranges(user.text, props.skills);
   const mention_only =
     mention_ranges.length === 1 &&
     mention_ranges[0]?.from === 0 &&
     mention_ranges[0]?.to === user.text.length;
-  const revision_available = props.revision_available && user.status !== "running";
-  const show_failure_continue = revision_available && user.status === "error";
+  const ended = user.status !== "running";
+  // 任意已结束轮次可编辑起始输入，助手修订与失败继续只属于最新轮次。
+  const latest_ended = props.is_latest_round && ended;
+  const show_failure_continue = latest_ended && user.status === "error";
+  const auto_resume = props.auto_resume?.roundId === user.id ? props.auto_resume : null;
+  const auto_continue = props.auto_continue?.roundId === user.id ? props.auto_continue : null;
   const user_editor = props.render_entry_editor?.(user) ?? null;
   return (
     <>
       <AgentMessageFrame
         role="user"
+        round_header
         actions={
-          revision_available && user_editor === null ? (
+          ended && user_editor === null ? (
             <AgentMessageActions
               entry={user}
               t={props.t}
@@ -174,6 +240,19 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
           </article>
         )}
       </AgentMessageFrame>
+      {props.has_earlier_in_round ? (
+        <div className="agent-page__timeline-earlier agent-page__timeline-earlier--in-round">
+          <AppButton
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={props.load_earlier_disabled}
+            onClick={props.on_load_earlier}
+          >
+            {props.t("agent_page.timeline.show_earlier_in_round")}
+          </AppButton>
+        </div>
+      ) : null}
       {entryIds.map((id) => (
         <AgentRoundItem
           key={id}
@@ -181,16 +260,28 @@ const AgentRound = memo(function AgentRound(props: AgentRoundProps): ReactNode {
           entryId={id}
           latestAssistantId={latestAssistantId}
           on_fork={user.status === "running" ? undefined : props.on_fork}
-          revisionAvailable={revision_available}
+          revisionAvailable={latest_ended}
         />
       ))}
       {show_failure_continue ? (
         <AgentContinueEntry
           label={props.t("app.feedback.model_request_failed")}
+          detail={read_run_failure_detail(user.failure)}
           action_label={props.t("agent_page.action.continue")}
           disabled={props.continue_disabled}
           on_continue={props.on_continue}
         />
+      ) : null}
+      {auto_resume !== null ? (
+        <AgentAutoResumeEntry
+          auto_resume={auto_resume}
+          disabled={props.continue_disabled}
+          on_cancel={props.on_cancel_auto_resume}
+          t={props.t}
+        />
+      ) : null}
+      {auto_continue !== null ? (
+        <AgentAutoContinueEntry auto_continue={auto_continue} t={props.t} />
       ) : null}
       <AgentRoundFooter user={user} />
     </>
@@ -274,9 +365,13 @@ function AgentMessageFrame(props: {
   role: "user" | "assistant";
   actions: ReactNode;
   children: ReactNode;
+  round_header?: boolean; // 轮次头位于前插点之上，阅读锚点需要跳过它
 }): JSX.Element {
   return (
-    <div className={`agent-message-frame agent-message-frame--${props.role}`}>
+    <div
+      className={`agent-message-frame agent-message-frame--${props.role}`}
+      data-round-header={props.round_header === true ? "true" : undefined}
+    >
       {props.children}
       {props.actions}
     </div>
@@ -372,9 +467,19 @@ function get_agent_copy_text(entry: UserEntry | AssistantEntry): string {
     .join("\n\n");
 }
 
-/** 所有尾部失败共用整块“继续”入口，具体步骤由后端权威状态决定。 */
+/** 供应商答复带状态码，没拿到响应时只保留原始说明。 */
+function read_run_failure_detail(failure: AgentRunFailure | null): string | undefined {
+  if (failure === null) return undefined;
+  const parts =
+    failure.status === null ? [failure.detail] : [`HTTP ${failure.status}`, failure.detail];
+  const detail = parts.filter((part) => part !== "").join(" · ");
+  return detail === "" ? undefined : detail;
+}
+
+/** 失败轮次共用的继续入口，具体步骤由后端权威状态决定。 */
 function AgentContinueEntry(props: {
   label: string;
+  detail: string | undefined;
   action_label: string;
   disabled: boolean;
   on_continue: () => void;
@@ -389,7 +494,93 @@ function AgentContinueEntry(props: {
       <CircleAlert aria-hidden="true" />
       <span>{props.label}</span>
       <span className="agent-continue-entry__action">{props.action_label}</span>
+      {props.detail === undefined ? null : (
+        <span className="agent-continue-entry__detail">{props.detail}</span>
+      )}
     </button>
+  );
+}
+
+/**
+ * 自动重试状态行：等待阶段展示倒计时并允许取消，
+ * 续跑阶段只展示「当前未完成」的持续状态，倒计时与取消入口随之消失。
+ */
+function AgentAutoResumeEntry(props: {
+  auto_resume: AgentAutoResumeSnapshot;
+  disabled: boolean;
+  on_cancel: () => void;
+  t: Translate;
+}): JSX.Element {
+  const retry_at = props.auto_resume.retryAt;
+  const [remaining, set_remaining] = useState(() =>
+    retry_at === null ? 0 : read_auto_resume_seconds(retry_at),
+  );
+  useEffect(() => {
+    if (retry_at === null) return;
+    set_remaining(read_auto_resume_seconds(retry_at));
+    const timer = window.setInterval(() => {
+      set_remaining(read_auto_resume_seconds(retry_at));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [retry_at]);
+  const attempt = props.auto_resume.attempt.toString();
+  if (props.auto_resume.phase === "continuing") {
+    return (
+      <div className="agent-auto-resume-entry" role="status">
+        <span className="agent-auto-resume-entry__label">
+          {props.t("agent_page.auto_resume.continuing", { attempt })}
+        </span>
+      </div>
+    );
+  }
+  const label =
+    props.auto_resume.maxAttempts === null
+      ? props.t("agent_page.auto_resume.waiting", {
+          attempt,
+          seconds: remaining.toString(),
+        })
+      : props.t("agent_page.auto_resume.waiting_limited", {
+          attempt,
+          max_attempts: props.auto_resume.maxAttempts.toString(),
+          seconds: remaining.toString(),
+        });
+  return (
+    <div className="agent-auto-resume-entry" role="status">
+      <span className="agent-auto-resume-entry__label">{label}</span>
+      <AppButton
+        type="button"
+        size="xs"
+        variant="ghost"
+        className="text-muted-foreground"
+        disabled={props.disabled}
+        onClick={props.on_cancel}
+      >
+        <span>{props.t("agent_page.auto_resume.cancel")}</span>
+      </AppButton>
+    </div>
+  );
+}
+
+/** 剩余秒数按本地时钟向上取整，等待结束后归零。 */
+function read_auto_resume_seconds(retry_at: number): number {
+  return Math.max(0, Math.ceil((retry_at - Date.now()) / 1_000));
+}
+
+/** 完成度判定与自动继续的进度行；判定失败时不发布状态，界面不会出现残留。 */
+function AgentAutoContinueEntry(props: {
+  auto_continue: AgentAutoContinueSnapshot;
+  t: Translate;
+}): JSX.Element {
+  const label =
+    props.auto_continue.phase === "judging"
+      ? props.t("agent_page.auto_continue.judging")
+      : props.t("agent_page.auto_continue.continuing", {
+          attempt: props.auto_continue.attempt.toString(),
+        });
+  return (
+    <div className="agent-auto-continue-entry" role="status">
+      <span className="agent-auto-continue-entry__label">{label}</span>
+    </div>
   );
 }
 

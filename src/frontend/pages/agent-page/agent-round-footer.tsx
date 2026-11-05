@@ -7,7 +7,10 @@ import {
 } from "@frontend/app/session/agent/agent-chat-context";
 import { useAgentElapsed } from "./agent-entry-status";
 
-type RoundEntry = Extract<AgentEntry, { kind: "user_message"; delivery: "round" }>;
+type RoundEntry = Extract<
+  AgentEntry,
+  { kind: "user_message"; delivery: "round" | "auto_continue" }
+>;
 
 const ROUND_LABEL_KEYS: Readonly<Record<AgentEntryStatus, LocaleKey>> = Object.freeze({
   running: "agent_page.round.running",

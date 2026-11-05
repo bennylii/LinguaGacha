@@ -1,11 +1,6 @@
 import { prepare_game_source } from "../shared/game/engines";
 import { discover_sources } from "../source-discovery";
-import {
-  png_fixture,
-  media_fixture,
-  encrypted_media,
-  MEDIA_KEY,
-} from "../../../test/media-fixture";
+import { encrypted_media, MEDIA_KEY } from "../../../test/media-fixture";
 import { discover_rpgmaker_source, type RPGMakerSource } from "./source";
 import fs from "node:fs";
 import os from "node:os";
@@ -20,7 +15,7 @@ function prepare_source(game: RPGMakerSource, fs: NativeFs): Promise<void> {
   return prepare_game_source({ kind: "game", file_type: "RPGMAKER_MV_MZ", game }, fs);
 }
 
-const PLAIN = png_fixture();
+const PLAIN = Buffer.from("ffd8ffe000104a464946", "hex"); // JPEG 短载荷沿用 .png 路径，转换不按实际格式改名。
 const SYSTEM =
   '{"gameTitle":"原稿","hasEncryptedImages":true,"hasEncryptedAudio":false,"encryptionKey":"' +
   MEDIA_KEY +
@@ -72,12 +67,15 @@ it.each(["media", "commit"])("准备失败 %s 恢复原配置、明文与密文"
     native = new NativeFs();
   if (phase === "media") fs.writeFileSync(path.join(temp.path, "www/img/b.rpgmvp"), "broken");
   if (phase === "commit") {
-    const unlink = native.unlink.bind(native);
-    vi.spyOn(native, "unlink").mockImplementation((file, options) => {
-      unlink(file, options);
-      if (file === path.join(temp.path, "www/img/a.rpgmvp")) {
+    const rename = native.rename.bind(native);
+    vi.spyOn(native, "rename").mockImplementation((from, to) => {
+      if (
+        from === path.join(temp.path, "www/img/a.rpgmvp") &&
+        to.includes(path.sep + "rollback" + path.sep)
+      ) {
         throw new Error("commit failure");
       }
+      rename(from, to);
     });
   }
   await expect(
@@ -105,7 +103,7 @@ it("EVB 同名密文覆盖散装来源，成功后清理正式密文", async () 
   expect(fs.existsSync(path.join(temp.path, ".tmp"))).toBe(false);
 });
 
-it("仅启用音频加密时清理全部音频密文并保留图片", async () => {
+it("仅启用音频加密时空载荷、异格式与普通音频一起提交并保留图片", async () => {
   using temp = fs.mkdtempDisposableSync(path.join(os.tmpdir(), "lg-mv-audio-"));
   const source = fixture(temp.path, false),
     native = new NativeFs();
@@ -118,9 +116,9 @@ it("仅启用音频加密时清理全部音频密文并保留图片", async () =
     }),
   );
   const media = [
-    ["a.rpgmvo", "a.ogg", media_fixture("ogg")],
-    ["b.ogg_", "b.ogg", media_fixture("ogg")],
-    ["c.rpgmvm", "c.m4a", media_fixture("m4a")],
+    ["a.rpgmvo", "a.ogg", Buffer.from("ID3 tagged mp3 frames")],
+    ["b.ogg_", "b.ogg", Buffer.alloc(0)],
+    ["c.rpgmvm", "c.m4a", Buffer.from("ordinary audio payload")],
   ] as const;
   for (const [name, , plain] of media)
     native.write_file_sync(path.join(temp.path, "www/audio", name), encrypted_media(plain));

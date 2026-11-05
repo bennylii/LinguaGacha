@@ -1,7 +1,13 @@
 import { format_local_timestamp } from "@shared/utils/format-local-timestamp";
 import type { LogEntry, LogLevel } from "@frontend/app/desktop/desktop-api";
+import type { LogFileRef } from "@shared/log";
 
 export type LogLevelFilter = "all" | LogLevel;
+
+// 文件身份由日期与实例共同决定；同一天的不同实例是两份独立正文
+export function log_file_key(file: LogFileRef): string {
+  return `${file.date}:${file.instance}`;
+}
 
 // 展示顺序依赖所选日期内的物理行号，重启和索引重建均不改变顺序
 export function sort_log_entries_latest_first(events: LogEntry[]): LogEntry[] {

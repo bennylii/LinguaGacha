@@ -49,6 +49,7 @@ const EMPTY_ENTRY: GlossaryEntryDraft = {
   src: "",
   dst: "",
   info: "",
+  evidence: "",
   case_sensitive: false,
 };
 // 首次查询前使用与后端默认语义一致的只读切片。
@@ -78,6 +79,7 @@ function normalize_dialog_entry<Entry extends GlossaryEntryDraft>(entry: Entry):
     src: entry.src.trim(),
     dst: entry.dst.trim(),
     info: entry.info.trim(),
+    evidence: entry.evidence.trim(),
     case_sensitive: entry.case_sensitive,
   } as Entry;
 }

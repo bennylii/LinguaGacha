@@ -8,8 +8,7 @@ export type RouteId =
   | "agent"
   | "proofreading"
   | "workbench"
-  | "basic-settings"
-  | "expert-settings"
+  | "function-settings"
   | "glossary"
   | "skills"
   | "text-preserve"
@@ -19,7 +18,9 @@ export type RouteId =
   | "custom-prompt"
   | "laboratory"
   | "toolbox"
-  | "game-font";
+  | "remote"
+  | "game-font"
+  | "translation-transfer";
 
 /** 规则页跳转到校对页时只传一次性搜索条件，不携带页面筛选缓存。 */
 export type ProofreadingLookupIntent = {

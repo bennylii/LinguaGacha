@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentImageHostResult } from "../../shared/agent-image";
+import type { RemoteAuthHostResult } from "../../shared/remote-auth-host";
 
 import { normalize_app_language } from "../../domain/app-language";
 import { normalize_log_error, to_log_error, type LogError } from "../../shared/error";
@@ -10,6 +11,9 @@ import type {
   BackendRuntimeResult,
   BackendRuntimeWorkerMessage,
 } from "../../shared/backend-runtime";
+import { create_shutdown_trace, type ShutdownTrace } from "../../native/shutdown-trace";
+import { SHUTDOWN_STAGE_TIMEOUT_MS, SHUTDOWN_TOTAL_TIMEOUT_MS } from "../../shared/shutdown-timing";
+import { with_timeout } from "../../shared/utils/timeout";
 import { t_main_log } from "../log/log-text";
 import {
   build_worker_threads_backend_worker_execution_from_desktop_bundle_dir,
@@ -39,6 +43,8 @@ export async function run_backend_runtime(args: {
   workspaceRuntimeDirectory: string;
   port: BackendRuntimePort;
 }): Promise<void> {
+  // 日志目录在 start 完成后才确定；在此之前退出追踪只走 stderr。
+  let trace: ShutdownTrace = create_shutdown_trace({ directory: null, scope: "backend" });
   const pending_host_requests = new Map<string, PendingHostRequest>(); // requestId 隔离并发宿主回调
   // 窗口宿主取消须等资源释放回包。其它原生操作只结束 worker 的等待。
   const call_host = async (
@@ -56,7 +62,11 @@ export async function run_backend_runtime(args: {
       pending_host_requests.set(request_id, pending);
       if (signal !== undefined) {
         const abort_listener = () => {
-          if (operation.kind === "print_pdf" || operation.kind === "prepare_image") {
+          if (
+            operation.kind === "print_pdf" ||
+            operation.kind === "prepare_image" ||
+            operation.kind === "open_remote_login_window"
+          ) {
             args.port.postMessage({ type: "host_cancel", requestId: request_id });
             return; // 等窗口释放后的回包，工作区互斥仍由原调用持有。
           }
@@ -82,7 +92,7 @@ export async function run_backend_runtime(args: {
   };
   const desktop_bundle_dir = resolve_desktop_bundle_dir_from_module_url(args.moduleUrl);
   // 普通模型请求与 Node fetch 共用同一宿主解析端口，避免两套代理事实漂移。
-  const system_proxy_resolver = {
+  const proxy_resolver = {
     resolveProxy: async (url: string, signal?: AbortSignal) =>
       String(await call_host({ kind: "resolve_proxy", url }, signal)),
   };
@@ -100,7 +110,7 @@ export async function run_backend_runtime(args: {
     },
     appRoot: args.appRoot,
     builtinRoot: args.builtinRoot,
-    systemProxyResolver: system_proxy_resolver,
+    proxyResolver: proxy_resolver,
     openDirectory: async (path) => {
       await call_host({ kind: "open_directory", path });
     },
@@ -111,7 +121,23 @@ export async function run_backend_runtime(args: {
       }
       return result;
     },
+    focusWindow: async () => {
+      await call_host({ kind: "focus_window" });
+    },
+    openProjectWindow: async (project_path) => {
+      await call_host({ kind: "open_project_window", project_path });
+    },
+    remoteAuthHost: async (operation, signal) => {
+      const result = (await call_host(operation, signal)) as RemoteAuthHostResult;
+      if (!is_remote_auth_result(result)) {
+        throw new TypeError("Invalid remote auth host response.");
+      }
+      return result;
+    },
     workspaceRuntimeDirectory: args.workspaceRuntimeDirectory,
+    shutdownTrace: (event, detail) => {
+      trace(event, detail);
+    },
     workerExecution:
       build_worker_threads_backend_worker_execution_from_desktop_bundle_dir(desktop_bundle_dir),
   });
@@ -136,6 +162,7 @@ export async function run_backend_runtime(args: {
 
   /** 控制请求按原始身份回传结构化结果。 */
   const respond = (request_id: string, result: BackendRuntimeResult): void => {
+    if (!result.ok) trace("control.request_failed", { request_id, message: result.error.message });
     args.port.postMessage({ type: "response", requestId: request_id, result });
   };
   // 控制请求各自结算为 response，业务异常在当前请求内回传。
@@ -144,8 +171,17 @@ export async function run_backend_runtime(args: {
   ): Promise<void> => {
     try {
       if (message.type === "stop") {
+        trace("stop_requested", { request_id: message.requestId });
         reject_pending_host_requests(new Error("Backend runtime is closed."));
-        await bootstrap.stop();
+        await with_timeout(
+          "bootstrap.stop",
+          bootstrap.stop(),
+          // 关闭本身已在各阶段内限时，这里只兜住 stop 管道本身不结算的极端情况。
+          SHUTDOWN_TOTAL_TIMEOUT_MS + SHUTDOWN_STAGE_TIMEOUT_MS,
+        ).catch((error: unknown) => {
+          trace("stop_failed", { message: error instanceof Error ? error.message : String(error) });
+        });
+        trace("stop_responded");
         respond(message.requestId, { ok: true, data: null });
         args.port.close?.();
         return;
@@ -177,9 +213,15 @@ export async function run_backend_runtime(args: {
       appVersion: start_result.backendServices.app.metadata.read_version(),
       berserkerUpdateRootDir:
         start_result.backendServices.app.paths.get_berserker_update_root_dir(),
+      logDir: start_result.backendServices.app.paths.get_log_dir(),
+      networkProxy: start_result.networkProxy,
     };
+    // ready 之后业务日志目录才确定，退出追踪改为与业务日志同目录记录。
+    trace = create_shutdown_trace({ directory: ready.logDir, scope: "backend" });
+    trace("ready", { api_base_url: ready.apiBaseUrl });
     args.port.postMessage({ type: "ready", data: ready });
   } catch (error) {
+    trace("start_failed", { message: error instanceof Error ? error.message : String(error) });
     args.port.postMessage({ type: "start_failed", error: to_log_error(error) });
     reject_pending_host_requests(error);
     await bootstrap.stop().catch(() => undefined);
@@ -195,4 +237,17 @@ function to_error(error: LogError): Error {
   if (normalized.stack === undefined) delete result.stack;
   else result.stack = normalized.stack;
   return result;
+}
+
+function is_remote_auth_result(value: unknown): value is RemoteAuthHostResult {
+  if (typeof value !== "object" || value === null) return false;
+  const status = (value as { status?: unknown }).status;
+  if (
+    !["succeeded", "unauthorized", "cancelled", "timeout", "unavailable"].includes(String(status))
+  ) {
+    return false;
+  }
+  if (status !== "succeeded") return true;
+  const record = value as { token?: unknown; cookie?: unknown };
+  return typeof record.token === "string" && typeof record.cookie === "string";
 }

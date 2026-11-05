@@ -7,6 +7,7 @@ const glossary_fields = {
   src: Type.String({ pattern: "\\S" }), // 在条目原文中匹配的术语，至少含一个非空白字符。
   dst: Type.String(), // 在对应译文中检查应用的术语译文。
   info: Type.String(), // 提示词和页面使用的术语说明。
+  evidence: Type.String(), // 可追溯查证材料，只供页面与 Agent 阅读，不进入翻译提示词。
   case_sensitive: Type.Boolean(), // 术语原文匹配是否区分大小写。
 };
 const replacement_fields = {
@@ -68,7 +69,7 @@ export type QualityRuleEntryInput = Static<
 /** src 必填，其余业务字段在预设和历史读取边界补齐。 */
 const replacement_defaults = { dst: "", regex: false, case_sensitive: false };
 const QUALITY_RULE_DEFAULT_FIELDS = {
-  glossary: { dst: "", info: "", case_sensitive: false },
+  glossary: { dst: "", info: "", evidence: "", case_sensitive: false },
   text_preserve: { info: "" },
   pre_replacement: replacement_defaults,
   post_replacement: replacement_defaults,

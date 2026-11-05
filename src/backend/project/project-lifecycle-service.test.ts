@@ -1,9 +1,13 @@
+import { FileFormatService } from "../file/file-format-service";
+import { GameDirectoryOperations } from "../file/shared/game/game-directory-operations";
 import { evb_fixture } from "../../test/evb-fixture";
 import { wolf_files } from "../../test/wolf-fixture";
 import { wolf_archive_fixture } from "../../test/wolf-archive-fixture";
+import { create_godot_fixture, godot_pack_fixture } from "../../test/godot-fixture";
 import { ProjectDatabaseAccess } from "../database/database-operations";
 import { create_pdf_execution } from "../file/pdf/test-support";
 import { read_zip_fixture, zip_text } from "../../test/zip-fixture";
+import { create_epub_fixture } from "../../test/epub-fixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectSessionState } from "./project-session-state";
 import fs from "node:fs";
@@ -19,12 +23,26 @@ import type { LogManager } from "../log/log-manager";
 import type { AppSettingService } from "../app/app-setting-service";
 import { AppPathService } from "../app/app-path-service";
 import { ProjectLifecycleService } from "./project-lifecycle-service";
+import { ProjectContentService } from "./project-content-service";
+import { adapt_project_change } from "./project-write-event-adapter";
 import { RuntimeOperationGate } from "../runtime-operation-gate";
 import { ProjectWriteStore } from "./project-write-store";
 import { create_item } from "../../domain/item";
+import {
+  DEFAULT_PROJECT_LANGUAGE_SETTINGS,
+  type ProjectLanguageSettings,
+} from "../../domain/project-settings";
+import type { RemoteNovelImportPort } from "../remote/novel-source-service";
+import {
+  build_remote_epub_map,
+  REMOTE_EPUB_MAP_META_KEY,
+  type RemoteSourceBinding,
+} from "../remote/remote-source";
 
 type TestProjectDatabase = ProjectDatabase & {
-  get_project_summary: ReturnType<typeof vi.fn>;
+  upsert_meta_entries: ReturnType<typeof vi.fn>;
+  patch_item_translation_fields: ReturnType<typeof vi.fn>;
+  read_project_preview: ReturnType<typeof vi.fn>;
   close_project: ReturnType<typeof vi.fn>;
   create_project: ReturnType<typeof vi.fn>;
   transaction: ReturnType<typeof vi.fn>;
@@ -32,6 +50,247 @@ type TestProjectDatabase = ProjectDatabase & {
 
 describe("ProjectLifecycleService", () => {
   const cleanup_paths: string[] = []; // 生命周期测试会创建真实临时文件，统一登记清理避免污染用户工作区
+
+  it.each([false, true])("正式创建只发现一次，游戏通知先于本批全部准备：%s", async (games) => {
+    const root = create_temp_dir();
+    const paths = games
+      ? ["first", "second"].map((name) => {
+          const game = path.join(root, name);
+          fs.mkdirSync(game);
+          fs.writeFileSync(path.join(game, "game.pck"), godot_pack_fixture(create_godot_fixture()));
+          return game;
+        })
+      : [write_file(path.join(root, "text.txt"), "原文")];
+    const database = new ProjectDatabase("1.0.0");
+    const service = create_service({ database });
+    const discover = vi.spyOn(FileFormatService.prototype, "collect_source_file_entries");
+    const notify = vi.fn(() => {
+      for (const game of paths) {
+        expect(fs.readdirSync(game)).toEqual(["game.pck"]);
+      }
+    });
+    try {
+      const project = path.join(root, "new.lg");
+      await service.create_project_commit({ path: project, source_paths: paths }, notify);
+      expect(discover).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledTimes(games ? 1 : 0);
+      expect(await database.get_all_asset_records(project)).toHaveLength(paths.length);
+      if (games)
+        for (const game of paths) expect(fs.existsSync(path.join(game, "game.pck"))).toBe(false);
+    } finally {
+      discover.mockRestore();
+      await database.close();
+    }
+  });
+
+  it("新建来源摘要只读，确认顺序传到准备，错误顺序不创建工程", async () => {
+    const root = create_temp_dir(),
+      game = path.join(root, "ordered"),
+      project = path.join(root, "ordered.lg");
+    fs.mkdirSync(game);
+    for (const [name, text] of [
+      ["game.pck", "base"],
+      ["patch2.pck", "two"],
+      ["patch10.pck", "ten"],
+    ])
+      fs.writeFileSync(
+        path.join(game, name!),
+        godot_pack_fixture(new Map([...create_godot_fixture(), ["main.gd", Buffer.from(text!)]])),
+      );
+    const database = new ProjectDatabase("1.0.0"),
+      service = create_service({ database });
+    try {
+      expect((await service.summarize_source_files({ source_paths: [game] })).godot_packs).toEqual([
+        {
+          game_root: game,
+          game_name: "ordered",
+          external_pcks: ["game.pck", "patch2.pck", "patch10.pck"],
+        },
+      ]);
+      expect(fs.readdirSync(game).sort()).toEqual(["game.pck", "patch10.pck", "patch2.pck"]);
+      await expect(
+        service.create_project_commit({
+          path: project,
+          source_paths: [game],
+          godot_pack_orders: [{ game_root: game, ordered_pcks: ["game.pck"] }],
+        }),
+      ).rejects.toMatchObject({ code: "request.validation_failed" });
+      expect(fs.existsSync(project)).toBe(false);
+      expect(fs.existsSync(path.join(game, "backup_lg"))).toBe(false);
+      await service.create_project_commit({
+        path: project,
+        source_paths: [game],
+        godot_pack_orders: [
+          { game_root: game, ordered_pcks: ["game.pck", "patch10.pck", "patch2.pck"] },
+        ],
+      });
+      expect(fs.readFileSync(path.join(game, "main.gd"), "utf8")).toBe("two");
+      expect(await database.get_all_asset_records(project)).toHaveLength(1);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("小说地址新建在简体中文目标下沿用站点译文，其他目标语言只导入源文", async () => {
+    const root = create_temp_dir();
+    const source = write_file(path.join(root, "remote.txt"), "# 第一章\nこんにちは\nさようなら");
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "web",
+      provider_id: "kakuyomu",
+      novel_id: "123456",
+      url: "https://n.novelia.cc/novel/kakuyomu/123456",
+      title: "测试小说",
+      asset_path: "remote.txt",
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+    const prepare_import = vi.fn(async () => ({
+      source_path: source,
+      binding,
+      content_hash: "hash",
+      text: "# 第一章\nこんにちは\nさようなら",
+      translations: new Map([
+        [1, "你好"],
+        [2, "再见"],
+      ]),
+      epub_map: null,
+      commit_snapshot: async () => {},
+      dispose: async () => {},
+    }));
+    const database = new ProjectDatabase("1.0.0");
+    const service = create_service({ database, remote_import: { prepare_import } });
+    try {
+      const zh_project = path.join(root, "zh.lg");
+      await service.create_project_commit({
+        path: zh_project,
+        remote_novel_url: binding.url,
+        languages: { source_language: "JA", target_language: "ZH" },
+      });
+      expect(prepare_import).toHaveBeenLastCalledWith(binding.url, expect.anything(), {
+        translations: true,
+      });
+      const zh_items = (await database.get_all_items(zh_project))
+        .map((item) => ({
+          row: Number(item["row"]),
+          dst: item["dst"],
+          status: item["status"],
+        }))
+        .sort((left, right) => left.row - right.row);
+      expect(zh_items).toEqual([
+        { row: 0, dst: "", status: "NONE" },
+        { row: 1, dst: "你好", status: "PROCESSED" },
+        { row: 2, dst: "再见", status: "PROCESSED" },
+      ]);
+
+      const en_project = path.join(root, "en.lg");
+      await service.create_project_commit({
+        path: en_project,
+        remote_novel_url: binding.url,
+        languages: { source_language: "JA", target_language: "EN" },
+      });
+      expect(prepare_import).toHaveBeenLastCalledWith(binding.url, expect.anything(), {
+        translations: false,
+      });
+      const en_items = (await database.get_all_items(en_project))
+        .map((item) => ({
+          row: Number(item["row"]),
+          dst: item["dst"],
+          status: item["status"],
+        }))
+        .sort((left, right) => left.row - right.row);
+      expect(en_items).toEqual([
+        { row: 0, dst: "", status: "NONE" },
+        { row: 1, dst: "", status: "NONE" },
+        { row: 2, dst: "", status: "NONE" },
+      ]);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("文库整本 EPUB 新建时把章节映射与资产一起写入", async () => {
+    const root = create_temp_dir();
+    const source = path.join(root, "remote.epub");
+    fs.writeFileSync(source, await create_epub_fixture("こんにちは"));
+    const binding: RemoteSourceBinding = {
+      origin: "https://n.novelia.cc",
+      host: "n.novelia.cc",
+      kind: "wenku",
+      provider_id: "",
+      novel_id: "12345",
+      url: "https://n.novelia.cc/wenku/12345",
+      title: "测试小说",
+      asset_path: "remote.epub",
+      remote_hash: "a".repeat(64),
+      chapter_count: 1,
+      synced_at: "2026-10-21T00:00:00.000Z",
+    };
+    const epub_map = build_remote_epub_map({
+      volumes: [{ volume_id: "1.epub", volume_title: "第一卷", prefix: "vol-1.epub" }],
+      documents: [
+        {
+          chapter_id: "OPS.chapter.xhtml",
+          volume_id: "1.epub",
+          source_doc_path: "OPS/chapter.xhtml",
+          doc_path: "OEBPS/vol-1.epub/OPS/chapter.xhtml",
+          title: "第一章",
+          linear: true,
+          state: "active",
+        },
+      ],
+    });
+    const prepare_import = vi.fn(async () => ({
+      source_path: source,
+      binding,
+      content_hash: "hash",
+      text: "# 第一章\nこんにちは",
+      translations: new Map([[1, "你好"]]),
+      epub_map,
+      commit_snapshot: async () => {},
+      dispose: async () => {},
+    }));
+    const database = new ProjectDatabase("1.0.0");
+    const service = create_service({ database, remote_import: { prepare_import } });
+    try {
+      const project_path = path.join(root, "wenku.lg");
+      await service.create_project_commit({
+        path: project_path,
+        remote_novel_url: binding.url,
+        languages: { source_language: "JA", target_language: "ZH" },
+      });
+
+      const meta = await database.get_all_meta(project_path);
+      expect(meta[REMOTE_EPUB_MAP_META_KEY]).toEqual(epub_map);
+      expect(await database.get_all_asset_records(project_path)).toMatchObject([
+        { path: "remote.epub", file_type: "EPUB" },
+      ]);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("新建时忽略直接包文件，游戏原件保持完整", async () => {
+    const root = create_temp_dir();
+    const game = path.join(root, "game");
+    const pack = godot_pack_fixture(create_godot_fixture());
+    fs.mkdirSync(game);
+    const carrier = path.join(game, "game.pck");
+    fs.writeFileSync(carrier, pack);
+    const database = new ProjectDatabase("1.0.0");
+    const service = create_service({ database });
+    try {
+      const empty = path.join(root, "empty.lg");
+      await service.create_project_commit({ path: empty, source_paths: [carrier] });
+      expect(await database.get_all_asset_records(empty)).toEqual([]);
+      expect(fs.readdirSync(game)).toEqual(["game.pck"]);
+      expect(fs.readFileSync(carrier).equals(pack)).toBe(true);
+    } finally {
+      await database.close();
+    }
+  });
 
   it("新建复用预过滤条目，重开读取数据库且安装一致快照", async () => {
     const root = create_temp_dir();
@@ -45,6 +304,7 @@ describe("ProjectLifecycleService", () => {
     );
     const game = path.join(root, "game");
     const exe = write_file(path.join(game, "GamePro.exe"));
+    fs.writeFileSync(path.join(game, "dialogue.json"), "{");
     fs.writeFileSync(
       path.join(game, "Data.wolf"),
       await wolf_archive_fixture(
@@ -52,7 +312,7 @@ describe("ProjectLifecycleService", () => {
         0,
       ),
     );
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const snapshots: ProjectDataSnapshot[] = [];
     const service = create_service({
       database,
@@ -69,6 +329,7 @@ describe("ProjectLifecycleService", () => {
       expect(reads).not.toHaveBeenCalled();
       expect(snapshots[0]?.meta).toMatchObject({
         glossary_enable: true,
+        additional_files: { "game.wolfrpg": ["dialogue.json"] },
         translation_prompt_legacy_migrated: true,
         "migration.asset_file_type_complete": true,
       });
@@ -85,6 +346,7 @@ describe("ProjectLifecycleService", () => {
       const { meta: second_meta, ...loaded } = snapshots[1]!;
       expect(loaded).toEqual(created);
       expect(second_meta.translation_extras).toEqual(first_meta.translation_extras);
+      expect(second_meta.additional_files).toEqual(first_meta.additional_files);
     } finally {
       await database.close();
     }
@@ -92,7 +354,7 @@ describe("ProjectLifecycleService", () => {
 
   it.each(["create", "load"] as const)("%s 快照准备失败回滚且不发布", async (operation) => {
     const project_path = path.join(create_temp_dir(), "rollback.lg");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const session_state = create_session_state();
     const publish = vi.fn();
     try {
@@ -123,7 +385,7 @@ describe("ProjectLifecycleService", () => {
 
   it("新建提交后缓存失败保留工程，重开能恢复当前事实", async () => {
     const project_path = path.join(create_temp_dir(), "committed.lg");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const session_state = create_session_state();
     const publish = vi.fn().mockImplementationOnce(() => {
       throw new Error("install failed");
@@ -153,7 +415,7 @@ describe("ProjectLifecycleService", () => {
 
   it.each(["close", "cache"])("加载提交后 %s 失败保留事实与恢复信息", async (phase) => {
     const project_path = path.join(create_temp_dir(), "scope.lg");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     await database.create_project(project_path, "scope");
     await database.transaction(project_path, (writer) =>
       writer.set_meta(project_path, "updated_at", "before"),
@@ -202,6 +464,7 @@ describe("ProjectLifecycleService", () => {
       project: {
         path: "E:/Project/demo.lg",
         loaded: true,
+        languages: DEFAULT_PROJECT_LANGUAGE_SETTINGS,
       },
     });
   });
@@ -254,7 +517,9 @@ describe("ProjectLifecycleService", () => {
     const project_events: Array<Parameters<CacheLifecycleHandler>[0]> = [];
     const session_state = create_session_state();
     const service = create_service({
-      database: create_database(),
+      database: create_database({
+        meta: { mtool_optimizer_enable: true, skip_duplicate_source_text_enable: true },
+      }),
       session_state,
       project_event_handler: (event) => {
         project_events.push(event);
@@ -262,7 +527,7 @@ describe("ProjectLifecycleService", () => {
     });
 
     await expect(service.load_project({ path: project_path })).resolves.toEqual({
-      project: { path: project_path, loaded: true },
+      project: { path: project_path, loaded: true, languages: DEFAULT_PROJECT_LANGUAGE_SETTINGS },
     });
 
     expect(session_state.snapshot()).toEqual({
@@ -278,10 +543,11 @@ describe("ProjectLifecycleService", () => {
 
   it.each([true, false])("打开项目在缓存热机前协调同文件重复状态，开关为 %s", async (enabled) => {
     const project_path = path.join(create_temp_dir(), "duplicates.lg");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     try {
       await database.create_project(project_path, "duplicates", (database) => {
         database.set_meta(project_path, "skip_duplicate_source_text_enable", enabled);
+        database.set_meta(project_path, "mtool_optimizer_enable", true);
         database.set_items(project_path, [
           create_item({ id: 1, src: "同文", file_path: "a.txt", row: 99, status: "DUPLICATED" }),
           create_item({ id: 2, src: "同文", file_path: "a.txt", row: 0, status: "NONE" }),
@@ -304,6 +570,7 @@ describe("ProjectLifecycleService", () => {
       });
       const service = create_service({
         database,
+        config: { mtool_optimizer_enable: true, skip_duplicate_source_text_enable: enabled },
         project_event_handler: async () => {
           expect((await database.get_all_items(project_path)).map((item) => item.status)).toEqual([
             "NONE",
@@ -349,97 +616,126 @@ describe("ProjectLifecycleService", () => {
     });
   });
 
-  it("open-preview 仅目标语言变化时返回 settings_only", async () => {
-    const project_path = write_file(path.join(create_temp_dir(), "settings-only.lg"));
-    const service = create_service({
-      database: create_database({
-        meta: {
-          source_language: "JA",
-          target_language: "EN",
-          mtool_optimizer_enable: true,
-          skip_duplicate_source_text_enable: true,
-        },
-      }),
-      config: {
-        source_language: "JA",
-        target_language: "ZH",
+  it("打开工程保留项目语言，只在打开事务内对齐应用预过滤开关", async () => {
+    const project_path = write_file(path.join(create_temp_dir(), "aligned.lg"));
+    const database = create_database({
+      meta: {
+        source_language: "EN",
+        target_language: "DE",
         mtool_optimizer_enable: true,
         skip_duplicate_source_text_enable: true,
       },
+      asset_records: [{ path: "script.txt", sort_order: 0, file_type: "TXT" }],
+      items: [
+        create_item({ id: 1, file_path: "script.txt", file_type: "TXT", src: "こんにちは" }),
+      ] as unknown as MutableJsonRecord[],
     });
+    const service = create_service({ database, config: { mtool_optimizer_enable: false } });
 
-    expect(await service.get_open_alignment_preview({ path: project_path })).toEqual({
-      preview: {
-        action: "settings_only",
-        project_path,
-        project_settings: {
-          source_language: "JA",
-          target_language: "EN",
-          mtool_optimizer_enable: true,
-          skip_duplicate_source_text_enable: true,
-        },
-        current_settings: {
-          source_language: "JA",
-          target_language: "ZH",
-          mtool_optimizer_enable: true,
-          skip_duplicate_source_text_enable: true,
-        },
-        changed: {
-          source_language: false,
-          target_language: true,
-          mtool_optimizer_enable: false,
-          skip_duplicate_source_text_enable: false,
-        },
-        section_revisions: null,
+    await expect(service.load_project({ path: project_path })).resolves.toEqual({
+      project: {
+        path: project_path,
+        loaded: true,
+        languages: { source_language: "EN", target_language: "DE" },
+      },
+      settings_alignment: {
+        settings: { mtool_optimizer_enable: false, skip_duplicate_source_text_enable: true },
+        changed: { mtool_optimizer_enable: true, skip_duplicate_source_text_enable: false },
       },
     });
-  });
-
-  it("open-preview 在源语言或预过滤字段变化时只返回 section revision 依赖", async () => {
-    const project_path = write_file(path.join(create_temp_dir(), "prefilter.lg"));
-    const service = create_service({
-      database: create_database({
-        meta: {
-          source_language: "EN",
-          target_language: "ZH",
-          project_runtime_revision: null,
-          "project_runtime_revision.files": 2,
-          "project_runtime_revision.items": 3,
-        },
-        asset_records: [{ path: "script.txt", sort_order: 0, file_type: "TXT" }],
-        items: [
-          {
-            id: 1,
-            file_path: "script.txt",
-            file_type: "TXT",
-            src: "Hello",
-            status: "NONE",
-          },
-        ],
-      }),
-      config: {
-        source_language: "JA",
-        target_language: "ZH",
-        mtool_optimizer_enable: true,
-        skip_duplicate_source_text_enable: true,
-      },
+    const meta_writes = vi.mocked(database.upsert_meta_entries).mock.calls.at(-1)?.[1];
+    expect(meta_writes).toMatchObject({
+      mtool_optimizer_enable: false,
+      prefilter_config: { source_language: "EN", mtool_optimizer_enable: false },
     });
-
-    const result = await service.get_open_alignment_preview({ path: project_path });
-
-    expect(result["preview"]).toEqual(
+    expect(meta_writes).not.toHaveProperty("source_language");
+    expect(meta_writes).not.toHaveProperty("target_language");
+    // 英文源语言下日文原文被预过滤，打开事务只回写状态变化的条目。
+    expect(database.patch_item_translation_fields).toHaveBeenCalledWith(project_path, [
       expect.objectContaining({
-        action: "prefiltered_items",
-        section_revisions: { files: 2, items: 3 },
+        item_id: 1,
+        next: expect.objectContaining({ status: "LANGUAGE_SKIPPED" }),
       }),
-    );
+    ]);
   });
 
-  it("create-commit 只凭源路径、目标路径和设置镜像生成新工程事实", async () => {
+  it("预过滤开关一致时打开工程不对齐也不改写设置", async () => {
+    const project_path = write_file(path.join(create_temp_dir(), "same.lg"));
+    const database = create_database({
+      meta: {
+        target_language: "KO",
+        prefilter_config: {
+          source_language: "EN",
+          mtool_optimizer_enable: true,
+          skip_duplicate_source_text_enable: true,
+        },
+      },
+    });
+    const service = create_service({ database });
+
+    await expect(service.load_project({ path: project_path })).resolves.toEqual({
+      project: {
+        path: project_path,
+        loaded: true,
+        languages: { source_language: "EN", target_language: "KO" },
+      },
+    });
+    expect(database.upsert_meta_entries).not.toHaveBeenCalled();
+  });
+
+  it("连续打开语言不同的工程时各自保留项目语言", async () => {
+    const app_root = create_temp_dir();
+    const source_path = write_file(path.join(app_root, "source", "script.txt"), "こんにちは");
+    const database = new ProjectDatabase("1.0.0");
+    const service = create_service({ app_root, database });
+    const project_a = path.join(app_root, "a.lg");
+    const project_b = path.join(app_root, "b.lg");
+    try {
+      await service.create_project_commit({
+        source_paths: [source_path],
+        path: project_a,
+        languages: { source_language: "JA", target_language: "EN" },
+      });
+      await service.create_project_commit({
+        source_paths: [source_path],
+        path: project_b,
+        languages: { source_language: "ALL", target_language: "KO" },
+      });
+      for (const [project_path, languages] of [
+        [project_a, { source_language: "JA", target_language: "EN" }],
+        [project_b, { source_language: "ALL", target_language: "KO" }],
+        [project_a, { source_language: "JA", target_language: "EN" }],
+      ] as const) {
+        await expect(service.load_project({ path: project_path })).resolves.toMatchObject({
+          project: { languages },
+        });
+        await expect(service.get_project_snapshot()).resolves.toMatchObject({
+          project: { path: project_path, languages },
+        });
+      }
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("create-commit 拒绝非法初始语言且不创建工程", async () => {
+    const database = create_database();
+    const service = create_service({ database });
+    await expect(
+      service.create_project_commit({
+        source_paths: [],
+        path: path.join(create_temp_dir(), "invalid.lg"),
+        languages: { source_language: "JA", target_language: "ALL" },
+      }),
+    ).rejects.toMatchObject({ code: "request.validation_failed" });
+    expect(database.create_project).not.toHaveBeenCalled();
+  });
+
+  it("create-commit 按源路径、目标路径和所选语言生成新工程事实", async () => {
     const app_root = create_temp_dir();
     const project_path = path.join(app_root, "created.lg");
     const source_path = write_file(path.join(app_root, "source", "script.txt"), "こんにちは");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const service = create_service({
       app_root,
       database,
@@ -456,14 +752,11 @@ describe("ProjectLifecycleService", () => {
         service.create_project_commit({
           source_paths: [path.dirname(source_path)],
           path: project_path,
-          project_settings: {
-            source_language: "JA",
-            target_language: "ZH",
-            mtool_optimizer_enable: true,
-            skip_duplicate_source_text_enable: true,
-          },
+          languages: { source_language: "JA", target_language: "ZH" },
         }),
-      ).resolves.toEqual({ project: { path: project_path, loaded: true } });
+      ).resolves.toMatchObject({
+        project: { path: project_path, loaded: true, languages: DEFAULT_PROJECT_LANGUAGE_SETTINGS },
+      });
 
       expect(await database.get_all_asset_records(project_path)).toEqual([
         { path: path.join("source", "script.txt"), sort_order: 0, file_type: "TXT" },
@@ -493,7 +786,7 @@ describe("ProjectLifecycleService", () => {
   it("create-commit 目标工程已存在时追加时间戳写入新路径", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 5, 2, 3, 4, 5));
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     try {
       const app_root = create_temp_dir();
       const project_path = write_file(path.join(app_root, "created.lg"), "old-project");
@@ -508,10 +801,13 @@ describe("ProjectLifecycleService", () => {
         service.create_project_commit({
           source_paths: [path.dirname(source_path)],
           path: project_path,
-          project_settings: {},
         }),
-      ).resolves.toEqual({
-        project: { path: resolved_project_path, loaded: true },
+      ).resolves.toMatchObject({
+        project: {
+          path: resolved_project_path,
+          loaded: true,
+          languages: DEFAULT_PROJECT_LANGUAGE_SETTINGS,
+        },
       });
 
       expect(fs.readFileSync(project_path, "utf-8")).toBe("old-project");
@@ -525,7 +821,7 @@ describe("ProjectLifecycleService", () => {
   it("create-commit 时间戳路径也存在时追加递增序号", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 5, 2, 3, 4, 5));
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     try {
       const app_root = create_temp_dir();
       const project_path = write_file(path.join(app_root, "created.lg"), "old-project");
@@ -544,10 +840,13 @@ describe("ProjectLifecycleService", () => {
         service.create_project_commit({
           source_paths: [path.dirname(source_path)],
           path: project_path,
-          project_settings: {},
         }),
-      ).resolves.toEqual({
-        project: { path: resolved_project_path, loaded: true },
+      ).resolves.toMatchObject({
+        project: {
+          path: resolved_project_path,
+          loaded: true,
+          languages: DEFAULT_PROJECT_LANGUAGE_SETTINGS,
+        },
       });
 
       expect(fs.readFileSync(project_path, "utf-8")).toBe("old-project");
@@ -574,7 +873,7 @@ describe("ProjectLifecycleService", () => {
       path.join(app_root, "builtin", "translation_prompt", "preset", "base.txt"),
       "翻译提示词",
     );
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const service = create_service({
       app_root,
       database,
@@ -590,9 +889,10 @@ describe("ProjectLifecycleService", () => {
         service.create_project_commit({
           source_paths: [],
           path: project_path,
-          project_settings: {},
         }),
-      ).resolves.toEqual({ project: { path: project_path, loaded: true } });
+      ).resolves.toMatchObject({
+        project: { path: project_path, loaded: true, languages: DEFAULT_PROJECT_LANGUAGE_SETTINGS },
+      });
 
       expect(await database.get_rules(project_path, "glossary")).toEqual([
         {
@@ -600,6 +900,7 @@ describe("ProjectLifecycleService", () => {
           src: "魔力",
           dst: "Mana",
           info: "",
+          evidence: "",
           case_sensitive: false,
         },
       ]);
@@ -627,7 +928,7 @@ describe("ProjectLifecycleService", () => {
   it("create-commit 在单个默认预设读取失败时继续创建可用工程", async () => {
     const app_root = create_temp_dir();
     const project_path = path.join(app_root, "created-with-missing-preset.lg");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const log_manager = create_log_manager();
     const service = create_service({
       app_root,
@@ -643,9 +944,10 @@ describe("ProjectLifecycleService", () => {
         service.create_project_commit({
           source_paths: [],
           path: project_path,
-          project_settings: {},
         }),
-      ).resolves.toEqual({ project: { path: project_path, loaded: true } });
+      ).resolves.toMatchObject({
+        project: { path: project_path, loaded: true, languages: DEFAULT_PROJECT_LANGUAGE_SETTINGS },
+      });
 
       expect(await database.get_all_meta(project_path)).toMatchObject({
         text_preserve_mode: "smart",
@@ -694,7 +996,7 @@ describe("ProjectLifecycleService", () => {
       "{",
     );
     if (kind === "evb") fs.writeFileSync(broken_json, evb_fixture(new Map()).subarray(0, -1));
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const log_manager = create_log_manager();
     const service = create_service({
       app_root,
@@ -707,27 +1009,29 @@ describe("ProjectLifecycleService", () => {
         service.create_project_commit({
           source_paths: [source_dir],
           path: project_path,
-          project_settings: {},
         }),
-      ).resolves.toEqual({
-        project: { path: project_path, loaded: true },
-        failed_files: [
-          {
-            source_path: broken_json,
-            rel_path: kind === "json" ? path.join("source", "broken.json") : "broken.exe",
-            filename: path.basename(broken_json),
-            code: kind === "json" ? "file.parse_failed" : "file.io_failed",
-            message: expect.any(String),
-          },
-        ],
+      ).resolves.toMatchObject({
+        project: { path: project_path, loaded: true, languages: DEFAULT_PROJECT_LANGUAGE_SETTINGS },
+        source_operation: { saved_assets: kind === "json" ? 2 : 1, directory_changes: [] },
       });
 
       expect(await database.get_all_asset_records(project_path)).toEqual([
-        { path: path.join("source", "script.txt"), sort_order: 0, file_type: "TXT" },
+        ...(kind === "json"
+          ? [{ path: path.join("source", "broken.json"), sort_order: 0, file_type: "NONE" }]
+          : []),
+        {
+          path: path.join("source", "script.txt"),
+          sort_order: kind === "json" ? 1 : 0,
+          file_type: "TXT",
+        },
       ]);
       expect(log_manager.warning).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ source: "project-lifecycle" }),
+        expect.stringContaining(path.basename(broken_json)),
+        expect.objectContaining({
+          source: "project-lifecycle",
+          error: expect.anything(),
+          context: expect.objectContaining({ source_path: broken_json }),
+        }),
       );
     } finally {
       await database.close();
@@ -741,16 +1045,15 @@ describe("ProjectLifecycleService", () => {
     write_file(path.join(game, "data/System.json"), "{}");
     write_file(path.join(game, "js/rmmz_core.js"), "");
     const source = write_file(path.join(game, "js/plugins/bad.js"), "<test>");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const log_manager = create_log_manager();
     const service = create_service({ app_root, database, log_manager });
     try {
       const result = await service.create_project_commit({
         source_paths: [game],
         path: project_path,
-        project_settings: {},
       });
-      expect(result["failed_files"]).toBeUndefined();
+      expect(result["source_operation"]).toEqual({ saved_assets: 1, directory_changes: [] });
       const archive = await read_zip_fixture(
         (await database.read_asset_content(project_path, "game.rpgmaker"))!,
       );
@@ -763,13 +1066,11 @@ describe("ProjectLifecycleService", () => {
         expect.stringContaining("bad.js"),
         expect.objectContaining({
           context: {
-            warnings: [
-              expect.objectContaining({
-                code: "script_syntax_error",
-                rel_path: "game.rpgmaker",
-                internal_file_path: "js/plugins/bad.js",
-              }),
-            ],
+            warning: expect.objectContaining({
+              code: "script_syntax_error",
+              rel_path: "game.rpgmaker",
+              internal_file_path: "js/plugins/bad.js",
+            }),
           },
         }),
       );
@@ -778,11 +1079,113 @@ describe("ProjectLifecycleService", () => {
     }
   });
 
-  it("create-commit 全部源文件解析失败时不创建工程并返回失败明细", async () => {
+  it("新建、追加、替换与两种重置对同组异常原稿保持相同条目和默认资格", async () => {
+    const root = create_temp_dir();
+    const game = path.join(root, "game");
+    const script = "CBR 顔画像 勇者\nCBR 表示 左";
+    write_file(path.join(game, "data/System.json"), "{}");
+    write_file(path.join(game, "js/rmmz_core.js"), "");
+    write_file(path.join(game, "js/plugins.js"), 'const broken = "');
+    write_file(
+      path.join(game, "data/CommonEvents.json"),
+      JSON.stringify([
+        null,
+        {
+          list: [
+            { code: 101, indent: 0, parameters: ["", 0, 0, 2] },
+            { code: 401, indent: 0, parameters: ["こんにちは"] },
+            { code: 355, indent: 0, parameters: [script.split("\n")[0]] },
+            { code: 655, indent: 0, parameters: [script.split("\n")[1]] },
+            { code: 355, indent: 0, parameters: ['say("こんにちは");'] },
+            { code: 0, indent: 0, parameters: [] },
+          ],
+        },
+      ]),
+    );
+    const broken = write_file(path.join(root, "broken.json"), "{");
+    const database = new ProjectDatabase("1.0.0");
+    const session_state = new ProjectSessionState();
+    const lifecycle = create_service({ database, session_state });
+    const content = new ProjectContentService(
+      new GameDirectoryOperations(),
+      database,
+      new RuntimeOperationGate(),
+      session_state,
+      new ProjectWriteStore(
+        database,
+        () => undefined,
+        (change) => adapt_project_change(session_state, change),
+      ),
+      create_pdf_execution(),
+      undefined,
+      create_log_manager(),
+    );
+    const created = path.join(root, "created.lg");
+    const imported = path.join(root, "imported.lg");
+    // 身份由各次写入分配。其余持久化字段必须与新建结果一致。
+    const read_items = async (project: string) =>
+      (await database.get_all_items(project)).map(({ id: _id, ...item }) => item);
+    try {
+      await lifecycle.create_project_commit({ path: created, source_paths: [game, broken] });
+      const expected = await read_items(created);
+      expect(expected.map((item) => [item.src, item.status])).toEqual([
+        ["こんにちは", "NONE"],
+        [script, "RULE_SKIPPED"],
+        ['say("こんにちは");', "RULE_SKIPPED"], // 事件脚本整块保留，不再拆出字符串字面量。
+      ]);
+      const records = await database.get_all_asset_records(created);
+      expect(records).toHaveLength(2);
+      const files = records.map((record) => ({
+        source_path: record.file_type === "RPGMAKER_MV_MZ" ? game : broken,
+        target_rel_path: record.path,
+      }));
+      const broken_path = files.find((file) => file.source_path === broken)!.target_rel_path;
+      await lifecycle.create_project_commit({ path: imported, source_paths: [] });
+      const request = { files, conflict_action: "replace" };
+      await content.import_files({
+        ...request,
+        expected_section_revisions: { files: 0, items: 0 },
+      });
+      expect(await read_items(imported)).toEqual(expected);
+      for (const operation of ["replace", "files", "all"]) {
+        await database.transaction(imported, (writer) => {
+          const items = writer.get_all_items(imported);
+          writer.set_items(imported, [
+            ...items.map((item) => ({ ...item, dst: "旧译文", status: "PROCESSED" })),
+            create_item({
+              id: Math.max(...items.map((item) => Number(item.id))) + 1,
+              file_path: broken_path,
+              src: "已无法提取的旧条目",
+              dst: "旧译文",
+              status: "PROCESSED",
+            }),
+          ]);
+        });
+        if (operation === "replace")
+          await content.import_files({
+            ...request,
+            expected_section_revisions: { files: 1, items: 1 },
+          });
+        else if (operation === "files")
+          await content.reset_files({
+            rel_paths: records.map((record) => record.path),
+            expected_section_revisions: { files: 2, items: 2 },
+          });
+        else await content.reset_translation({ mode: "all" });
+        expect(await read_items(imported), operation).toEqual(expected);
+        expect(await database.get_all_asset_records(imported), operation).toEqual(records);
+        expect((await database.read_asset_content(imported, broken_path))?.toString()).toBe("{");
+      }
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("create-commit 全部源文件解析失败时保存可靠原稿并记录日志", async () => {
     const app_root = create_temp_dir();
     const project_path = path.join(app_root, "all-failed.lg");
     const broken_json = write_file(path.join(app_root, "source", "broken.json"), "{");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     const log_manager = create_log_manager();
     const service = create_service({
       app_root,
@@ -795,24 +1198,14 @@ describe("ProjectLifecycleService", () => {
         service.create_project_commit({
           source_paths: [path.dirname(broken_json)],
           path: project_path,
-          project_settings: {},
         }),
-      ).rejects.toMatchObject({
-        code: "file.parse_failed",
-        public_details: {
-          failed_files: [
-            {
-              source_path: broken_json,
-              rel_path: path.join("source", "broken.json"),
-              filename: "broken.json",
-              code: "file.parse_failed",
-              message: expect.any(String),
-            },
-          ],
-        },
-      });
+      ).resolves.toMatchObject({ source_operation: { saved_assets: 1, directory_changes: [] } });
 
-      expect(fs.existsSync(project_path)).toBe(false);
+      expect(
+        (
+          await database.read_asset_content(project_path, path.join("source", "broken.json"))
+        )?.toString(),
+      ).toBe("{");
       expect(log_manager.warning).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({ source: "project-lifecycle" }),
@@ -822,9 +1215,62 @@ describe("ProjectLifecycleService", () => {
     }
   });
 
+  it("create-commit 没有来源实际保存时失败并记录日志", async () => {
+    const app_root = create_temp_dir();
+    const broken = write_file(path.join(app_root, "source", "broken.exe"), "");
+    fs.writeFileSync(broken, evb_fixture(new Map()).subarray(0, -1));
+    const database = new ProjectDatabase("1.0.0");
+    const log_manager = create_log_manager();
+    const service = create_service({ app_root, database, log_manager });
+    try {
+      await expect(
+        service.create_project_commit({
+          source_paths: [path.dirname(broken)],
+          path: path.join(app_root, "none.lg"),
+        }),
+      ).rejects.toMatchObject({
+        code: "file.parse_failed",
+        public_details: { source_operation: { saved_assets: 0, directory_changes: [] } },
+      });
+      expect(log_manager.warning).toHaveBeenCalledWith(
+        expect.stringContaining("broken.exe"),
+        expect.objectContaining({ source: "project-lifecycle" }),
+      );
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("高版本打开在业务写入前释放占用并保留当前会话，确认后可重试", async () => {
+    const project_path = path.join(create_temp_dir(), "newer.lg");
+    const database = new ProjectDatabase("1.0.0");
+    const session_state = create_session_state({ loaded: true, projectPath: "current.lg" });
+    const project_event_handler = vi.fn();
+    const service = create_service({ database, session_state, project_event_handler });
+    try {
+      await database.create_project(project_path, "newer");
+      await database.transaction(project_path, (writer) =>
+        writer.set_meta(project_path, "target_app_version", "2.0.0"),
+      );
+      const before = fs.readFileSync(project_path);
+      await expect(service.load_project({ path: project_path })).rejects.toMatchObject({
+        code: "project.newer_app_version",
+        public_details: { target_app_version: "2.0.0", current_app_version: "1.0.0" },
+      });
+      expect(session_state.snapshot()).toEqual({ loaded: true, projectPath: "current.lg" });
+      expect(project_event_handler).not.toHaveBeenCalled();
+      expect(fs.readFileSync(project_path)).toEqual(before);
+      await service.load_project({ path: project_path, confirmed_target_app_version: "2.0.0" });
+      expect(session_state.snapshot()).toEqual({ loaded: true, projectPath: project_path });
+      expect((await database.get_all_meta(project_path)).target_app_version).toBe("2.0.0");
+    } finally {
+      await database.close();
+    }
+  });
+
   it("preview 在任务运行时读取另一工程的磁盘概览并保留当前会话", async () => {
     const project_path = path.join(create_temp_dir(), "preview.lg");
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     await database.create_project(project_path, "preview");
     const session_state = create_session_state({ loaded: true, projectPath: "current.lg" });
     const project_event_handler = vi.fn();
@@ -843,16 +1289,6 @@ describe("ProjectLifecycleService", () => {
     } finally {
       await database.close();
     }
-  });
-
-  it("preview 在文件缺失时抛出 project.not_found", async () => {
-    const service = create_service({ database: create_database() });
-
-    await expect(
-      service.get_project_preview({
-        path: path.join(create_temp_dir(), "missing.lg"),
-      }),
-    ).rejects.toThrow(expect.objectContaining({ code: "project.not_found" }));
   });
 
   it("unload 先发布内部卸载事件，再清理会话和 database 缓存", async () => {
@@ -893,14 +1329,14 @@ describe("ProjectLifecycleService", () => {
     expect(database.close_project).not.toHaveBeenCalled();
   });
 
-  // 每个用例使用独立临时目录，覆盖项目文件存在性判断且不污染工作区。
+  // 每个用例独占临时目录，隔离工程和来源文件。
   function create_temp_dir(): string {
     const temp_dir = fs.mkdtempSync(path.join(os.tmpdir(), "linguagacha-project-lifecycle-"));
     cleanup_paths.push(temp_dir);
     return temp_dir;
   }
 
-  // 生命周期服务通过真实文件存在性判断工程路径，测试文件写入集中走这个 helper。
+  // 文件内容同时供来源解析和真实数据库场景使用。
   function write_file(file_path: string, content = "demo"): string {
     fs.mkdirSync(path.dirname(file_path), { recursive: true });
     fs.writeFileSync(file_path, content, "utf-8");
@@ -919,10 +1355,13 @@ describe("ProjectLifecycleService", () => {
     };
     project_event_handler?: CacheLifecycleHandler;
     task_busy?: boolean;
+    remote_import?: RemoteNovelImportPort;
   }): ProjectLifecycleService {
     const app_root = options.app_root ?? create_temp_dir();
     const project_event_handler = options.project_event_handler ?? vi.fn();
+    let languages: ProjectLanguageSettings = DEFAULT_PROJECT_LANGUAGE_SETTINGS;
     return new ProjectLifecycleService(
+      new GameDirectoryOperations(),
       options.database,
       create_runtime_gate(options.task_busy ?? false),
       options.session_state ?? create_session_state(),
@@ -933,14 +1372,22 @@ describe("ProjectLifecycleService", () => {
       }),
       options.log_manager ?? create_log_manager(),
       {
-        installProject: (projectPath, snapshot) => project_event_handler({ projectPath, snapshot }),
+        installProject: (projectPath, snapshot) => {
+          languages = snapshot.languages;
+          return project_event_handler({ projectPath, snapshot });
+        },
         clearProject: (projectPath) => project_event_handler({ projectPath: projectPath ?? "" }),
+        languages: { readBlock: () => languages } as never,
       },
       new ProjectWriteStore(options.database, () => undefined, null),
       create_pdf_execution(),
+      undefined,
+      undefined,
+      options.remote_import,
     );
   }
 
+  /** 用真实占用门禁验证生命周期命令的忙碌边界。 */
   function create_runtime_gate(busy: boolean): RuntimeOperationGate {
     const gate = new RuntimeOperationGate();
     if (busy) gate.begin_runtime("batch_translation");
@@ -957,12 +1404,12 @@ describe("ProjectLifecycleService", () => {
       calls?: string[];
     } = {},
   ): TestProjectDatabase {
-    const get_project_summary = vi.fn();
+    const read_project_preview = vi.fn();
     const close_project = vi.fn(() => {
       options.calls?.push("closeProject");
     });
     return {
-      get_project_summary,
+      read_project_preview,
       prepare: async () => {},
       async read<T>(_path: string, callback: (reader: ProjectDatabaseAccess) => T): Promise<T> {
         return callback(this as unknown as ProjectDatabaseAccess);
@@ -991,6 +1438,7 @@ describe("ProjectLifecycleService", () => {
       add_asset: vi.fn(),
       set_items: vi.fn(() => []),
       upsert_meta_entries: vi.fn(),
+      patch_item_translation_fields: vi.fn(),
       close_project,
     } as unknown as TestProjectDatabase;
   }
@@ -1014,8 +1462,6 @@ describe("ProjectLifecycleService", () => {
     return {
       read_setting: vi.fn(() => ({
         app_language: "ZH",
-        source_language: "JA",
-        target_language: "ZH",
         mtool_optimizer_enable: true,
         skip_duplicate_source_text_enable: true,
         ...config,

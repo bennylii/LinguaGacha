@@ -18,6 +18,7 @@ import {
   read_agent_input,
   type AgentInputRecord,
   type AgentChatData,
+  type AgentRoundRecord,
 } from "./agent-chat-data";
 
 const input: AgentInputRecord = {
@@ -65,6 +66,44 @@ it.each([
   expect(() => read_agent_input({ ...entry, data }, submission, state)).toThrow(
     expect.objectContaining({ code: "file.invalid_structure" }),
   );
+});
+
+it("旧版轮次记录读取时补齐失败摘要", async () => {
+  const oldDoc = defineDocFamily<
+    Omit<AgentChatData, "rounds"> & { rounds: Record<string, Omit<AgentRoundRecord, "failure">> },
+    null
+  >({
+    kind: AgentChatDoc.definition.kind,
+    version: 2,
+    scope: "session",
+    family: true,
+    initial: () => AgentChatDoc.definition.initial(null),
+  });
+  const harness = await Harness.open(
+    new MemoryStorage(),
+    { models: createModels(), registry: createRegistry() },
+    BACKGROUND_CONTEXT,
+  );
+  try {
+    await harness.commit(async (tx) => {
+      const state = await tx.doc(oldDoc, "migration-round", null);
+      state.rounds.round = {
+        status: "error",
+        checkpoint: 0 as EntryId,
+        endedAt: 10,
+        averageTokensPerSecond: null,
+      };
+    }, BACKGROUND_CONTEXT);
+    expect(
+      await harness.snapshot(AgentChatDoc, "migration-round", BACKGROUND_CONTEXT),
+    ).toMatchObject({
+      rounds: {
+        round: { status: "error", endedAt: 10, averageTokensPerSecond: null, failure: null },
+      },
+    });
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
 });
 
 it("旧版产品文档读取时保留对话事实，压缩时间索引从空记录开始", async () => {

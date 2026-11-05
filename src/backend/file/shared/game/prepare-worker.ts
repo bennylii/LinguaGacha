@@ -1,6 +1,7 @@
+import type { LogManager } from "../../../log/log-manager";
 import { GAME_ENGINES, type GameSource } from "./engines";
 import { Worker } from "node:worker_threads";
-import type { GamePreparation } from "./prepare";
+import type { GamePreparation } from "./preparation";
 import { default_native_fs, type NativeFs } from "../../../../native/native-fs";
 import type { LogError } from "../../../../shared/error";
 
@@ -29,6 +30,8 @@ export class GamePrepareWorker {
   public constructor(
     private readonly entry: URL | null,
     private readonly fs: NativeFs = default_native_fs,
+    private readonly log_manager?: Pick<LogManager, "info">,
+    private readonly workspaceRuntimeDirectory?: string,
   ) {}
 
   /** 固定任务快照，并把调用取消与实例关闭合成一个生命周期。 */
@@ -37,7 +40,18 @@ export class GamePrepareWorker {
       ? AbortSignal.any([signal, this.lifetime.signal])
       : this.lifetime.signal;
     combined.throwIfAborted();
-    const pending = this.execute(structuredClone(task), combined);
+    const snapshot = structuredClone(task);
+    if (snapshot.file_type === "GODOT")
+      this.log_manager?.info("Godot resource override order", {
+        context: {
+          game_root: snapshot.game.root,
+          packs: [
+            ...(snapshot.game.embedded ? [snapshot.game.embedded.file] : []),
+            ...snapshot.game.external.map((carrier) => carrier.file),
+          ],
+        },
+      });
+    const pending = this.execute(snapshot, combined);
     this.active.add(pending);
     try {
       return await pending;
@@ -57,7 +71,9 @@ export class GamePrepareWorker {
     if (!this.entry) {
       return stage_game_source(task, this.fs, signal);
     }
-    const worker = new Worker(this.entry, { workerData: task });
+    const worker = new Worker(this.entry, {
+      workerData: { task, workspaceRuntimeDirectory: this.workspaceRuntimeDirectory },
+    });
     let response: GamePrepareResponse | undefined;
     const abort = () => worker.postMessage("abort"); // 取消仅发消息，等待线程释放句柄。
     signal.addEventListener("abort", abort, { once: true });

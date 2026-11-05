@@ -10,6 +10,7 @@ import {
   AGENT_QUESTION_OPTION_MIN,
   AGENT_QUESTION_PROMPT_LIMIT,
   AGENT_CHAT_EVENT_TOPIC,
+  AGENT_TIMELINE_PAGE_SIZE,
   normalize_agent_assistant_message_parts,
   normalize_agent_message_input,
 } from "@shared/agent";
@@ -27,14 +28,22 @@ import type {
   AgentQuestion,
   AgentQuestionResponse,
   AgentQueuedInput,
+  AgentRunFailure,
   AgentChatEvent,
   AgentChatChange,
   AgentChatSnapshot,
   AgentChatStatus,
+  AgentTimelineEntryResponse,
+  AgentTimelinePage,
+  AgentTimelineRound,
+  AgentTimelineSnapshot,
+  AgentTimelineWindow,
   AgentSkillDisplayDescriptions,
   AgentSkillSnapshot,
   AgentToolEntry,
   AgentTokenSpeedSnapshot,
+  AgentAutoResumeSnapshot,
+  AgentAutoContinueSnapshot,
   AgentUsageSnapshot,
   AgentWriteApprovalDecision,
 } from "@shared/agent";
@@ -42,7 +51,7 @@ import type {
 import { normalize_agent_doing } from "@shared/agent-doing";
 import { is_json_record, read_json_record, type JsonRecord } from "@domain/json";
 import { LOCALES } from "@domain/app-language";
-import { api_fetch, api_get, open_event_stream } from "@frontend/app/desktop/desktop-api";
+import { api_fetch, api_get, DesktopApiError, open_event_stream } from "@frontend/app/desktop/desktop-api";
 import {
   read_agent_input_history,
   replace_agent_input_history,
@@ -78,12 +87,19 @@ export type AgentControlsSlice = Readonly<{
   pendingDecision: AgentPendingDecision | null;
   context: AgentContextSnapshot;
   usage: AgentUsageSnapshot;
+  autoResume: AgentAutoResumeSnapshot | null;
+  autoContinue: AgentAutoContinueSnapshot | null;
   transport: AgentTransportState;
   command: AgentCommand;
 }>;
 
 export type AgentQueueSlice = Readonly<{ inputQueue: AgentInputQueueSnapshot }>;
 export type AgentSkillsSlice = Readonly<{ skills: readonly AgentSkillSnapshot[] }>;
+/** 更早历史的加载状态只影响时间线顶部入口。 */
+export type AgentTimelineStatusSlice = Readonly<{
+  loading: boolean;
+  error: "failed" | "cursor_expired" | null;
+}>;
 
 export type AgentInputState = {
   revision: number;
@@ -95,7 +111,7 @@ export type AgentInputState = {
 export type AgentChatActions = Readonly<{
   send: (message: AgentMessageInput) => Promise<void>;
   forkRound: (roundId: string) => Promise<void>;
-  reviseLatestRound: (entryId: string, message: AgentMessageInput) => Promise<void>;
+  reviseRound: (entryId: string, message: AgentMessageInput) => Promise<void>;
   updateQueuedMessage: (id: string, message: AgentMessageInput) => Promise<void>;
   deleteQueuedMessage: (id: string) => Promise<void>;
   reorderQueuedMessages: (ids: readonly string[]) => Promise<void>;
@@ -104,6 +120,10 @@ export type AgentChatActions = Readonly<{
   compactContext: () => Promise<void>;
   stop: () => Promise<void>;
   reset: () => Promise<void>;
+  loadEarlier: () => Promise<void>;
+  retryLoadEarlier: () => Promise<void>;
+  trimTimeline: () => void;
+  readEntry: (id: string) => Promise<AgentEntry>;
   resolveQuestion: (response: AgentQuestionResponse) => Promise<void>;
   resolveWriteApproval: (decision: AgentWriteApprovalDecision) => Promise<void>;
   setQuestionFocused: (id: string, focused: boolean) => void;
@@ -119,7 +139,7 @@ type PendingInputCommand = {
   message: AgentMessageInput | null;
 };
 
-type StoreSlice = "speed" | "controls" | "queue" | "skills" | "input" | "countdown";
+type StoreSlice = "speed" | "controls" | "queue" | "skills" | "input" | "countdown" | "timeline_status";
 type Listener = () => void;
 type CommandEventQueue = { base_revision: number; events: AgentChatEvent[] };
 
@@ -129,6 +149,8 @@ const EMPTY_CONTROLS: AgentControlsSlice = {
   pendingDecision: null,
   context: { tokens: null, compactable: false, limits: null },
   usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  autoResume: null,
+  autoContinue: null,
   transport: "restoring",
   command: null,
 };
@@ -136,6 +158,7 @@ const EMPTY_QUEUE: AgentQueueSlice = {
   inputQueue: { paused: false, canSendNow: false, items: [] },
 };
 const EMPTY_SKILLS: AgentSkillsSlice = { skills: [] };
+const EMPTY_TIMELINE_STATUS: AgentTimelineStatusSlice = { loading: false, error: null };
 
 /** renderer 侧唯一 Agent 会话镜像。后端事实经 `revision` 校验进入切片，本地决策时钟独立发布。 */
 export class AgentChatStore {
@@ -147,6 +170,7 @@ export class AgentChatStore {
   private controls = EMPTY_CONTROLS;
   private queue = EMPTY_QUEUE;
   private skills = EMPTY_SKILLS;
+  private timeline_status = EMPTY_TIMELINE_STATUS;
   private input: AgentInputState;
   private revision = 0;
   private loaded_once = false;
@@ -165,6 +189,7 @@ export class AgentChatStore {
     skills: new Set(),
     input: new Set(),
     countdown: new Set(),
+    timeline_status: new Set(),
   };
   private readonly countdown: AgentDecisionCountdown;
   private readonly on_error: (error: unknown, context: "decision" | "restore") => void;
@@ -201,7 +226,7 @@ export class AgentChatStore {
     this.actions = {
       send: this.send,
       forkRound: this.fork_round,
-      reviseLatestRound: this.revise_latest_round,
+      reviseRound: this.revise_round,
       updateQueuedMessage: this.update_queued_message,
       deleteQueuedMessage: this.delete_queued_message,
       reorderQueuedMessages: this.reorder_queued_messages,
@@ -210,6 +235,10 @@ export class AgentChatStore {
       compactContext: this.compact_context,
       stop: this.stop,
       reset: this.reset,
+      loadEarlier: this.load_earlier,
+      retryLoadEarlier: this.retry_load_earlier,
+      trimTimeline: this.trim_timeline,
+      readEntry: this.read_entry,
       resolveQuestion: this.resolve_question,
       resolveWriteApproval: this.resolve_write_approval,
       setQuestionFocused: (id, focused) => this.countdown.set_focused(id, focused),
@@ -237,9 +266,14 @@ export class AgentChatStore {
   public readonly get_input = (): AgentInputState => this.input;
   /** 返回前端时钟缓存，隔离每秒更新。 */
   public readonly get_countdown = (): AgentDecisionCountdownSnapshot => this.countdown.read();
+  /** 返回更早历史入口的加载状态。 */
+  public readonly get_timeline_status = (): AgentTimelineStatusSlice => this.timeline_status;
   /** 只通知决策区域的时钟变化。 */
   public readonly subscribe_countdown = (listener: Listener): (() => void) =>
     this.subscribe("countdown", listener);
+  /** 只通知更早历史入口的加载状态变化。 */
+  public readonly subscribe_timeline_status = (listener: Listener): (() => void) =>
+    this.subscribe("timeline_status", listener);
 
   /** 只通知时间线结构和操作状态，正文由条目订阅者消费。 */
   public readonly subscribe_timeline = (listener: Listener): (() => void) =>
@@ -342,6 +376,14 @@ export class AgentChatStore {
       next.usage.output === this.controls.usage.output &&
       next.usage.cacheRead === this.controls.usage.cacheRead &&
       next.usage.cacheWrite === this.controls.usage.cacheWrite &&
+      next.autoResume?.roundId === this.controls.autoResume?.roundId &&
+      next.autoResume?.attempt === this.controls.autoResume?.attempt &&
+      next.autoResume?.maxAttempts === this.controls.autoResume?.maxAttempts &&
+      next.autoResume?.phase === this.controls.autoResume?.phase &&
+      next.autoResume?.retryAt === this.controls.autoResume?.retryAt &&
+      next.autoContinue?.roundId === this.controls.autoContinue?.roundId &&
+      next.autoContinue?.attempt === this.controls.autoContinue?.attempt &&
+      next.autoContinue?.phase === this.controls.autoContinue?.phase &&
       next.transport === this.controls.transport &&
       next.command === this.controls.command
     ) {
@@ -431,7 +473,8 @@ export class AgentChatStore {
       this.chat_id = snapshot.chatId;
       this.revision = snapshot.revision;
       this.set_token_speed(snapshot.tokenSpeed);
-      this.timeline.replace(snapshot.entries);
+      this.timeline.replace(snapshot.entries, snapshot.timeline);
+      this.set_timeline_status(EMPTY_TIMELINE_STATUS);
       this.queue = { inputQueue: snapshot.inputQueue };
       this.skills = { skills: snapshot.skills };
       this.controls = {
@@ -441,6 +484,8 @@ export class AgentChatStore {
         pendingDecision: snapshot.pendingDecision,
         context: snapshot.context,
         usage: snapshot.usage,
+        autoResume: snapshot.autoResume,
+        autoContinue: snapshot.autoContinue,
       };
       this.sync_countdown();
       this.emit("queue");
@@ -461,6 +506,18 @@ export class AgentChatStore {
       return;
     this.token_speed = speed;
     this.emit("speed");
+  }
+
+  /** 更早历史状态只在变化时通知顶部入口。 */
+  private set_timeline_status(next: AgentTimelineStatusSlice): void {
+    if (
+      next.loading === this.timeline_status.loading &&
+      next.error === this.timeline_status.error
+    ) {
+      return;
+    }
+    this.timeline_status = next;
+    this.emit("timeline_status");
   }
 
   /** 顺序重放事件，遇到首个修订缺口交由快照恢复。 */
@@ -520,6 +577,12 @@ export class AgentChatStore {
         break;
       case "usage":
         this.set_controls({ usage: change.usage });
+        break;
+      case "auto_resume":
+        this.set_controls({ autoResume: change.autoResume });
+        break;
+      case "auto_continue":
+        this.set_controls({ autoContinue: change.autoContinue });
         break;
       case "input_queue":
         this.queue = { inputQueue: change.inputQueue };
@@ -727,8 +790,8 @@ export class AgentChatStore {
     );
   };
 
-  /** 仅在已恢复的空闲会话提交修订内容。 */
-  private readonly revise_latest_round = async (
+  /** 仅在已恢复的空闲会话提交轮次修订内容。 */
+  private readonly revise_round = async (
     entry_id: string,
     message: AgentMessageInput,
   ): Promise<void> => {
@@ -788,15 +851,90 @@ export class AgentChatStore {
     );
   };
 
-  /** 仅运行中的会话接受停止请求。 */
+  /** 运行中或等待自动重试时接受停止；等待期后端状态是空闲，停止语义为取消等待。 */
   private readonly stop = async (): Promise<void> => {
-    if (this.controls.state !== "running") return;
+    if (this.controls.state !== "running" && this.controls.autoResume === null) return;
     await this.execute_command("stop", () => api_fetch<AgentCommandAck>("/api/agent/stop"));
   };
 
   /** 请求后端重置，通过快照和事件清理前端会话。 */
   private readonly reset = async (): Promise<void> => {
     await this.execute_command("reset", () => api_fetch<AgentCommandAck>("/api/agent/reset"));
+  };
+
+  /** 加载更早一页；重复点击、未恢复和已到头部都不发请求。 */
+  private readonly load_earlier = async (): Promise<void> => {
+    const timeline_window = this.timeline.read();
+    if (
+      this.controls.transport !== "ready" ||
+      this.timeline_status.loading ||
+      !timeline_window.hasEarlier ||
+      timeline_window.nextCursor === null
+    ) {
+      return;
+    }
+    const generation = this.connection_generation;
+    const chat_id = this.chat_id;
+    const cursor = timeline_window.nextCursor;
+    this.set_timeline_status({ loading: true, error: null });
+    try {
+      const page = normalize_timeline_page(
+        await api_fetch<AgentTimelinePage>("/api/agent/timeline/page", {
+          chatId: chat_id,
+          before: cursor,
+          limit: AGENT_TIMELINE_PAGE_SIZE,
+        }),
+      );
+      // 连接、对话或游标被其他结果推进时丢弃迟到页。
+      if (
+        !this.is_current(generation) ||
+        this.chat_id !== chat_id ||
+        this.timeline.read().nextCursor !== cursor
+      ) {
+        return;
+      }
+      this.timeline.prepend_page(page);
+      this.timeline.notify();
+      this.set_timeline_status(EMPTY_TIMELINE_STATUS);
+    } catch (error) {
+      if (!this.is_current(generation) || this.chat_id !== chat_id) return;
+      if (is_cursor_expired(error)) {
+        // 历史已被修订或分叉，回到最新窗口后保留内嵌提示。
+        this.set_timeline_status({ loading: false, error: "cursor_expired" });
+        await this.restore_snapshot(generation);
+        if (this.is_current(generation) && this.chat_id === chat_id)
+          this.set_timeline_status({ loading: false, error: "cursor_expired" });
+        return;
+      }
+      this.set_timeline_status({ loading: false, error: "failed" });
+    }
+  };
+
+  /** 失败重试复用同一入口，保留用户当前阅读位置。 */
+  private readonly retry_load_earlier = async (): Promise<void> => {
+    if (this.timeline_status.loading) return;
+    await this.load_earlier();
+  };
+
+  /** 回到跟随时释放更早页，只保留最新窗口。 */
+  private readonly trim_timeline = (): void => {
+    this.timeline.trim_to_latest_window(AGENT_TIMELINE_PAGE_SIZE);
+    this.timeline.notify();
+    this.set_timeline_status(EMPTY_TIMELINE_STATUS);
+  };
+
+  /** 工具详情按条目身份读取完整内容，时间线只持有预览。 */
+  private readonly read_entry = async (id: string): Promise<AgentEntry> => {
+    const chat_id = this.chat_id;
+    if (chat_id === null) throw new AppError("runtime.cancelled");
+    const response = normalize_timeline_entry(
+      await api_fetch<AgentTimelineEntryResponse>("/api/agent/timeline/entry", {
+        chatId: chat_id,
+        id,
+      }),
+    );
+    if (chat_id !== this.chat_id) throw new AppError("runtime.cancelled");
+    return response.entry;
   };
 
   /** 普通问题只向对应窄入口提交当前 pending 的身份与答案。 */
@@ -881,6 +1019,9 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
   const input_queue = normalize_input_queue(record["inputQueue"]);
   const doing = normalize_doing(record["doing"]);
   const token_speed = normalize_token_speed(record["tokenSpeed"]);
+  const auto_resume = normalize_auto_resume(record["autoResume"]);
+  const auto_continue = normalize_auto_continue(record["autoContinue"]);
+  const timeline = normalize_timeline(record["timeline"], entries);
   const context = normalize_context(record["context"]);
   const usage = normalize_usage(record["usage"]);
   if (
@@ -889,7 +1030,10 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
     doing === undefined ||
     context === null ||
     usage === null ||
-    token_speed === undefined
+    token_speed === undefined ||
+    auto_resume === undefined ||
+    auto_continue === undefined ||
+    timeline === null
   ) {
     throw new TypeError("Agent snapshot is invalid.");
   }
@@ -899,12 +1043,15 @@ function normalize_snapshot(value: unknown): AgentChatSnapshot {
     state,
     pendingDecision: pending_decision,
     entries,
+    timeline,
     skills,
     inputQueue: input_queue,
     doing,
     context,
     usage,
     tokenSpeed: token_speed,
+    autoResume: auto_resume,
+    autoContinue: auto_continue,
   };
 }
 
@@ -953,6 +1100,16 @@ function normalize_agent_change(value: unknown): AgentChatChange | null {
       const token_speed = normalize_token_speed(record["tokenSpeed"]);
       return token_speed === undefined ? null : { type: "token_speed", tokenSpeed: token_speed };
     }
+    case "auto_resume": {
+      const auto_resume = normalize_auto_resume(record["autoResume"]);
+      return auto_resume === undefined ? null : { type: "auto_resume", autoResume: auto_resume };
+    }
+    case "auto_continue": {
+      const auto_continue = normalize_auto_continue(record["autoContinue"]);
+      return auto_continue === undefined
+        ? null
+        : { type: "auto_continue", autoContinue: auto_continue };
+    }
     case "context": {
       const context = normalize_context(record["context"]);
       return context === null ? null : { type: "context", context };
@@ -983,6 +1140,64 @@ function normalize_token_speed(value: unknown): AgentTokenSpeedSnapshot | undefi
     speed >= 0
     ? { roundId: round_id, tokensPerSecond: speed }
     : undefined;
+}
+
+/**
+ * 自动重试状态覆盖等待与续跑两个阶段：`waiting` 必须带倒计时，
+ * `continuing` 表示隐藏的「继续」输入已受理且 `retryAt` 为空；非法组合整帧拒绝。
+ */
+function normalize_auto_resume(value: unknown): AgentAutoResumeSnapshot | null | undefined {
+  if (value === null) return null;
+  if (!is_json_record(value)) return undefined;
+  const round_id = value["roundId"];
+  const attempt = value["attempt"];
+  const max_attempts = value["maxAttempts"];
+  const phase = value["phase"];
+  const retry_at = value["retryAt"];
+  if (
+    typeof round_id !== "string" ||
+    round_id === "" ||
+    typeof attempt !== "number" ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    (max_attempts !== null &&
+      (typeof max_attempts !== "number" ||
+        !Number.isSafeInteger(max_attempts) ||
+        max_attempts < attempt)) ||
+    (phase !== "waiting" && phase !== "continuing") ||
+    (phase === "waiting" &&
+      (typeof retry_at !== "number" || !Number.isSafeInteger(retry_at) || retry_at < 0)) ||
+    (phase === "continuing" && retry_at !== null)
+  )
+    return undefined;
+  // 相位校验已保证 waiting 必有合法数值、continuing 必为空，这里收窄 JsonValue 联合。
+  const narrowed_retry_at = typeof retry_at === "number" ? retry_at : null;
+  return {
+    roundId: round_id,
+    attempt,
+    maxAttempts: max_attempts,
+    phase,
+    retryAt: narrowed_retry_at,
+  };
+}
+
+/** 自动继续状态只接受轮次身份、正次与两个已知相位，非法事件由 `revision` 缺口恢复。 */
+function normalize_auto_continue(value: unknown): AgentAutoContinueSnapshot | null | undefined {
+  if (value === null) return null;
+  if (!is_json_record(value)) return undefined;
+  const round_id = value["roundId"];
+  const attempt = value["attempt"];
+  const phase = value["phase"];
+  if (
+    typeof round_id !== "string" ||
+    round_id === "" ||
+    typeof attempt !== "number" ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    (phase !== "judging" && phase !== "continuing")
+  )
+    return undefined;
+  return { roundId: round_id, attempt, phase };
 }
 
 /** 累计用量必须完整且非负，非法事件由 `revision` 缺口恢复。 */
@@ -1092,6 +1307,115 @@ function normalize_context(value: unknown): AgentContextSnapshot | null {
   };
 }
 
+/** 快照时间线元数据；旧载荷缺少时按可见轮次头推导空窗口。 */
+function normalize_timeline(
+  value: unknown,
+  entries: readonly AgentEntry[],
+): AgentTimelineSnapshot | null {
+  if (value === undefined || value === null) {
+    const rounds = entries
+      .filter(
+        (entry) =>
+          entry.kind === "user_message" &&
+          (entry.delivery === "round" || entry.delivery === "auto_continue"),
+      )
+      .map((entry) => ({ id: entry.id, hasEarlier: false }));
+    return { hasEarlier: false, nextCursor: null, rounds };
+  }
+  if (!is_json_record(value)) return null;
+  const has_earlier = value["hasEarlier"];
+  const next_cursor = value["nextCursor"];
+  const raw_rounds = value["rounds"];
+  if (
+    typeof has_earlier !== "boolean" ||
+    (next_cursor !== null && typeof next_cursor !== "string") ||
+    !Array.isArray(raw_rounds)
+  )
+    return null;
+  const rounds: AgentTimelineSnapshot["rounds"] = [];
+  for (const raw of raw_rounds) {
+    if (!is_json_record(raw) || typeof raw["id"] !== "string" || raw["id"] === "") return null;
+    if (typeof raw["hasEarlier"] !== "boolean") return null;
+    rounds.push({ id: raw["id"], hasEarlier: raw["hasEarlier"] });
+  }
+  return { hasEarlier: has_earlier, nextCursor: next_cursor, rounds };
+}
+
+/** 分页窗口复用快照元数据校验，并额外校验内容与轮次头条目。 */
+function normalize_timeline_window(value: unknown): AgentTimelineWindow | null {
+  if (!is_json_record(value)) return null;
+  const has_earlier = value["hasEarlier"];
+  const next_cursor = value["nextCursor"];
+  const raw_entries = value["entries"];
+  const raw_headers = value["headers"];
+  const raw_rounds = value["rounds"];
+  if (
+    typeof has_earlier !== "boolean" ||
+    (next_cursor !== null && typeof next_cursor !== "string") ||
+    !Array.isArray(raw_entries) ||
+    !Array.isArray(raw_headers) ||
+    !Array.isArray(raw_rounds)
+  )
+    return null;
+  const entries = raw_entries.flatMap(normalize_entry);
+  const headers = raw_headers.flatMap(normalize_entry);
+  if (entries.length !== raw_entries.length || headers.length !== raw_headers.length) return null;
+  if (
+    headers.some(
+      (entry) =>
+        entry.kind !== "user_message" ||
+        (entry.delivery !== "round" && entry.delivery !== "auto_continue"),
+    )
+  )
+    return null;
+  const rounds: AgentTimelineRound[] = [];
+  for (const raw of raw_rounds) {
+    if (!is_json_record(raw) || typeof raw["id"] !== "string" || raw["id"] === "") return null;
+    if (typeof raw["hasEarlier"] !== "boolean") return null;
+    rounds.push({ id: raw["id"], hasEarlier: raw["hasEarlier"] });
+  }
+  return { entries, headers, rounds, hasEarlier: has_earlier, nextCursor: next_cursor };
+}
+
+/** 分页响应携带会话与修订，供调用方丢弃迟到结果。 */
+function normalize_timeline_page(value: unknown): AgentTimelinePage {
+  const record = read_json_record(value);
+  const chat_id = record["chatId"];
+  if (typeof chat_id !== "string" || chat_id === "")
+    throw new TypeError("Agent timeline chat identity is invalid.");
+  const window = normalize_timeline_window(value);
+  if (window === null) throw new TypeError("Agent timeline page is invalid.");
+  return {
+    ...window,
+    chatId: chat_id,
+    revision: normalize_revision(record["revision"], "timeline page"),
+  };
+}
+
+/** 工具详情响应只接受单个完整条目。 */
+function normalize_timeline_entry(value: unknown): AgentTimelineEntryResponse {
+  const record = read_json_record(value);
+  const chat_id = record["chatId"];
+  if (typeof chat_id !== "string" || chat_id === "")
+    throw new TypeError("Agent timeline chat identity is invalid.");
+  const entries = normalize_entry(record["entry"]);
+  if (entries.length !== 1) throw new TypeError("Agent timeline entry is invalid.");
+  return {
+    chatId: chat_id,
+    revision: normalize_revision(record["revision"], "timeline entry"),
+    entry: entries[0]!,
+  };
+}
+
+/** 历史变化导致游标失效时由后端公开细分原因。 */
+function is_cursor_expired(error: unknown): boolean {
+  return (
+    error instanceof DesktopApiError &&
+    error.code === "request.validation_failed" &&
+    error.details["reason"] === "agent_timeline_cursor_expired"
+  );
+}
+
 /** 按条目种类收窄消息及生命周期字段，无效条目交由上层判定。 */
 function normalize_entry(value: unknown): AgentEntry[] {
   if (!is_json_record(value) || typeof value["id"] !== "string") return [];
@@ -1107,6 +1431,7 @@ function normalize_entry(value: unknown): AgentEntry[] {
       {
         kind: "context_compaction",
         id: value["id"],
+        roundId: read_entry_round_id(value, ""),
         status,
         createdAt,
       },
@@ -1118,9 +1443,12 @@ function normalize_entry(value: unknown): AgentEntry[] {
     const ended_at = value["endedAt"];
     const message = normalize_agent_message_input(value);
     if (status === null || message === null) return [];
+    const is_round =
+      value["delivery"] === "round" || value["delivery"] === "auto_continue";
     const base = {
       kind: "user_message" as const,
       id: value["id"],
+      roundId: read_entry_round_id(value, is_round ? value["id"] : ""),
       text: message.text,
       attachments: message.attachments,
       createdAt: value["createdAt"],
@@ -1132,25 +1460,28 @@ function normalize_entry(value: unknown): AgentEntry[] {
       return [{ ...base, delivery: "steer", status: "success", endedAt: ended_at }];
     }
     const average_speed = value["averageTokensPerSecond"];
+    const failure = normalize_run_failure(value["failure"]);
     if (
-      value["delivery"] !== "round" ||
+      !is_round ||
       (ended_at !== null && (typeof ended_at !== "number" || !Number.isInteger(ended_at))) ||
       (status === "running") !== (ended_at === null) ||
       (average_speed !== null &&
         (status === "running" ||
           typeof average_speed !== "number" ||
           !Number.isFinite(average_speed) ||
-          average_speed < 0))
+          average_speed < 0)) ||
+      failure === undefined
     ) {
       return [];
     }
     return [
       {
         ...base,
-        delivery: "round",
+        delivery: value["delivery"] as "round" | "auto_continue",
         status,
         endedAt: ended_at,
         averageTokensPerSecond: average_speed,
+        failure,
       },
     ];
   }
@@ -1162,6 +1493,7 @@ function normalize_entry(value: unknown): AgentEntry[] {
       {
         kind: "assistant_message",
         id: value["id"],
+        roundId: read_entry_round_id(value, ""),
         parts,
         status,
         createdAt: value["createdAt"],
@@ -1185,17 +1517,27 @@ function normalize_tool_entry(value: JsonRecord): AgentToolEntry[] {
   const base = {
     kind: "tool_call" as const,
     id: value["id"] as string,
+    roundId: read_entry_round_id(value, ""),
     toolName: value["toolName"],
     input: value["input"],
     createdAt: value["createdAt"] as number,
   };
+  const output_truncated = value["outputTruncated"] === true;
   if (status === "running" || (status === "stopped" && value["output"] === null)) {
-    return value["output"] === null ? [{ ...base, status, output: null }] : [];
+    return value["output"] === null
+      ? [{ ...base, status, output: null, outputTruncated: false }]
+      : [];
   }
   const output = value["output"];
   return Array.isArray(output) && output.every((part): part is string => typeof part === "string")
-    ? [{ ...base, status, output: [...output] }]
+    ? [{ ...base, status, output: [...output], outputTruncated: output_truncated }]
     : [];
+}
+
+/** 旧载荷缺少 `roundId` 时使用调用方提供的回退值，避免整条历史不可读。 */
+function read_entry_round_id(value: JsonRecord, fallback: string): string {
+  const round_id = value["roundId"];
+  return typeof round_id === "string" && round_id !== "" ? round_id : fallback;
 }
 
 /** 统一收窄时间线条目的运行结果值域。 */
@@ -1203,6 +1545,18 @@ function normalize_entry_status(value: unknown): AgentEntryStatus | null {
   return value === "running" || value === "success" || value === "error" || value === "stopped"
     ? value
     : null;
+}
+
+/** 失败摘要只服务行内展示；缺失表示没有失败，形状非法由调用方丢弃整个条目。 */
+function normalize_run_failure(value: unknown): AgentRunFailure | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (!is_json_record(value)) return undefined;
+  const status = value["status"];
+  const detail = value["detail"];
+  if (status !== null && (typeof status !== "number" || !Number.isInteger(status)))
+    return undefined;
+  if (typeof detail !== "string") return undefined;
+  return { status, detail };
 }
 
 /** 会话公开运行、停止收尾与空闲状态，非法值触发完整恢复。 */

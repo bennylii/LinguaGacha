@@ -3,7 +3,8 @@ import type { LocaleMessageSchema } from "../../types";
 export const ko_kr_log_window_page = {
   title: "로그",
   history: {
-    date: "로그 날짜",
+    file: "로그 파일",
+    current: "현재 인스턴스",
     expired: "이 날짜의 로그가 삭제되었습니다",
   },
   level: {

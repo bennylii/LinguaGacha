@@ -16,6 +16,11 @@ describe("runtime-activity-store", () => {
         runtime: { revision: "3", owner: "invalid" },
       }),
     ).toEqual({ revision: 0, owner: null });
+    expect(
+      normalize_runtime_activity_snapshot({
+        runtime: { revision: 4, owner: "remote_workspace" },
+      }),
+    ).toEqual({ revision: 4, owner: "remote_workspace" });
   });
 
   it("只应用不旧于当前 revision 的快照并通知订阅者", () => {

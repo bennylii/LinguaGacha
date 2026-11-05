@@ -1,8 +1,9 @@
 import path from "node:path";
 import type { NativeFs } from "../../../native/native-fs";
-import { assert_regular_path, GameSourceConflictError } from "../source-file-paths";
+import { assert_regular_path } from "../source-file-paths";
 import { read_bytes } from "../shared/binary";
 import { classify_wolf_archive, classify_wolf_key, type WolfKeyType } from "./archive-crypt";
+import { resolve_game_source_input } from "../shared/game/source-input";
 
 export type WolfSource = Readonly<{
   root: string;
@@ -32,10 +33,9 @@ const LAYOUT_MARKERS = [
 
 /** 只使用布局标志确定游戏边界，坏游戏不能降级为普通目录。 */
 export function wolf_source_root(source: string, fs: NativeFs): string | null {
-  if (!fs.exists(source)) return null;
-  const directory = fs.stat(source).isDirectory();
-  if (!directory && path.extname(source).toLowerCase() !== ".exe") return null;
-  const candidate = path.resolve(directory ? source : path.dirname(source));
+  const input = resolve_game_source_input(source, fs);
+  if (!input) return null;
+  const candidate = input.root;
   const roots =
     path.basename(candidate).toLowerCase() === "data"
       ? [candidate, path.dirname(candidate)]
@@ -95,9 +95,10 @@ export async function discover_wolf_source(
       headers.set(source_path, header);
     }
   }
-  // 根包与分包的优先级未定义，沿用来源冲突边界。
-  if (archives.some((archive) => archive.output_prefix === "Data") && archives.length > 1)
-    throw new GameSourceConflictError("Conflicting WOLF data archives: " + root);
+  // 格式未声明专属优先级，按稳定路径顺序让后面的归档覆盖同名成员。
+  archives.sort((left, right) =>
+    left.source_path < right.source_path ? -1 : left.source_path > right.source_path ? 1 : 0,
+  );
   for (const archive of archives) {
     try {
       if (classify_wolf_archive(headers.get(archive.source_path)!) === null)

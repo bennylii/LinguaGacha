@@ -29,9 +29,19 @@ export const APP_ERROR_DEFINITIONS = {
     severity: "expected",
   },
   "project.not_loaded": { message: "No project is loaded.", status: 409, severity: "expected" },
+  "project.newer_app_version": {
+    message: "The project targets a newer application version. Confirmation is required.",
+    status: 409,
+    severity: "expected",
+  },
   "project.not_found": {
     message: "The project file does not exist.",
     status: 404,
+    severity: "expected",
+  },
+  "project.already_open": {
+    message: "The project is already open in another window.",
+    status: 409,
     severity: "expected",
   },
   "translation.generation_failed": {
@@ -40,6 +50,7 @@ export const APP_ERROR_DEFINITIONS = {
     severity: "fault",
   },
   "file.not_found": { message: "The file does not exist.", status: 404, severity: "expected" },
+  "file.busy": { message: "The game directory is busy.", status: 423, severity: "expected" },
   "file.preview_too_large": {
     message: "The file exceeds the preview size limit.",
     status: 415,
@@ -65,6 +76,11 @@ export const APP_ERROR_DEFINITIONS = {
   "database.busy": { message: "The project database is busy.", status: 423, severity: "warning" },
   "project.already_exists": {
     message: "The project file already exists.",
+    status: 409,
+    severity: "expected",
+  },
+  "project.path_conflict": {
+    message: "The output project must differ from the source projects and the loaded project.",
     status: 409,
     severity: "expected",
   },
@@ -156,6 +172,156 @@ export const APP_ERROR_DEFINITIONS = {
   "prompt.unknown_prompt_type": {
     message: "The prompt type is invalid.",
     status: 400,
+    severity: "expected",
+  },
+  "remote.invalid_url": {
+    message: "The novel URL is not supported.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.auth_missing": {
+    message: "The novel site credential is missing.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.auth_rejected": {
+    message: "The novel site rejected the credential.",
+    status: 502,
+    severity: "warning",
+  },
+  "remote.fetch_failed": {
+    message: "The novel site request failed.",
+    status: 502,
+    severity: "warning",
+  },
+  "remote.source_not_bound": {
+    message: "The project is not bound to a remote novel.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.source_already_bound": {
+    message: "The project is already bound to a remote novel.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.source_not_bindable": {
+    message: "The project has no unique TXT asset to bind.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.source_mismatch": {
+    message: "The project text does not match the remote novel.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.chapter_structure_mismatch": {
+    message: "The remote novel chapter structure does not match the current binding.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.rebind_unsupported": {
+    message: "This project cannot be rebound to another remote novel.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.chapter_paragraph_mismatch": {
+    message: "The uploaded text line count does not match the remote chapter paragraphs.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.chapter_paragraph_empty": {
+    message: "A non-empty remote paragraph has an empty translation.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.chapter_empty": {
+    message: "The remote chapter has no source paragraphs.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.chapter_line_context_missing": {
+    message: "The remote chapter does not provide old translations for the required lines.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.binding_changed": {
+    message: "The remote source binding changed during the operation.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.chapter_changed": {
+    message: "The remote chapter changed during the operation.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.workspace_empty": {
+    message: "The remote novel has no readable chapters.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.alignment_stale": {
+    message: "The remote text changed after the sync preview.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.alignment_required": {
+    message: "The changes are too large for automatic alignment.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.stash_expired": {
+    message: "The sync preview has expired.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.bridge_unavailable": {
+    message: "The local credential bridge is unavailable.",
+    status: 500,
+    severity: "warning",
+  },
+  "remote.instance_unavailable": {
+    message: "The target application instance is unavailable.",
+    status: 502,
+    severity: "warning",
+  },
+  "remote.window_unsupported": {
+    message: "Opening another window is not supported in this environment.",
+    status: 500,
+    severity: "expected",
+  },
+  "remote.login_in_progress": {
+    message: "A remote login is already in progress.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.chapter_not_found": {
+    message: "The remote novel chapter was not found.",
+    status: 404,
+    severity: "expected",
+  },
+  "remote.sync_unsupported": {
+    message: "Site-side sync only applies to web novels.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.wenku_mixed_volumes": {
+    message: "The novel mixes TXT and EPUB volumes.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.epub_layout_unsupported": {
+    message: "The EPUB layout is not supported.",
+    status: 400,
+    severity: "expected",
+  },
+  "remote.epub_map_missing": {
+    message: "The project has no chapter map for the merged EPUB.",
+    status: 409,
+    severity: "expected",
+  },
+  "remote.epub_document_conflict": {
+    message: "The chapter map does not match the EPUB asset.",
+    status: 409,
     severity: "expected",
   },
 } as const satisfies Readonly<Record<string, AppErrorDefinition>>;

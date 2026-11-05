@@ -78,6 +78,7 @@ function round_entry(status: AgentEntry["status"]): AgentEntry {
   return {
     kind: "user_message",
     id: `round-${status}`,
+    roundId: `round-${status}`,
     delivery: "round",
     averageTokensPerSecond: null,
     text: "任务",
@@ -85,5 +86,6 @@ function round_entry(status: AgentEntry["status"]): AgentEntry {
     status,
     createdAt: 1,
     endedAt: status === "running" ? null : 2,
+    failure: null,
   };
 }

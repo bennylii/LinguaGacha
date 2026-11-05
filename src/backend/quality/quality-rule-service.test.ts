@@ -130,6 +130,7 @@ describe("QualityRuleService", () => {
           src: "A",
           dst: "甲",
           info: "",
+          evidence: "",
           case_sensitive: false,
         },
       ],
@@ -199,6 +200,7 @@ describe("QualityRuleService", () => {
         src: "HP",
         dst: "生命值",
         info: "",
+        evidence: "",
         case_sensitive: false,
       },
     ]);
@@ -243,6 +245,7 @@ describe("QualityRuleService", () => {
             src: "HP",
             dst: "生命值",
             info: "",
+            evidence: "",
             case_sensitive: false,
           },
         ],
@@ -276,7 +279,7 @@ describe("QualityRuleService", () => {
   });
 
   it("任务 busy 时拒绝全部质量项目写但不阻塞预设文件 IO", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service } = await create_workbench_service(database, "batch_translation");
     const project_writes = [
@@ -307,7 +310,7 @@ describe("QualityRuleService", () => {
   });
 
   it("规则条目与 meta 同一事务提交且只发布一次 project.data_changed", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service, lg_path, publisher } = await create_workbench_service(database);
 
@@ -349,12 +352,12 @@ describe("QualityRuleService", () => {
     ).rejects.toThrow(expect.objectContaining({ code: "data.revision_conflict" }));
     expect(publisher.publish_project_change).not.toHaveBeenCalled();
     expect(await database.get_rules(lg_path, "glossary")).toEqual([
-      { entry_id: "hp", src: "HP", dst: "生命值", info: "", case_sensitive: false },
+      { entry_id: "hp", src: "HP", dst: "生命值", info: "", evidence: "", case_sensitive: false },
     ]);
   });
 
   it("保存质量规则时保留稳定 entry_id", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service, lg_path } = await create_workbench_service(database);
 
@@ -370,13 +373,14 @@ describe("QualityRuleService", () => {
         src: "HP",
         dst: "生命值",
         info: "",
+        evidence: "",
         case_sensitive: false,
       },
     ]);
   });
 
   it("保存质量规则时拒绝缺失 entry_id", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service } = await create_workbench_service(database);
 
@@ -390,7 +394,7 @@ describe("QualityRuleService", () => {
   });
 
   it("保存质量规则时拒绝旧 expected_revision 字段", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service, publisher } = await create_workbench_service(database);
 
@@ -406,7 +410,7 @@ describe("QualityRuleService", () => {
   });
 
   it("读取当前质量规则切片与 revision", async () => {
-    const database = new ProjectDatabase();
+    const database = new ProjectDatabase("1.0.0");
     cleanup_databases.push(database);
     const { service } = await create_workbench_service(database);
 

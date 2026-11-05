@@ -1,6 +1,11 @@
 import type { LanguageCode } from "../../../../domain/language";
 
 export const zh_cn_app = {
+  godot_pack_order: {
+    title: "资源包优先级",
+    description: "后面的资源包会覆盖前面资源包中的同名资源",
+  },
+  game_backup_warning: "在操作前建议完整备份游戏目录 …!",
   media: {
     zoom_out: "缩小",
     zoom_in: "放大",
@@ -58,6 +63,7 @@ export const zh_cn_app = {
     select_folder: "选择文件夹",
   },
   feedback: {
+    activate_link: "处理链接失败 …",
     load_failed: "加载失败 …",
     refresh_failed: "刷新失败 …",
     query_failed: "查询失败 …",
@@ -69,6 +75,8 @@ export const zh_cn_app = {
     export_failed: "导出失败 …",
     copy_failed: "复制失败 …",
     read_failed: "读取失败 …",
+    operation_running: "正在执行操作 …",
+    operation_success: "操作成功 …",
     operation_failed: "操作失败 …",
     content_unavailable: "内容暂不可用",
     save_failed: "保存失败 …",
@@ -80,7 +88,6 @@ export const zh_cn_app = {
     no_valid_data: "没有有效数据",
     update_failed: "更新失败 …",
     project_settings_aligned: "已按当前设置更新工程设置",
-    project_cache_loading: "正在刷新工程缓存 …",
   },
   error_boundary: {
     eyebrow: "Renderer Runtime",
@@ -100,7 +107,7 @@ export const zh_cn_app = {
     duplicate_description: "检测到 {COUNT} 条重复规则，请选择处理方式 …",
   },
   update: {
-    confirm_description: "检查到 LinguaGacha v{VERSION}，是否下载更新 …?",
+    action: "更新",
     restart_confirm: "重启并更新",
     launching: "处理中 …",
   },
@@ -173,6 +180,22 @@ export const zh_cn_app = {
     language: "字字珠玑",
     logs: "日志",
   },
+  project_switcher: {
+    create: "新建工程",
+    label: "切换工程窗口",
+    current: "当前工程",
+    no_project: "工程主页",
+    instances: "运行中的窗口",
+    no_instances: "没有其他窗口",
+    loading: "正在读取窗口 …",
+    recent: "最近工程",
+    empty_recent: "暂无最近工程",
+    open_current: "在当前窗口打开",
+    open_new: "在新窗口打开",
+    load_failed: "读取窗口列表失败 …",
+    focus_failed: "切换窗口失败 …",
+    open_failed: "打开工程窗口失败 …",
+  },
   profile: {
     status: "Ciallo～(∠・ω< )⌒✮",
     status_tooltip: "打开 GitHub 项目主页",
@@ -181,10 +204,12 @@ export const zh_cn_app = {
   },
   prompt: {
     source: "原文",
-    builder_control_character_samples: "控制字符示例：",
-    builder_glossary_header: "术语表 <术语原文> -> <术语译文> #<术语信息>:",
-    builder_input: "输入：",
-    builder_preceding_context: "参考上文：",
+    builder_control_character_samples: "控制字符示例（原样保留）：",
+    builder_glossary_header:
+      "术语表（根据语境与术语说明采用）<术语原文> -> <术语译文> #<术语说明>:",
+    builder_input: "输入（逐条翻译，保留条内换行）：",
+    builder_preceding_context: "参考前文（仅供参考）：",
+    builder_following_context: "参考后文（仅供参考）：",
   },
   translation_generation: {
     action: "生成译文",
@@ -193,7 +218,7 @@ export const zh_cn_app = {
       checking: "正在检查校对警告 …",
       check_failed: "读取校对警告失败，仍可继续生成当前译文 …",
       warning_description:
-        "检查到 {COUNT} 个校对警告，推荐使用 AGENT 自动审校后再生成译文，是否确认继续 …?",
+        "检测到 {COUNT} 个校对警告，警告并非一定是错误，但建议先使用 AGENT 执行至少一次自动审校，是否确认继续生成译文 …?",
       retry_check: "重新检查",
       continue_generate: "继续生成",
     },
@@ -214,7 +239,7 @@ export const zh_cn_app = {
     json_files: "JSON 文件 (*.json)",
     excel_files: "Excel 文件 (*.xlsx)",
     supported_txt_files: "支持的文件 (*.txt)",
-    font_files: "字体文件 (*.ttf *.otf)",
+    font_files: "字体文件 (*.ttf)",
     executable_files: "可执行文件 (*.exe)",
   },
   diagnostic: {
@@ -238,6 +263,9 @@ export const zh_cn_app = {
     },
     migration: {
       path_failed: "迁移路径失败：{SOURCE_PATH} -> {DESTINATION_PATH} …",
+    },
+    network: {
+      transport_failure: "远端请求传输失败 …",
     },
     renderer: {
       main_frame_load_failed: "渲染层主框架加载失败 …",

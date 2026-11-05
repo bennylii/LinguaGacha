@@ -1,3 +1,4 @@
+import { parse_app_version, compare_app_version, type AppVersion } from "@shared/app-version";
 import { JsonTool } from "../../../shared/utils/json-tool";
 import { normalize_backend_api_base_url } from "@shared/backend-api";
 import {
@@ -7,6 +8,7 @@ import {
   type LogEntry,
   type LogLevel,
   type LogCursor,
+  type LogFileRef,
   type LogPage,
   type LogPageRequest,
 } from "@shared/log";
@@ -35,19 +37,15 @@ type ApiEnvelope<data_type> = {
 type GithubReleasePayload = {
   tag_name?: unknown;
   html_url?: unknown;
+  body?: unknown;
   assets?: unknown;
 };
 
 export type GithubReleaseUpdate = {
   latest_version: string; // GitHub release tag 归一出的三段式版本号
+  release_notes: string;
   release_url: string; // 自动更新不可用时交给 renderer 打开的发布页
   windows_zip_urls: WindowsReleaseZipUrls; // renderer 只保存 release 解析结果，目标架构由 main 判定
-};
-
-type SemanticVersion = {
-  major: number;
-  minor: number;
-  patch: number;
 };
 
 export type DesktopLocalErrorCode =
@@ -165,32 +163,8 @@ function build_api_url(base_url: string, path: string): string {
 }
 
 /** 提取三段版本用于更新比较，不参与展示文案。 */
-function parse_semantic_version(value: string): SemanticVersion | null {
-  const version_match = value.match(/(\d+)\.(\d+)\.(\d+)/u);
-  if (version_match === null) {
-    return null;
-  }
-
-  return {
-    major: Number(version_match[1]),
-    minor: Number(version_match[2]),
-    patch: Number(version_match[3]),
-  };
-}
-
-/**
- * 比较三段式版本号，返回值符号表达 left 相对 right 的新旧关系。
- */
-function compare_semantic_version(left: SemanticVersion, right: SemanticVersion): number {
-  if (left.major !== right.major) {
-    return left.major - right.major;
-  }
-
-  if (left.minor !== right.minor) {
-    return left.minor - right.minor;
-  }
-
-  return left.patch - right.patch;
+function parse_semantic_version(value: string): AppVersion | null {
+  return parse_app_version(value.match(/([0-9]+)\.([0-9]+)\.([0-9]+)/u)?.[0]);
 }
 
 /** 收窄发布元数据，保留下载选择所需的有效资产。 */
@@ -213,16 +187,17 @@ function normalize_github_release_update(
     return null;
   }
 
-  if (compare_semantic_version(latest_semantic_version, current_semantic_version) <= 0) {
+  if (compare_app_version(latest_semantic_version, current_semantic_version) <= 0) {
     return null;
   }
 
   return {
-    latest_version: `${latest_semantic_version.major}.${latest_semantic_version.minor}.${latest_semantic_version.patch}`,
+    latest_version: latest_semantic_version.value,
     release_url,
+    release_notes: typeof payload.body === "string" ? payload.body : "",
     windows_zip_urls: select_windows_release_zip_urls(
       payload.assets,
-      `${latest_semantic_version.major}.${latest_semantic_version.minor}.${latest_semantic_version.patch}`,
+      latest_semantic_version.value,
     ),
   };
 }
@@ -360,6 +335,7 @@ function normalize_log_entry(payload: Record<string, unknown>): LogEntry | null 
   return {
     id: payload.id,
     date: payload.date,
+    instance: payload.instance,
     line: payload.line,
     revision: payload.revision,
     created_at: payload.created_at,
@@ -391,6 +367,7 @@ function normalize_log_detail(payload: unknown): LogDetail | null {
   return {
     id: detail["id"],
     date: detail["date"],
+    instance: detail["instance"],
     line: detail["line"],
     revision: detail["revision"],
     created_at: detail["created_at"],
@@ -410,23 +387,30 @@ function normalize_log_detail(payload: unknown): LogDetail | null {
   };
 }
 
-/** 物理行号属于记录身份，内容代次属于文件有效性，两者独立校验。 */
+/** 物理行号属于记录身份，内容代次属于文件有效性，实例决定文件归属，三者独立校验。 */
 function read_log_identity(
   value: Record<string, unknown>,
-): value is Record<string, unknown> & Pick<LogEntry, "id" | "date" | "line" | "revision"> {
+): value is Record<string, unknown> &
+  Pick<LogEntry, "id" | "date" | "instance" | "line" | "revision"> {
   return (
     typeof value.date === "string" &&
     /^\d{8}$/.test(value.date) &&
+    is_log_instance(value.instance) &&
     typeof value.line === "number" &&
     Number.isSafeInteger(value.line) &&
     value.line > 0 &&
     typeof value.revision === "string" &&
     value.revision !== "" &&
-    value.id === `${value.date}:${String(value.line)}`
+    value.id === `${value.date}:${String(value.instance)}:${String(value.line)}`
   );
 }
 
-/** 收窄日期、行数和内容代次，拒绝失真的分页边界。 */
+/** 实例标识取进程 PID，PID 复用时带启动时间后缀。 */
+function is_log_instance(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-z]+(?:-[0-9a-z]+)?$/.test(value);
+}
+
+/** 收窄日期、实例、行数和内容代次，拒绝失真的分页边界。 */
 function read_cursor(value: unknown): LogCursor | null {
   if (value === null) return null;
   if (typeof value !== "object") throw new Error("Invalid log cursor");
@@ -434,6 +418,7 @@ function read_cursor(value: unknown): LogCursor | null {
   if (
     typeof cursor.date !== "string" ||
     !/^\d{8}$/.test(cursor.date) ||
+    !is_log_instance(cursor.instance) ||
     typeof cursor.line !== "number" ||
     !Number.isSafeInteger(cursor.line) ||
     cursor.line < 0 ||
@@ -441,18 +426,25 @@ function read_cursor(value: unknown): LogCursor | null {
     cursor.revision === ""
   )
     throw new Error("Invalid log cursor");
-  return { date: cursor.date, line: cursor.line, revision: cursor.revision };
+  return {
+    date: cursor.date,
+    instance: cursor.instance,
+    line: cursor.line,
+    revision: cursor.revision,
+  };
 }
 
-/** 只接受后端返回的有效日期列表。 */
-export async function read_log_dates(signal?: AbortSignal): Promise<string[]> {
-  const result = await api_fetch<{ dates: unknown }>("/api/logs/files", {}, signal);
-  if (
-    !Array.isArray(result.dates) ||
-    !result.dates.every((date: unknown) => typeof date === "string" && /^\d{8}$/.test(date))
-  )
-    throw new Error("Invalid log dates");
-  return result.dates as string[];
+/** 只接受后端返回的有效文件列表，当前实例标记缺失时按其他实例处理。 */
+export async function read_log_files(signal?: AbortSignal): Promise<LogFileRef[]> {
+  const result = await api_fetch<{ files: unknown }>("/api/logs/files", {}, signal);
+  if (!Array.isArray(result.files)) throw new Error("Invalid log files");
+  return result.files.map((value: unknown) => {
+    if (typeof value !== "object" || value === null) throw new Error("Invalid log files");
+    const file = value as Record<string, unknown>;
+    if (typeof file.date !== "string" || !/^\d{8}$/.test(file.date)) throw new Error("Invalid log files");
+    if (!is_log_instance(file.instance)) throw new Error("Invalid log files");
+    return { date: file.date, instance: file.instance, current: file.current === true };
+  });
 }
 
 /** 收窄完整分页响应，避免异常摘要进入页面缓存。 */

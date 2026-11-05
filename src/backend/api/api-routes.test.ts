@@ -39,6 +39,10 @@ const POST_PATHS = new Set([
   "/api/logs/files",
   "/api/logs/page",
   "/api/diagnostics/renderer-error",
+  "/api/app/instances",
+  "/api/app/instances/focus",
+  "/api/app/instances/open",
+  "/api/app/focus",
   "/api/runtime/snapshot",
   "/api/agent/input-status",
   "/api/agent/message",
@@ -53,6 +57,8 @@ const POST_PATHS = new Set([
   "/api/agent/queue/send",
   "/api/agent/round/revise",
   "/api/agent/round/fork",
+  "/api/agent/timeline/page",
+  "/api/agent/timeline/entry",
   "/api/agent/continue",
   "/api/agent/context/compact",
   "/api/agent/stop",
@@ -64,7 +70,21 @@ const POST_PATHS = new Set([
   "/api/session/source-files/summary",
   "/api/session/project/open",
   "/api/session/project/create",
-  "/api/session/project/open-preview",
+  "/api/remote/novel/preview",
+  "/api/remote/novel/sync/preview",
+  "/api/remote/novel/align/preview",
+  "/api/remote/novel/sync",
+  "/api/remote/workspace/start",
+  "/api/remote/workspace/cancel",
+  "/api/remote/workspace/snapshot",
+  "/api/remote/source/read",
+  "/api/remote/source/bind",
+  "/api/remote/auth/status",
+  "/api/remote/auth/login",
+  "/api/remote/auth/login/cancel",
+  "/api/remote/auth/import",
+  "/api/remote/auth/clear",
+  "/api/remote/auth/bridge",
   "/api/workbench/snapshot",
   "/api/project/translation-stats",
   "/api/workbench/files/import",
@@ -72,7 +92,7 @@ const POST_PATHS = new Set([
   "/api/workbench/file/delete",
   "/api/workbench/files/reorder",
   "/api/workbench/files/preview",
-  "/api/workbench/settings-alignment/apply",
+  "/api/project/settings/update",
   "/api/workbench/translation/reset",
   "/api/proofreading/query",
   "/api/proofreading/page",
@@ -102,6 +122,7 @@ const POST_PATHS = new Set([
   "/api/translation/files/generate",
   "/api/toolbox/game-font/inspect",
   "/api/toolbox/game-font/apply",
+  "/api/toolbox/translation-transfer/apply",
   "/api/settings/app",
   "/api/settings/update",
   "/api/settings/recent-projects/add",
@@ -214,6 +235,16 @@ describe("register_api_routes", () => {
       read_post_handler(fixture.post_json, "/api/agent/context/compact")({}),
     ).resolves.toEqual({ revision: 7 });
     expect(fixture.compact_context).toHaveBeenCalledWith();
+    const page = { chatId: "chat", before: null, limit: 40 };
+    await expect(
+      read_post_handler(fixture.post_json, "/api/agent/timeline/page")(page),
+    ).resolves.toMatchObject({ request: page });
+    expect(fixture.get_timeline_page).toHaveBeenCalledWith(page);
+    const entry_request = { chatId: "chat", id: "tool-1" };
+    await expect(
+      read_post_handler(fixture.post_json, "/api/agent/timeline/entry")(entry_request),
+    ).resolves.toMatchObject({ request: entry_request });
+    expect(fixture.get_timeline_entry).toHaveBeenCalledWith(entry_request);
     const revision = { entryId: "assistant-1", message: { text: "修订", attachments: [] } };
     await expect(
       read_post_handler(fixture.post_json, "/api/agent/round/revise")(revision),
@@ -245,6 +276,21 @@ describe("register_api_routes", () => {
     expect(fixture.summarize_source_files).toHaveBeenCalledWith(request);
   });
 
+  it("小说源补绑定路由校验地址并转交服务", async () => {
+    const fixture = create_route_fixture();
+    const source = { binding: null, asset_present: false, snapshot_present: false };
+    fixture.bind_source.mockResolvedValueOnce(source);
+    const handler = read_post_handler(fixture.post_json, "/api/remote/source/bind");
+    const url = "https://n.novelia.cc/novel/kakuyomu/123456";
+
+    await expect(handler({ url })).resolves.toEqual({ source });
+    expect(fixture.bind_source).toHaveBeenCalledWith(url);
+    await expect(handler({ url: " " })).rejects.toMatchObject({
+      code: "request.validation_failed",
+    });
+    expect(fixture.bind_source).toHaveBeenCalledTimes(1);
+  });
+
   it("设置更新只调用组合根提供的受保护写入口", () => {
     const fixture = create_route_fixture();
 
@@ -252,6 +298,13 @@ describe("register_api_routes", () => {
       read_post_handler(fixture.post_json, "/api/settings/update")({ app_language: "ZH" }),
     ).toEqual({ settings: { app_language: "ZH" } });
     expect(fixture.update_settings).toHaveBeenCalledWith({ app_language: "ZH" });
+  });
+
+  it("译文生成路由原样转交工程和输出目录", () => {
+    const fixture = create_route_fixture();
+    const request = { project_path: "E:/demo.lg", output_directory: "E:/output" };
+    read_post_handler(fixture.post_json, "/api/translation/files/generate")(request);
+    expect(fixture.generate_files).toHaveBeenCalledExactlyOnceWith(request);
   });
 
   it("组合选模载荷原样转交唯一选模入口", () => {
@@ -290,11 +343,33 @@ function create_route_fixture() {
   const compact_context = vi.fn(async () => acknowledgement);
   const stop = vi.fn(() => acknowledgement);
   const reset = vi.fn(async () => acknowledgement);
+  const get_timeline_page = vi.fn(async (request: JsonRecord) => ({
+    chatId: "chat",
+    revision: 1,
+    entries: [],
+    headers: [],
+    rounds: [],
+    hasEarlier: false,
+    nextCursor: null,
+    request,
+  }));
+  const get_timeline_entry = vi.fn(async (request: JsonRecord) => ({
+    chatId: "chat",
+    revision: 1,
+    entry: null,
+    request,
+  }));
   const update_settings = vi.fn((request: JsonRecord) => ({ settings: request }));
+  const generate_files = vi.fn();
   const select_model = vi.fn((request: JsonRecord) => ({ selected: request }));
   const copy_model = vi.fn();
   const source_file_summary = { source_file_count: 1, format_hit_counts: { txt: 1 } };
   const summarize_source_files = vi.fn(() => source_file_summary);
+  const bind_source = vi.fn(async () => ({
+    binding: null,
+    asset_present: false,
+    snapshot_present: false,
+  }));
   const agent = {
     get_snapshot: vi.fn(() => ({
       revision: 0,
@@ -316,6 +391,8 @@ function create_route_fixture() {
     compact_context,
     stop,
     reset,
+    get_timeline_page,
+    get_timeline_entry,
   } as unknown as AgentService;
   const services = {
     modelCatalog: { get_snapshot: () => catalog_snapshot },
@@ -325,9 +402,15 @@ function create_route_fixture() {
       summary: {},
       content: {},
     },
+    remote: {
+      sources: { bind_existing: bind_source },
+      auth: {},
+      workspace: {},
+      chapters: {},
+    },
     proofreading: { query: {}, commands: {} },
     quality: { statistics: {}, rules: {}, prompts: {} },
-    files: { preview: {}, translationGeneration: {} },
+    files: { preview: {}, translationGeneration: { generate_files } },
     model: {
       get_selection_snapshot: vi.fn(() => ({
         model_selection: { translation: "a", agent: "c" },
@@ -379,11 +462,15 @@ function create_route_fixture() {
     resolve_write_approval,
     reorder_queued_messages,
     update_queued_message,
+    get_timeline_page,
+    get_timeline_entry,
     source_file_summary,
     summarize_source_files,
+    bind_source,
     start_task,
     stop,
     update_settings,
+    generate_files,
     select_model,
     copy_model,
   };

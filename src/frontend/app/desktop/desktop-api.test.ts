@@ -82,8 +82,9 @@ describe("desktop-api", () => {
       status: "ready",
       entries: [
         {
-          id: "20260913:1",
+          id: "20260913:1234:1",
           date: "20260913",
+          instance: "1234",
           line: 1,
           revision: "rev",
           created_at: "2026-09-13T00:00:00Z",
@@ -93,8 +94,8 @@ describe("desktop-api", () => {
           message_length: 2,
         },
       ],
-      before: { date: "20260913", line: 0, revision: "rev" },
-      after: { date: "20260913", line: 1, revision: "rev" },
+      before: { date: "20260913", instance: "1234", line: 0, revision: "rev" },
+      after: { date: "20260913", instance: "1234", line: 1, revision: "rev" },
       has_more: false,
     };
     const fetch_mock = vi.fn(
@@ -104,16 +105,39 @@ describe("desktop-api", () => {
     const { read_log_page } = await import("./desktop-api");
     const controller = new AbortController();
     await expect(
-      read_log_page({ date: "20260913", direction: "latest" }, controller.signal),
+      read_log_page({ date: "20260913", instance: "1234", direction: "latest" }, controller.signal),
     ).resolves.toEqual(data);
     expect(fetch_mock).toHaveBeenCalledWith(
       expect.stringContaining("/api/logs/page"),
       expect.objectContaining({ signal: controller.signal }),
     );
     data.entries[0]!.line = -1;
-    await expect(read_log_page({ date: "20260913", direction: "latest" })).rejects.toThrow(
-      "Invalid log entry",
+    await expect(
+      read_log_page({ date: "20260913", instance: "1234", direction: "latest" }),
+    ).rejects.toThrow("Invalid log entry");
+  });
+
+  it("文件列表按日期与实例收窄，缺失当前标记按其他实例处理", async () => {
+    install_desktop_api_host("http://127.0.0.1:38191/");
+    const data = {
+      files: [
+        { date: "20260913", instance: "1234", current: true },
+        { date: "20260913", instance: "5678-1a2b", current: false },
+        { date: "20260912", instance: "1234" },
+      ],
+    };
+    const fetch_mock = vi.fn(
+      async () => ({ ok: true, status: 200, json: async () => ({ ok: true, data }) }) as Response,
     );
+    vi.stubGlobal("fetch", fetch_mock);
+    const { read_log_files } = await import("./desktop-api");
+    await expect(read_log_files()).resolves.toEqual([
+      { date: "20260913", instance: "1234", current: true },
+      { date: "20260913", instance: "5678-1a2b", current: false },
+      { date: "20260912", instance: "1234", current: false },
+    ]);
+    data.files[0]!.instance = "../evil";
+    await expect(read_log_files()).rejects.toThrow("Invalid log files");
   });
 
   it("read_log_detail 读取完整日志详情", async () => {
@@ -125,8 +149,9 @@ describe("desktop-api", () => {
           ok: true,
           data: {
             detail: {
-              id: "20260913:1",
+              id: "20260913:1234:1",
               date: "20260913",
+              instance: "1234",
               line: 1,
               revision: "rev",
               created_at: "2026-04-26T00:00:00.000+00:00",
@@ -156,8 +181,8 @@ describe("desktop-api", () => {
 
     const { read_log_detail } = await import("./desktop-api");
 
-    await expect(read_log_detail("20260913:1", "rev")).resolves.toMatchObject({
-      id: "20260913:1",
+    await expect(read_log_detail("20260913:1234:1", "rev")).resolves.toMatchObject({
+      id: "20260913:1234:1",
       level: "error",
       source: "engine-worker",
       content: {
@@ -265,6 +290,7 @@ describe("desktop-api", () => {
         ok: true,
         status: 200,
         json: async () => ({
+          body: "  # 标题\n\n    缩进\n",
           tag_name: "MANUAL_BUILD_v1.2.4",
           html_url: "https://github.com/neavo/LinguaGacha/releases/tag/MANUAL_BUILD_v1.2.4",
           assets: [
@@ -302,6 +328,7 @@ describe("desktop-api", () => {
     expect(update).toEqual({
       latest_version: "1.2.4",
       release_url: "https://github.com/neavo/LinguaGacha/releases/tag/MANUAL_BUILD_v1.2.4",
+      release_notes: "  # 标题\n\n    缩进\n",
       windows_zip_urls: {
         x64: "https://github.com/neavo/LinguaGacha/releases/download/MANUAL_BUILD_v1.2.4/LinguaGacha_v1.2.4_Windows_x64.zip",
         arm64:
@@ -337,6 +364,7 @@ describe("desktop-api", () => {
     await expect(check_github_release_update("1.2.3")).resolves.toEqual({
       latest_version: "1.2.4",
       release_url: "https://github.com/neavo/LinguaGacha/releases/tag/v1.2.4",
+      release_notes: "",
       windows_zip_urls: {
         arm64: "https://github.com/neavo/LinguaGacha/releases/download/v1.2.4/arm64.zip",
       },
@@ -370,6 +398,7 @@ describe("desktop-api", () => {
     await expect(check_github_release_update("1.2.3")).resolves.toEqual({
       latest_version: "1.2.4",
       release_url: "https://github.com/neavo/LinguaGacha/releases/tag/v1.2.4",
+      release_notes: "",
       windows_zip_urls: {},
     });
   });
@@ -462,5 +491,23 @@ describe("desktop-api", () => {
       message: "The file changed on disk.",
     });
     await expect(promise).rejects.toBeInstanceOf(DesktopApiError);
+  });
+
+  it.each([null, 42])("无效发行正文仍返回更新", async (body) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          tag_name: "v1.2.4",
+          html_url: "https://github.com/neavo/LinguaGacha/releases/tag/v1.2.4",
+          body,
+        }),
+      })),
+    );
+    const { check_github_release_update } = await import("./desktop-api");
+    await expect(check_github_release_update("1.2.3")).resolves.toMatchObject({
+      release_notes: "",
+    });
   });
 });

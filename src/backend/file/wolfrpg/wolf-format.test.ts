@@ -1,3 +1,4 @@
+import { GameDirectoryOperations } from "../shared/game/game-directory-operations";
 import { expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -26,7 +27,12 @@ it("游戏根目录、EXE 和 Data 去重为一个资产，解包覆盖散装文
       0,
     ),
   );
-  const service = new FileFormatService({ target_language: "ZH" }, async () => null, native);
+  const service = new FileFormatService(
+    new GameDirectoryOperations(),
+    { target_language: "ZH" },
+    async () => null,
+    native,
+  );
   const sources = [root, path.join(root, "GamePro.exe"), path.join(root, "Data")];
   const entries = await service.collect_source_file_entries(sources);
   expect(entries).toHaveLength(1);
@@ -34,15 +40,10 @@ it("游戏根目录、EXE 和 Data 去重为一个资产，解包覆盖散装文
   expect((await service.summarize_source_files(sources)).format_hit_counts.wolfrpg).toBe(1);
   const asset = await service.prepare_source(entries[0]!);
   expect(fs.existsSync(path.join(root, "Data.wolf"))).toBe(false);
-  for (const [name, bytes] of files) {
+  for (const [name, bytes] of files)
     expect(fs.readFileSync(path.join(root, name)).equals(bytes)).toBe(true);
-    expect(fs.readFileSync(path.join(root, "backup_lg", name)).equals(bytes)).toBe(true);
-  }
   const repeat = await service.collect_source_file_entries([root]);
   await expect(service.prepare_source(repeat[0]!)).resolves.toBeDefined();
-  expect(
-    (await service.collect_source_file_entries([path.join(root, "backup_lg")]))[0]!.source.kind,
-  ).toBe("failure");
   const parsed = await service.parse_asset("game.zip", asset.content, "WOLFRPG");
   if (parsed.kind !== "items") throw new Error("Expected items");
   expect(parsed.warnings).toEqual([]);
@@ -97,15 +98,22 @@ it.each([
   const context = await create_wolf_context(
     new Map([...files].map(([name, bytes]) => [name, { async: async () => bytes }])),
   );
-  const system = await context.read("Data/BasicData/SysDatabase.dat", new Uint8Array());
+  const system = await context.read(
+    "Data/BasicData/SysDatabase.dat",
+    files.get("Data/BasicData/SysDatabase.dat")!,
+  );
   expect(system!.slots.map((slot) => [slot.text, slot.usage])).toEqual([
     ["MapData/Map001.mps", "metadata"],
     ["城镇", usage],
   ]);
 });
 
-it("缺少核心配对整项失败，损坏的独立地图保留警告和零条目原稿", async () => {
-  const service = new FileFormatService({ target_language: "ZH" }, async () => null),
+it("缺少核心配对保留独立成员条目，损坏地图报告局部失败", async () => {
+  const service = new FileFormatService(
+      new GameDirectoryOperations(),
+      { target_language: "ZH" },
+      async () => null,
+    ),
     zip = new JSZip();
   for (const [name, bytes] of wolf_files()) zip.file(name, bytes);
   zip.file("Data/MapData/Broken.mps", Buffer.from([1]));
@@ -119,5 +127,10 @@ it("缺少核心配对整项失败，损坏的独立地图保留警告和零条�
   zip.remove("Data/BasicData/SysDatabase.project");
   await expect(
     service.parse_asset("game.zip", await zip.generateAsync({ type: "uint8array" }), "WOLFRPG"),
-  ).rejects.toThrow("Missing WOLF companion");
+  ).resolves.toMatchObject({
+    warnings: expect.arrayContaining([
+      expect.objectContaining({ code: "internal_file_parse_failed" }),
+    ]),
+    items: expect.arrayContaining([expect.objectContaining({ file_type: "WOLFRPG" })]),
+  });
 });

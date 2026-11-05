@@ -8,16 +8,17 @@ const FALLBACK_CLASSES = new Set(["FontFile", "SystemFont"]); // 带 allow_syste
  * 默认值省略于二进制资源，只需修改显式的 false，等长 bool 写回保留资源坐标。
  */
 export function enable_system_fallback(bytes: Buffer): Buffer {
-  const edits = read_resource(bytes)
-    .properties.filter(
-      (p) =>
-        FALLBACK_CLASSES.has(p.className) &&
-        p.name === "allow_system_fallback" &&
-        p.value.type === 2 &&
-        p.value.value === false,
-    )
-    .map((p) => ({ start: p.value.start + 4, end: p.value.start + 8, bytes: u32(1) }));
-  return patch_resource(bytes, edits);
+  const doc = read_resource(bytes),
+    edits = doc.properties
+      .filter(
+        (p) =>
+          FALLBACK_CLASSES.has(p.className) &&
+          p.name === "allow_system_fallback" &&
+          p.value.type === 2 &&
+          p.value.value === false,
+      )
+      .map((p) => ({ start: p.value.start + 4, end: p.value.start + 8, bytes: u32(1) }));
+  return patch_resource(doc, edits);
 }
 
 const FONT_TOOL_RESOURCE = "lg_font.fontdata"; // 导入映射与默认主题字体共用的资源文件名。
@@ -28,7 +29,7 @@ const DISABLE_OVERRIDE = "application/config/disable_project_settings_override";
 
 /**
  * 字体修改改写的成员：FontFile 导入映射与游戏根目录的 `override.cfg`。
- * 只含工具这一节的 `override.cfg` 是工具产物，不收集，避免后续导入把它当原件备份。
+ * 只含工具这一节的 `override.cfg` 是工具产物，不当作原件收集。
  */
 export function is_godot_font_file(name: string, read: (name: string) => Uint8Array): boolean {
   const lower = name.toLowerCase();
